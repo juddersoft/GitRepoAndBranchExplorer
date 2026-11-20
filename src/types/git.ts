@@ -1,0 +1,81 @@
+export interface BranchInfo {
+  /** Short name, e.g. `featurebranch3` (local) or `origin/featurebranch3` (remote). */
+  name: string;
+  /** Name without the `<remote>/` prefix for remote branches; same as `name` for local branches. */
+  displayName: string;
+  /** Full ref, e.g. `refs/heads/featurebranch3` or `refs/remotes/origin/featurebranch3`. */
+  fullName: string;
+  isCurrent: boolean;
+  isRemote: boolean;
+  remoteName: string | null;
+  tipHash: string;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+}
+
+export interface RemoteGroup {
+  remoteName: string;
+  branches: BranchInfo[];
+}
+
+export interface TagInfo {
+  name: string;
+  fullName: string;
+  /** Commit the tag points at (annotated tags are peeled to their commit). */
+  targetHash: string;
+}
+
+export interface RefBadge {
+  kind: 'head' | 'localBranch' | 'remoteBranch' | 'tag';
+  label: string;
+}
+
+export interface CommitNode {
+  hash: string;
+  shortHash: string;
+  parents: string[];
+  subject: string;
+  authorName: string;
+  authorEmail: string;
+  authorDateIso: string;
+  /** Unix epoch seconds. */
+  authorTimestamp: number;
+  refs: RefBadge[];
+}
+
+export type ChangedFileStatus = 'A' | 'M' | 'D' | 'R' | 'C' | 'T' | 'U';
+
+export interface ChangedFileEntry {
+  status: ChangedFileStatus;
+  /** Repository-relative path, using `/` separators (the destination path for renames/copies). */
+  path: string;
+  /** Source path for renames (`R`) and copies (`C`). */
+  oldPath?: string;
+}
+
+export interface CommitDetails {
+  hash: string;
+  /** Full commit message (subject and body). */
+  body: string;
+  files: ChangedFileEntry[];
+}
+
+export interface ExternalIntegrationsInfo {
+  gitGraphAvailable: boolean;
+  gitGraphExtensionId: string | null;
+  /** Normalized `https://github.com/<owner>/<repo>` URL for `origin`, if it is hosted on GitHub. */
+  githubRemoteUrl: string | null;
+}
+
+export interface RepoSnapshot {
+  repoName: string;
+  repoRoot: string;
+  /** Branch name, or `HEAD (<8-char sha>)` when detached. */
+  currentBranch: string;
+  isDetachedHead: boolean;
+  localBranches: BranchInfo[];
+  remoteGroups: RemoteGroup[];
+  tags: TagInfo[];
+  commits: CommitNode[];
+}

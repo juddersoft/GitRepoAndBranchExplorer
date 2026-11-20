@@ -1,0 +1,15 @@
+// Dependencies, build outputs, test artifacts & packaged extensions
+(?d)node_modules
+(?d)dist
+(?d)coverage
+(?d).vscode-test
+(?d).vsix
+(?d).tsbuildinfo
+(?d)*.log
+
+// Local environment & OS cruft
+(?d).env
+(?d).env.local
+(?d).DS_Store
+(?d)Thumbs.db
+(?d)desktop.ini

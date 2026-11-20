@@ -1,0 +1,22 @@
+#Dependencies & build outputs
+
+node_modules/
+dist/
+coverage/
+.vscode-test/
+*.vsix
+*.tsbuildinfo
+
+#Logs & local environment
+
+*.log
+npm-debug.log*
+.env
+.env.local
+
+#OS & editor temporary files
+
+.DS_Store
+Thumbs.db
+desktop.ini
+*.sw?

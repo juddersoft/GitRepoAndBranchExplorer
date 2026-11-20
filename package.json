@@ -1,0 +1,65 @@
+{
+  "name": "git-repo-and-branch-explorer",
+  "displayName": "Git Repo & Branch Explorer",
+  "description": "Unified Visual Studio-style Git Repository, Branch Explorer, and Commit History Graph for VS Code.",
+  "version": "0.5.0",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "SCM Providers",
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onView:gitRepoAndBranchExplorer.launcher",
+    "onCommand:gitRepoAndBranchExplorer.openRepository"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "gitRepoAndBranchExplorer-container",
+          "title": "Git Repo & Branch Explorer",
+          "icon": "media/git-repo-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "gitRepoAndBranchExplorer-container": [
+        {
+          "id": "gitRepoAndBranchExplorer.launcher",
+          "name": "Repository Explorer",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "gitRepoAndBranchExplorer.openRepository",
+        "title": "Git Repo & Branch Explorer: Open Repository Window",
+        "icon": "$(git-branch)"
+      },
+      {
+        "command": "gitRepoAndBranchExplorer.refresh",
+        "title": "Git Repo & Branch Explorer: Refresh",
+        "icon": "$(refresh)"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.95.0",
+    "@vitest/coverage-v8": "^2.1.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}
