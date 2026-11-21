@@ -21,6 +21,10 @@ export const REFRESH_COMMAND = 'gitRepoAndBranchExplorer.refresh';
 
 const PANEL_TITLE = 'Git Repository';
 
+/** Git metadata whose changes mean branches, HEAD or remote refs moved outside this panel. */
+export const GIT_WATCH_GLOB = '.git/{HEAD,FETCH_HEAD,ORIG_HEAD,packed-refs,refs/**}';
+export const GIT_WATCH_DEBOUNCE_MS = 400;
+
 /** Prefers Git's own `fatal:`/`error:` line, since network commands print progress to stderr first. */
 function describeError(err: unknown): string {
   if (err instanceof GitExecutionError) {
@@ -81,6 +85,10 @@ export class GitRepoPanel {
     githubRemoteUrl: null,
   };
   private operationInProgress = false;
+  private gitWatcher: vscode.FileSystemWatcher | undefined;
+  private gitWatcherSubscriptions: vscode.Disposable[] = [];
+  private watchedRepoRoot: string | null = null;
+  private watchDebounceTimer: ReturnType<typeof setTimeout> | undefined;
 
   public static createOrShow(extensionUri: vscode.Uri): void {
     const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
@@ -360,6 +368,7 @@ export class GitRepoPanel {
 
     if (initState.workspacePath === null) {
       this.lastSnapshot = null;
+      this.updateGitWatcher(null);
       this.panel.title = PANEL_TITLE;
       this.post({
         type: 'repoError',
@@ -375,6 +384,7 @@ export class GitRepoPanel {
         return;
       }
       this.lastSnapshot = snapshot;
+      this.updateGitWatcher(snapshot.repoRoot);
       this.panel.title = `${PANEL_TITLE} (${snapshot.currentBranch})`;
       this.post({ type: 'repoSnapshot', payload: snapshot });
       void this.publishIntegrations();
@@ -383,9 +393,59 @@ export class GitRepoPanel {
         return;
       }
       this.lastSnapshot = null;
+      this.updateGitWatcher(null);
       this.panel.title = PANEL_TITLE;
       this.post({ type: 'repoError', payload: toRepoErrorPayload(err) });
     }
+  }
+
+  /** (Re)creates the `.git` watcher only when the repository root actually changes. */
+  private updateGitWatcher(repoRoot: string | null): void {
+    if (repoRoot === this.watchedRepoRoot) {
+      return;
+    }
+    this.disposeGitWatcher();
+    if (repoRoot === null || this.disposed) {
+      return;
+    }
+    const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(repoRoot, GIT_WATCH_GLOB));
+    const onEvent = (uri: vscode.Uri): void => this.onGitMetadataChanged(uri);
+    this.gitWatcherSubscriptions = [watcher.onDidCreate(onEvent), watcher.onDidChange(onEvent), watcher.onDidDelete(onEvent)];
+    this.gitWatcher = watcher;
+    this.watchedRepoRoot = repoRoot;
+  }
+
+  private onGitMetadataChanged(uri: vscode.Uri): void {
+    // Git writes refs via `<name>.lock` then renames; only the final rename is a meaningful change.
+    if (this.disposed || uri.fsPath.endsWith('.lock')) {
+      return;
+    }
+    this.clearWatchDebounce();
+    this.watchDebounceTimer = setTimeout(() => {
+      this.watchDebounceTimer = undefined;
+      // A panel-initiated operation refreshes itself when it finishes.
+      if (!this.disposed && !this.operationInProgress) {
+        void this.loadRepository();
+      }
+    }, GIT_WATCH_DEBOUNCE_MS);
+  }
+
+  private clearWatchDebounce(): void {
+    if (this.watchDebounceTimer !== undefined) {
+      clearTimeout(this.watchDebounceTimer);
+      this.watchDebounceTimer = undefined;
+    }
+  }
+
+  private disposeGitWatcher(): void {
+    this.clearWatchDebounce();
+    for (const subscription of this.gitWatcherSubscriptions) {
+      subscription.dispose();
+    }
+    this.gitWatcherSubscriptions = [];
+    this.gitWatcher?.dispose();
+    this.gitWatcher = undefined;
+    this.watchedRepoRoot = null;
   }
 
   private post(message: ExtensionToWebviewMessage): void {
@@ -399,6 +459,7 @@ export class GitRepoPanel {
       return;
     }
     this.disposed = true;
+    this.disposeGitWatcher();
     if (GitRepoPanel.currentPanel === this) {
       GitRepoPanel.currentPanel = undefined;
     }

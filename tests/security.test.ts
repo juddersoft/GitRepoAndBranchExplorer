@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { validateGitRef } from '../src/git/gitExecutor';
-import { buildRefMap, parseForEachRefOutput, parseGitLogOutput } from '../src/git/gitService';
+import { buildRefMap, isValidCommitHash, parseForEachRefOutput, parseGitLogOutput } from '../src/git/gitService';
 import { isExtensionToWebviewMessage, isValidWebviewMessage } from '../src/types/messages';
 import { buildCspHeader, getNonce } from '../src/webview/security';
 
@@ -136,10 +136,11 @@ describe('isValidWebviewMessage rejects hostile payloads', () => {
     expect(isValidWebviewMessage({ type: 'checkoutBranch', payload: { branchName: 'x'.repeat(1_000_000) } })).toBe(false);
   });
 
-  it('only accepts lowercase hex SHA-1 or SHA-256 commit hashes', () => {
+  it('accepts SHA-1 or SHA-256 hex commit hashes in either case and nothing else', () => {
     expect(isValidWebviewMessage({ type: 'copyCommitHash', payload: { hash: SHA_A } })).toBe(true);
     expect(isValidWebviewMessage({ type: 'copyCommitHash', payload: { hash: 'c'.repeat(64) } })).toBe(true);
-    for (const hash of ['g'.repeat(40), 'A'.repeat(40), 'a'.repeat(39), 'a'.repeat(41), `${SHA_A}\n`, `${'a'.repeat(39)};`, '<script>', 'a'.repeat(10_000)]) {
+    expect(isValidWebviewMessage({ type: 'copyCommitHash', payload: { hash: 'A'.repeat(40) } })).toBe(true);
+    for (const hash of ['g'.repeat(40), 'a'.repeat(39), 'a'.repeat(41), 'a'.repeat(63), 'a'.repeat(65), `${SHA_A}\n`, `${'a'.repeat(39)};`, '<script>', 'a'.repeat(10_000)]) {
       expect(isValidWebviewMessage({ type: 'copyCommitHash', payload: { hash } })).toBe(false);
     }
   });
@@ -193,6 +194,17 @@ describe('Phase 5 webview message validators', () => {
       expect(isValidWebviewMessage({ type })).toBe(false);
     }
     expect(isValidWebviewMessage(diff({ hash: 'HEAD~1' }))).toBe(false);
+  });
+
+  it('agrees with GitService on SHA-1/SHA-256 hash lengths for every hash-bearing message', () => {
+    const samples = ['a'.repeat(39), SHA_A, 'a'.repeat(41), 'e'.repeat(63), 'e'.repeat(64), 'e'.repeat(65), `${'e'.repeat(63)}z`];
+    for (const hash of samples) {
+      const expected = isValidCommitHash(hash);
+      expect(expected).toBe(hash.length === 40 || hash === 'e'.repeat(64));
+      expect(isValidWebviewMessage({ type: 'requestCommitDetails', payload: { hash } })).toBe(expected);
+      expect(isValidWebviewMessage({ type: 'openCommitOnGitHub', payload: { hash } })).toBe(expected);
+      expect(isValidWebviewMessage(diff({ hash }))).toBe(expected);
+    }
   });
 
   it.each([

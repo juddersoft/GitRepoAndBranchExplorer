@@ -34,23 +34,24 @@ export type GitRunner = (args: readonly string[], cwd: string, options?: ExecGit
 /** Network operations (fetch/pull/push) may legitimately take much longer than local reads. */
 export const NETWORK_GIT_TIMEOUT_MS = 120_000;
 
-const STRICT_COMMIT_HASH = /^[0-9a-f]{40}$/i;
+const STRICT_COMMIT_HASH = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i;
 
-/** Strict 40-character hex SHA-1 commit hash check applied before any hash reaches Git. */
+/** Full-length SHA-1 (40 hex) or SHA-256 (64 hex) commit hash check applied before any hash reaches Git. */
 export function isValidCommitHash(value: unknown): value is string {
   return typeof value === 'string' && STRICT_COMMIT_HASH.test(value);
 }
 
+/** Validates a commit hash and returns it lowercased for use in Git arguments. */
 function assertCommitHash(hash: string): string {
   if (!isValidCommitHash(hash)) {
     throw new Error('Invalid commit hash.');
   }
-  return hash;
+  return hash.toLowerCase();
 }
 
 /**
  * Validates a `<hash>[^]:<relativePath>` revision spec for `git show`, rejecting option injection,
- * absolute paths and `..` traversal. Returns the spec unchanged when valid.
+ * absolute paths and `..` traversal. Returns the spec with its hash lowercased when valid.
  */
 export function validateRevSpec(revSpec: string): string {
   if (typeof revSpec !== 'string' || revSpec.startsWith('-')) {
@@ -62,14 +63,15 @@ export function validateRevSpec(revSpec: string): string {
   }
   const rev = revSpec.slice(0, colon);
   const filePath = revSpec.slice(colon + 1);
-  const hash = rev.endsWith('^') ? rev.slice(0, -1) : rev;
+  const isParent = rev.endsWith('^');
+  const hash = isParent ? rev.slice(0, -1) : rev;
   if (!isValidCommitHash(hash)) {
-    throw new Error('Revision spec must start with a 40-character commit hash.');
+    throw new Error('Revision spec must start with a full 40- or 64-character commit hash.');
   }
   if (!isSafeRepoRelativePath(filePath)) {
     throw new Error('Revision spec path must be a safe repository-relative path.');
   }
-  return revSpec;
+  return `${hash.toLowerCase()}${isParent ? '^' : ''}:${filePath}`;
 }
 
 /**
@@ -332,8 +334,8 @@ export class GitService {
     };
   }
 
-  public async getCommitDetails(repoRoot: string, hash: string): Promise<CommitDetails> {
-    assertCommitHash(hash);
+  public async getCommitDetails(repoRoot: string, commitHash: string): Promise<CommitDetails> {
+    const hash = assertCommitHash(commitHash);
     const [body, diffTree] = await Promise.all([
       this.runGit(['show', '-s', '--format=%B', hash], repoRoot),
       // --diff-merges=first-parent lists merge-commit changes against the first parent (matching the `<hash>^` diff);
@@ -345,9 +347,9 @@ export class GitService {
 
   /** Returns file contents at `<hash>:<path>` (or `<hash>^:<path>`), or `""` if the path/parent does not exist. */
   public async getFileContentAtRevision(repoRoot: string, revSpec: string): Promise<string> {
-    validateRevSpec(revSpec);
+    const spec = validateRevSpec(revSpec);
     try {
-      return await this.runGit(['show', revSpec], repoRoot);
+      return await this.runGit(['show', spec], repoRoot);
     } catch (err) {
       if (
         err instanceof GitExecutionError &&
@@ -384,7 +386,7 @@ export class GitService {
     const ref = validateGitRef(branchName);
     const args = ['checkout', '-b', ref];
     if (startPoint !== undefined) {
-      args.push(isValidCommitHash(startPoint) ? startPoint : validateGitRef(startPoint));
+      args.push(isValidCommitHash(startPoint) ? startPoint.toLowerCase() : validateGitRef(startPoint));
     }
     args.push('--');
     await this.runGit(args, repoRoot);

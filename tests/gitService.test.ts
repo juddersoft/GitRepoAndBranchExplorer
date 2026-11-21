@@ -278,23 +278,41 @@ describe('parseDiffTreeOutput', () => {
 });
 
 describe('isValidCommitHash', () => {
-  it.each(['a'.repeat(40), '0123456789abcdef0123456789ABCDEF01234567'])('accepts %s', (hash) => {
-    expect(isValidCommitHash(hash)).toBe(true);
-  });
-
-  it.each(['a'.repeat(39), 'a'.repeat(41), 'g'.repeat(40), 'HEAD', `-${'a'.repeat(39)}`, `${'a'.repeat(40)}\n`, '', 42, null])(
-    'rejects %s',
+  it.each(['a'.repeat(40), '0123456789abcdef0123456789ABCDEF01234567', 'f'.repeat(64), `${'0123456789abcdef'.repeat(3)}${'ABCDEF0123456789'}`])(
+    'accepts %s',
     (hash) => {
-      expect(isValidCommitHash(hash)).toBe(false);
+      expect(isValidCommitHash(hash)).toBe(true);
     },
   );
+
+  it.each([
+    'a'.repeat(39),
+    'a'.repeat(41),
+    'a'.repeat(63),
+    'a'.repeat(65),
+    'g'.repeat(40),
+    `${'f'.repeat(63)}g`,
+    'HEAD',
+    `-${'a'.repeat(39)}`,
+    `${'a'.repeat(40)}\n`,
+    `${'a'.repeat(64)}\n`,
+    '',
+    42,
+    null,
+  ])('rejects %s', (hash) => {
+    expect(isValidCommitHash(hash)).toBe(false);
+  });
 });
 
 describe('validateRevSpec', () => {
   const h = 'c'.repeat(40);
 
-  it.each([`${h}:src/a.ts`, `${h}^:dir with space/file.md`, `${h}:-leading-dash.txt`])('accepts %s', (spec) => {
+  it.each([`${h}:src/a.ts`, `${h}^:dir with space/file.md`, `${h}:-leading-dash.txt`, `${'d'.repeat(64)}^:a.txt`])('accepts %s', (spec) => {
     expect(validateRevSpec(spec)).toBe(spec);
+  });
+
+  it('lowercases the hash part only', () => {
+    expect(validateRevSpec(`${'AB'.repeat(32)}^:Docs/README.md`)).toBe(`${'ab'.repeat(32)}^:Docs/README.md`);
   });
 
   it.each([
@@ -362,6 +380,14 @@ describe('GitHub remote URL normalization', () => {
     expect(buildGitHubCommitUrl('javascript:alert(1)//https://github.com/o/r', hash)).toBeNull();
     expect(buildGitHubCommitUrl('https://github.com/o/r', 'HEAD')).toBeNull();
   });
+
+  it('builds commit URLs for 64-character SHA-256 hashes and rejects near-miss lengths', () => {
+    const sha256 = 'ABCDEF'.padEnd(64, '9');
+    expect(buildGitHubCommitUrl('https://github.com/o/r', sha256)).toBe(`https://github.com/o/r/commit/${sha256.toLowerCase()}`);
+    for (const length of [39, 41, 63, 65]) {
+      expect(buildGitHubCommitUrl('https://github.com/o/r', 'a'.repeat(length))).toBeNull();
+    }
+  });
 });
 
 describe('GitService operations (fake runner)', () => {
@@ -406,6 +432,22 @@ describe('GitService operations (fake runner)', () => {
       ['checkout', '-b', 'feature/y', '--'],
       ['checkout', '-b', 'feature/z', HASH, '--'],
       ['checkout', '-b', 'feature/w', 'origin/main', '--'],
+    ]);
+  });
+
+  it('passes SHA-256 hashes to Git lowercased', async () => {
+    const upper = 'AB'.repeat(32);
+    const { calls, service } = recorder();
+    const details = await service.getCommitDetails(ROOT, upper);
+    await service.getFileContentAtRevision(ROOT, `${upper}^:a.txt`);
+    await service.createBranch(ROOT, 'feature/sha256', upper);
+    const lower = upper.toLowerCase();
+    expect(details.hash).toBe(lower);
+    expect(calls.map((c) => c.args)).toEqual([
+      ['show', '-s', '--format=%B', lower],
+      ['diff-tree', '--no-commit-id', '--name-status', '-r', '--root', '-M', '--diff-merges=first-parent', '-z', lower],
+      ['show', `${lower}^:a.txt`],
+      ['checkout', '-b', 'feature/sha256', lower, '--'],
     ]);
   });
 

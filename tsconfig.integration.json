@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "Node16",
+    "moduleResolution": "Node16",
+    "lib": ["ES2022"],
+    "types": ["node", "mocha", "vscode"],
+    "rootDir": "tests/integration",
+    "outDir": "out-test",
+    "sourceMap": true
+  },
+  "include": ["tests/integration/**/*.ts"]
+}

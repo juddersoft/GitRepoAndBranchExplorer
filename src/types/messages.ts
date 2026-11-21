@@ -30,7 +30,8 @@ export interface OpenFileDiffPayload {
 }
 
 const MAX_BRANCH_NAME_LENGTH = 255;
-const COMMIT_HASH_PATTERN = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+/** Full SHA-1 (40 hex) or SHA-256 (64 hex); must stay identical to `isValidCommitHash` in gitService.ts. */
+const COMMIT_HASH_PATTERN = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i;
 export const MAX_FILE_PATH_LENGTH = 4096;
 export const MAX_ACTION_STATUS_LENGTH = 500;
 

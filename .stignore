@@ -13,3 +13,7 @@
 (?d).DS_Store
 (?d)Thumbs.db
 (?d)desktop.ini
+
+// Integration test build output
+(?d)out-test
+

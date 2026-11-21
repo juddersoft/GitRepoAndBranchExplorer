@@ -1,0 +1,22 @@
+# Sources, tests and build tooling (the extension ships the esbuild bundles in dist/)
+src/**
+tests/**
+out-test/**
+coverage/**
+docs/**
+node_modules/**
+.vscode/**
+.vscode-test/**
+.vscode-test.mjs
+.gitignore
+.stignore
+tsconfig.json
+tsconfig.integration.json
+vitest.config.ts
+esbuild.js
+**/*.ts
+**/*.map
+**/*.vsix
+
+# The webview stylesheet is loaded at runtime from src/webview/ui (see GitRepoPanel.ts localResourceRoots).
+!src/webview/ui/styles.css
