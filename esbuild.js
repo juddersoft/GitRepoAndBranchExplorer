@@ -52,6 +52,14 @@ const targets = [
     format: 'iife',
     target: 'es2022',
   },
+  {
+    ...sharedOptions,
+    entryPoints: ['src/webview/ui/sidebar.ts'],
+    outfile: 'dist/sidebar.js',
+    platform: 'browser',
+    format: 'iife',
+    target: 'es2022',
+  },
 ];
 
 async function main() {

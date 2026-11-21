@@ -1,37 +1,36 @@
-import type { ExtensionToWebviewMessage, GitAction, WebviewToExtensionMessage } from '../../types/messages';
+import type { CommitNode } from '../../types/git';
+import type { ExtensionToWebviewMessage, GitAction } from '../../types/messages';
 import { isExtensionToWebviewMessage } from '../../types/messages';
-import { BranchTree } from './BranchTree';
 import { ContextMenu } from './ContextMenu';
 import type { MenuActionId } from './contextMenuModel';
-import { buildCommitMenu, buildRefMenu } from './contextMenuModel';
+import { buildCommitMenu } from './contextMenuModel';
 import { el } from './dom';
 import { HistoryPane } from './HistoryPane';
-import type { BadgeKindToggle, ExplorerUiState, RefTarget } from './state';
-import { cacheCommitDetails, createInitialState, reconcileStateWithSnapshot, selectRefPatch, toggleSetMember } from './state';
-import type { CommitNode } from '../../types/git';
+import type { BadgeKindToggle, ExplorerUiState } from './state';
+import {
+  cacheCommitDetails,
+  createInitialState,
+  normalizeSelection,
+  reconcileStateWithSnapshot,
+  selectionFromState,
+  selectionPatch,
+  selectRefPatch,
+} from './state';
+import { vscode } from './vscodeApi';
 
-interface VsCodeApi {
-  postMessage(message: WebviewToExtensionMessage): void;
-  getState(): unknown;
-  setState(state: unknown): void;
-}
-
-declare function acquireVsCodeApi(): VsCodeApi;
+/**
+ * Editor-tab entry point: the Git action toolbar, ref toggles, filter, commit graph, history table and commit
+ * details. The Branch / Remote / Tag tree lives in the Activity Bar view (sidebar.ts); the extension host
+ * keeps the snapshot, selection, isolated branches and busy status identical in both.
+ */
 
 interface PersistedState {
-  sidebarWidth: number;
-  isSidebarCollapsed: boolean;
   showLocalBranchBadges: boolean;
   showRemoteBranchBadges: boolean;
   showTagBadges: boolean;
 }
 
-const DEFAULT_SIDEBAR_WIDTH = 280;
-const MIN_SIDEBAR_WIDTH = 160;
-const MIN_HISTORY_WIDTH = 320;
-const KEYBOARD_RESIZE_STEP = 16;
-
-const vscode = acquireVsCodeApi();
+const vscodeStateKeys = ['showLocalBranchBadges', 'showRemoteBranchBadges', 'showTagBadges'] as const;
 
 function readPersistedState(raw: unknown): Partial<PersistedState> {
   if (typeof raw !== 'object' || raw === null) {
@@ -39,10 +38,7 @@ function readPersistedState(raw: unknown): Partial<PersistedState> {
   }
   const r = raw as Record<string, unknown>;
   const result: Partial<PersistedState> = {};
-  if (typeof r.sidebarWidth === 'number' && Number.isFinite(r.sidebarWidth)) {
-    result.sidebarWidth = r.sidebarWidth;
-  }
-  for (const key of ['isSidebarCollapsed', 'showLocalBranchBadges', 'showRemoteBranchBadges', 'showTagBadges'] as const) {
+  for (const key of vscodeStateKeys) {
     if (typeof r[key] === 'boolean') {
       result[key] = r[key] as boolean;
     }
@@ -50,15 +46,11 @@ function readPersistedState(raw: unknown): Partial<PersistedState> {
   return result;
 }
 
-const persisted = readPersistedState(vscode.getState());
-let sidebarWidth = persisted.sidebarWidth ?? DEFAULT_SIDEBAR_WIDTH;
-let state: ExplorerUiState = { ...createInitialState(), ...persisted };
+let state: ExplorerUiState = { ...createInitialState(), ...readPersistedState(vscode.getState()) };
 const knownRemoteNames = new Set<string>();
 
 function persist(): void {
   const data: PersistedState = {
-    sidebarWidth,
-    isSidebarCollapsed: state.isSidebarCollapsed,
     showLocalBranchBadges: state.showLocalBranchBadges,
     showRemoteBranchBadges: state.showRemoteBranchBadges,
     showTagBadges: state.showTagBadges,
@@ -81,42 +73,6 @@ const contextMenu = new ContextMenu();
 
 function postGitAction(action: GitAction, target?: string): void {
   vscode.postMessage({ type: 'gitAction', payload: target === undefined ? { action } : { action, target } });
-}
-
-function selectRef(target: RefTarget): void {
-  // Skip no-op selections so a double-click (two clicks) does not rebuild the tree between them.
-  if (state.selectedBranchFullName !== target.fullName) {
-    setState(selectRefPatch(target));
-  }
-}
-
-function runRefMenuAction(id: MenuActionId, target: RefTarget): void {
-  switch (id) {
-    case 'checkout':
-      if (target.branch) {
-        vscode.postMessage({ type: 'checkoutBranch', payload: { branchName: target.branch.name } });
-      }
-      break;
-    case 'checkoutRemote':
-    case 'merge':
-    case 'rebase':
-    case 'deleteBranch':
-      postGitAction(id === 'checkoutRemote' ? 'checkoutRemoteBranch' : id, target.name);
-      break;
-    case 'pull':
-    case 'push':
-    case 'fetch':
-      postGitAction(id);
-      break;
-    case 'createBranchHere':
-      vscode.postMessage({ type: 'createBranchAtRef', payload: { startPoint: target.name } });
-      break;
-    case 'isolate':
-      setState({ pinnedBranchFullNames: toggleSetMember(state.pinnedBranchFullNames, target.fullName) });
-      break;
-    default:
-      break;
-  }
 }
 
 function runCommitMenuAction(id: MenuActionId, commit: CommitNode): void {
@@ -142,31 +98,11 @@ function runCommitMenuAction(id: MenuActionId, commit: CommitNode): void {
   }
 }
 
-function showRefContextMenu(target: RefTarget, x: number, y: number): void {
-  selectRef(target);
-  if (state.snapshot) {
-    contextMenu.show(x, y, buildRefMenu(state.snapshot, state, target), (id) => runRefMenuAction(id, target));
-  }
-}
-
 function showCommitContextMenu(commit: CommitNode, x: number, y: number): void {
   if (state.snapshot) {
     contextMenu.show(x, y, buildCommitMenu(state.snapshot, state, commit), (id) => runCommitMenuAction(id, commit));
   }
 }
-
-const branchTree = new BranchTree({
-  onFilterChange: (text) => setState({ branchFilterText: text }),
-  onToggleNode: (key) => setState({ expandedNodes: toggleSetMember(state.expandedNodes, key) }),
-  onTogglePin: (fullName) => setState({ pinnedBranchFullNames: toggleSetMember(state.pinnedBranchFullNames, fullName) }),
-  onCheckout: (branch) => vscode.postMessage({ type: 'checkoutBranch', payload: { branchName: branch.name } }),
-  onSelectRef: selectRef,
-  onContextMenu: showRefContextMenu,
-  onToggleSidebar: () => {
-    setState({ isSidebarCollapsed: !state.isSidebarCollapsed });
-    persist();
-  },
-});
 
 const historyPane = new HistoryPane({
   onGitAction: (action) => postGitAction(action),
@@ -182,7 +118,10 @@ const historyPane = new HistoryPane({
     vscode.postMessage({ type: 'setTabPinned', payload: { pinned } });
   },
   onHistoryFilterChange: (text) => setState({ historyFilterText: text }),
-  onClearFocus: () => setState({ pinnedBranchFullNames: new Set(), ...selectRefPatch(null) }),
+  onClearFocus: () => {
+    setState({ pinnedBranchFullNames: new Set(), ...selectRefPatch(null) });
+    vscode.postMessage({ type: 'syncState', payload: selectionFromState(state) });
+  },
   onSelectCommit: selectCommit,
   onCommitContextMenu: showCommitContextMenu,
   onCopyHash: (hash) => vscode.postMessage({ type: 'copyCommitHash', payload: { hash } }),
@@ -213,80 +152,7 @@ function selectCommit(hash: string | null): void {
   requestCommitDetailsIfNeeded(hash);
 }
 
-const splitter = el('div', {
-  className: 'splitter',
-  title: 'Drag to resize. Double-click to reset.',
-  attrs: {
-    role: 'separator',
-    'aria-orientation': 'vertical',
-    'aria-label': 'Resize branch pane',
-    tabindex: '0',
-  },
-});
-
-function maxSidebarWidth(): number {
-  return Math.max(MIN_SIDEBAR_WIDTH, window.innerWidth - MIN_HISTORY_WIDTH);
-}
-
-function applySidebarWidth(width: number): void {
-  sidebarWidth = Math.round(Math.min(Math.max(width, MIN_SIDEBAR_WIDTH), maxSidebarWidth()));
-  // CSSOM assignment (not a style attribute), so it is permitted by the webview CSP.
-  branchTree.element.style.width = `${sidebarWidth}px`;
-  splitter.setAttribute('aria-valuenow', String(sidebarWidth));
-  splitter.setAttribute('aria-valuemin', String(MIN_SIDEBAR_WIDTH));
-  splitter.setAttribute('aria-valuemax', String(maxSidebarWidth()));
-}
-
-function initSplitter(): void {
-  let dragStartX = 0;
-  let dragStartWidth = 0;
-
-  splitter.addEventListener('pointerdown', (event) => {
-    if (event.button !== 0) {
-      return;
-    }
-    dragStartX = event.clientX;
-    dragStartWidth = sidebarWidth;
-    splitter.setPointerCapture(event.pointerId);
-    splitter.classList.add('dragging');
-    document.body.classList.add('resizing');
-    event.preventDefault();
-  });
-  splitter.addEventListener('pointermove', (event) => {
-    if (splitter.hasPointerCapture(event.pointerId)) {
-      applySidebarWidth(dragStartWidth + event.clientX - dragStartX);
-    }
-  });
-  const endDrag = (event: PointerEvent): void => {
-    if (splitter.hasPointerCapture(event.pointerId)) {
-      splitter.releasePointerCapture(event.pointerId);
-    }
-    splitter.classList.remove('dragging');
-    document.body.classList.remove('resizing');
-    persist();
-  };
-  splitter.addEventListener('pointerup', endDrag);
-  splitter.addEventListener('pointercancel', endDrag);
-  splitter.addEventListener('dblclick', () => {
-    applySidebarWidth(DEFAULT_SIDEBAR_WIDTH);
-    persist();
-  });
-  splitter.addEventListener('keydown', (event) => {
-    const delta = event.key === 'ArrowLeft' ? -KEYBOARD_RESIZE_STEP : event.key === 'ArrowRight' ? KEYBOARD_RESIZE_STEP : 0;
-    if (delta !== 0) {
-      applySidebarWidth(sidebarWidth + delta);
-      persist();
-      event.preventDefault();
-    }
-  });
-  window.addEventListener('resize', () => applySidebarWidth(sidebarWidth));
-}
-
 function render(): void {
-  branchTree.element.hidden = state.isSidebarCollapsed;
-  splitter.hidden = state.isSidebarCollapsed;
-  branchTree.collapsedStrip.hidden = !state.isSidebarCollapsed;
-  branchTree.update(state);
   historyPane.update(state);
 }
 
@@ -321,6 +187,10 @@ function handleMessage(message: ExtensionToWebviewMessage): void {
     case 'actionStatus':
       setState({ isBusy: message.payload.busy, busyMessage: message.payload.message ?? null });
       break;
+    case 'syncState':
+      // Selection or isolation changed in the Activity Bar tree: focus the history on it.
+      setState(selectionPatch(normalizeSelection(state.snapshot, message.payload)));
+      break;
   }
 }
 
@@ -329,11 +199,7 @@ function mount(): void {
   if (!app) {
     return;
   }
-  app.replaceChildren(
-    el('main', { className: 'split' }, [branchTree.collapsedStrip, branchTree.element, splitter, historyPane.element]),
-  );
-  initSplitter();
-  applySidebarWidth(sidebarWidth);
+  app.replaceChildren(el('main', { className: 'split' }, [historyPane.element]));
   render();
 }
 

@@ -202,7 +202,7 @@ function renderPills(refs: readonly RefBadge[], snapshot: RepoSnapshot): HTMLSpa
   return [...refs.slice(0, MAX_INLINE_BADGES).map((ref) => pill(ref, snapshot)), overflow];
 }
 
-/** Right pane: action/filter toolbar, branch breadcrumb, commit history table and details footer. */
+/** Editor timeline: action/filter toolbar, branch breadcrumb, commit graph + history table and details footer. */
 export class HistoryPane {
   public readonly element: HTMLElement;
 

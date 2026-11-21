@@ -46,10 +46,26 @@ export interface GitActionPayload {
   target?: string;
 }
 
+/**
+ * Ref selection shared by the Activity Bar branch tree and the editor timeline. Everything else the two
+ * views display (current branch, local/remote branches, tags) travels inside `repoSnapshot`.
+ */
+export interface SyncStatePayload {
+  /** Inspected branch/tag (full ref name); its history is focused. `null` when nothing is selected. */
+  selectedBranchFullName: string | null;
+  /** Git-usable short name of the selected ref; `null` exactly when `selectedBranchFullName` is. */
+  selectedBranchRef: string | null;
+  /** Branches isolated in the history, as full ref names. */
+  pinnedBranchFullNames: string[];
+}
+
+export const MAX_SYNC_PINNED_REFS = 2000;
+
 export type WebviewToExtensionMessage =
   | { type: 'webviewReady' }
   | { type: 'openRepositoryPanel' }
   | { type: 'requestRefresh' }
+  | { type: 'syncState'; payload: SyncStatePayload }
   | { type: 'checkoutBranch'; payload: { branchName: string } }
   | { type: 'gitAction'; payload: GitActionPayload }
   | { type: 'createBranchAtRef'; payload: { startPoint: string } }
@@ -112,7 +128,8 @@ export type ExtensionToWebviewMessage =
   | { type: 'repoError'; payload: RepoErrorPayload }
   | { type: 'commitDetails'; payload: CommitDetails }
   | { type: 'integrationsInfo'; payload: ExternalIntegrationsInfo }
-  | { type: 'actionStatus'; payload: ActionStatusPayload };
+  | { type: 'actionStatus'; payload: ActionStatusPayload }
+  | { type: 'syncState'; payload: SyncStatePayload };
 
 export interface ActionStatusPayload {
   busy: boolean;
@@ -156,6 +173,24 @@ export function isSafeRefArgument(value: unknown): value is string {
   );
 }
 
+/** Shape check for a selection payload; whether the refs exist is decided against the loaded snapshot. */
+export function isSyncStatePayload(value: unknown): value is SyncStatePayload {
+  if (!isSafeRecord(value)) {
+    return false;
+  }
+  const fullName = ownField(value, 'selectedBranchFullName');
+  const ref = ownField(value, 'selectedBranchRef');
+  const pinned = ownField(value, 'pinnedBranchFullNames');
+  const selectionIsNull = fullName === null && ref === null;
+  const selectionIsSafe = isSafeRefArgument(fullName) && isSafeRefArgument(ref);
+  return (
+    (selectionIsNull || selectionIsSafe) &&
+    Array.isArray(pinned) &&
+    pinned.length <= MAX_SYNC_PINNED_REFS &&
+    pinned.every((name: unknown) => isSafeRefArgument(name))
+  );
+}
+
 function isValidGitActionPayload(payload: Record<string, unknown> | null): boolean {
   if (payload === null) {
     return false;
@@ -194,6 +229,8 @@ export function isWebviewToExtensionMessage(value: unknown): value is WebviewToE
       const branchName = payload === null ? undefined : ownField(payload, 'branchName');
       return typeof branchName === 'string' && branchName.length > 0 && branchName.length <= MAX_BRANCH_NAME_LENGTH;
     }
+    case 'syncState':
+      return isSyncStatePayload(payload);
     case 'gitAction':
       return isValidGitActionPayload(payload);
     case 'createBranchAtRef': {
@@ -283,6 +320,8 @@ export function isExtensionToWebviewMessage(value: unknown): value is ExtensionT
         (payload.message === undefined ||
           (typeof payload.message === 'string' && payload.message.length <= MAX_ACTION_STATUS_LENGTH))
       );
+    case 'syncState':
+      return isSyncStatePayload(payload);
     default:
       return false;
   }

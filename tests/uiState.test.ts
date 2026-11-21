@@ -16,9 +16,13 @@ import {
   getFocusedRefs,
   getHeadHash,
   isAncestorOfHead,
+  isSameSelection,
   listRefTargets,
+  normalizeSelection,
   reconcileStateWithSnapshot,
   remoteNodeKey,
+  selectionFromState,
+  selectionPatch,
   selectRefPatch,
   summarizeRefToggles,
 } from '../src/webview/ui/state';
@@ -418,5 +422,67 @@ describe('ref toggle feedback', () => {
     expect(describeEmptyHistory(outsideWindow, stateOn({ selectedBranchFullName: 'refs/tags/ancient' }, outsideWindow))).toBe(
       'ancient points to a commit outside the loaded history window.',
     );
+  });
+});
+
+describe('selection sync between the sidebar tree and the editor timeline', () => {
+  const tagged: RepoSnapshot = { ...snapshot, tags: [{ name: 'v1.0.0', fullName: 'refs/tags/v1.0.0', targetHash: A }] };
+
+  it('round-trips the selection through the message payload', () => {
+    const local = stateWith({
+      ...selectRefPatch(listRefTargets(snapshot).find((t) => t.name === 'origin/main') ?? null),
+      pinnedBranchFullNames: new Set([feature.fullName, main.fullName]),
+    });
+    const payload = selectionFromState(local);
+    expect(payload).toEqual({
+      selectedBranchFullName: originMain.fullName,
+      selectedBranchRef: 'origin/main',
+      pinnedBranchFullNames: [feature.fullName, main.fullName],
+    });
+
+    const remote = { ...createInitialState(), ...selectionPatch(payload) };
+    expect(remote.selectedBranchFullName).toBe(originMain.fullName);
+    expect(remote.selectedBranchRef).toBe('origin/main');
+    expect([...remote.pinnedBranchFullNames]).toEqual([feature.fullName, main.fullName]);
+  });
+
+  it('keeps a valid selection and re-derives the short ref name from the snapshot', () => {
+    const next = normalizeSelection(tagged, {
+      selectedBranchFullName: 'refs/tags/v1.0.0',
+      selectedBranchRef: 'forged-name',
+      pinnedBranchFullNames: [feature.fullName],
+    });
+    expect(next).toEqual({ selectedBranchFullName: 'refs/tags/v1.0.0', selectedBranchRef: 'v1.0.0', pinnedBranchFullNames: [feature.fullName] });
+  });
+
+  it('drops unknown selections, unknown pins, tag pins and duplicate pins', () => {
+    const next = normalizeSelection(tagged, {
+      selectedBranchFullName: 'refs/heads/deleted',
+      selectedBranchRef: 'deleted',
+      pinnedBranchFullNames: [feature.fullName, feature.fullName, 'refs/heads/deleted', 'refs/tags/v1.0.0'],
+    });
+    expect(next).toEqual({ selectedBranchFullName: null, selectedBranchRef: null, pinnedBranchFullNames: [feature.fullName] });
+  });
+
+  it('returns the selection unchanged while no snapshot is loaded', () => {
+    const selection = { selectedBranchFullName: main.fullName, selectedBranchRef: 'main', pinnedBranchFullNames: [] };
+    expect(normalizeSelection(null, selection)).toBe(selection);
+  });
+
+  it('normalizing matches what reconcileStateWithSnapshot does locally, so snapshots need no extra sync message', () => {
+    const selection = {
+      selectedBranchFullName: 'refs/heads/gone',
+      selectedBranchRef: 'gone',
+      pinnedBranchFullNames: [feature.fullName, 'refs/heads/gone'],
+    };
+    const reconciled = reconcileStateWithSnapshot({ ...createInitialState(), ...selectionPatch(selection) }, snapshot, new Set());
+    expect(selectionFromState(reconciled)).toEqual(normalizeSelection(snapshot, selection));
+  });
+
+  it('compares selections including pin order', () => {
+    const a = { selectedBranchFullName: null, selectedBranchRef: null, pinnedBranchFullNames: ['x', 'y'] };
+    expect(isSameSelection(a, { ...a, pinnedBranchFullNames: ['x', 'y'] })).toBe(true);
+    expect(isSameSelection(a, { ...a, pinnedBranchFullNames: ['y', 'x'] })).toBe(false);
+    expect(isSameSelection(a, { ...a, selectedBranchFullName: 'x', selectedBranchRef: 'x' })).toBe(false);
   });
 });

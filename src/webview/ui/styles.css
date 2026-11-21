@@ -40,11 +40,6 @@ body {
   font-size: var(--vscode-font-size, 13px);
 }
 
-body.resizing {
-  cursor: col-resize;
-  user-select: none;
-}
-
 #app {
   height: 100vh;
 }
@@ -252,37 +247,13 @@ button {
 }
 
 .pane-left {
-  flex: 0 0 auto;
+  flex: 1 1 auto;
   background-color: var(--vscode-sideBar-background);
   color: var(--vscode-sideBar-foreground, var(--vscode-foreground));
 }
 
 .pane-right {
   flex: 1 1 auto;
-}
-
-.splitter {
-  flex: 0 0 4px;
-  margin: 0 -2px;
-  z-index: 1;
-  cursor: col-resize;
-  border-left: 1px solid var(--vscode-panel-border);
-  background-clip: content-box;
-}
-
-.splitter:hover,
-.splitter.dragging,
-.splitter:focus-visible {
-  background-color: var(--vscode-sash-hoverBorder, var(--vscode-focusBorder));
-}
-
-.collapsed-strip {
-  display: flex;
-  flex: 0 0 24px;
-  justify-content: center;
-  padding-top: 4px;
-  background-color: var(--vscode-sideBar-background);
-  border-right: 1px solid var(--vscode-panel-border);
 }
 
 /* ---------- Left pane: branch tree ---------- */
@@ -997,28 +968,19 @@ col.col-id {
   max-width: none;
 }
 
-/* ---------- Sidebar launcher view ---------- */
+/* ---------- Activity Bar branch-tree view ---------- */
 
-body.launcher {
-  padding: 12px;
-  overflow: auto;
+body.sidebar-view {
   background-color: var(--vscode-sideBar-background);
 }
 
-.launcher-hint {
-  margin-top: 0;
-  opacity: 0.8;
+.sidebar-root {
+  display: flex;
+  height: 100%;
+  min-height: 0;
 }
 
-.primary-button {
-  width: 100%;
-  padding: 6px 10px;
-  border: none;
-  cursor: pointer;
-  color: var(--vscode-button-foreground);
-  background-color: var(--vscode-button-background);
-}
-
-.primary-button:hover {
-  background-color: var(--vscode-button-hoverBackground);
+.sidebar-status {
+  padding: 2px 8px 4px;
+  white-space: nowrap;
 }

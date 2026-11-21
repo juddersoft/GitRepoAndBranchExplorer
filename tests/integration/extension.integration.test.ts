@@ -8,6 +8,7 @@ import * as vscode from 'vscode';
 const EXTENSION_ID = 'PeterJudd.git-repo-and-branch-explorer';
 const OPEN_REPOSITORY_COMMAND = 'gitRepoAndBranchExplorer.openRepository';
 const REFRESH_COMMAND = 'gitRepoAndBranchExplorer.refresh';
+const SHOW_CONTAINER_COMMAND = 'workbench.view.extension.gitRepoAndBranchExplorer-container';
 const PANEL_VIEW_TYPE = 'gitRepoAndBranchExplorer.panel';
 const FIXTURE_PREFIX = 'grbe-integration-';
 
@@ -130,5 +131,25 @@ suite('Git Repo & Branch Explorer extension host', () => {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     assert.strictEqual(await waitForPanelTab(0), undefined, 'The unpinned panel should close after switching sidebar views.');
+  });
+
+  test('selecting the Activity Bar container opens the timeline tab first in its group', async () => {
+    assert.ok(repoPath);
+    const document = await vscode.workspace.openTextDocument(path.join(repoPath, 'README.md'));
+    await vscode.window.showTextDocument(document, { preview: false });
+
+    await vscode.commands.executeCommand(SHOW_CONTAINER_COMMAND);
+    const panelTab = await waitForPanelTab(10_000);
+    assert.ok(panelTab, 'Selecting the Activity Bar container did not open the Git Repository panel.');
+    assert.strictEqual(panelTab.group.tabs[0], panelTab, 'The panel tab should be first in its editor group.');
+
+    // Leaving the container closes the unpinned tab again.
+    await vscode.commands.executeCommand('workbench.view.explorer');
+    const deadline = Date.now() + 10_000;
+    while ((await waitForPanelTab(0)) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.strictEqual(await waitForPanelTab(0), undefined, 'The unpinned panel should close after switching sidebar views.');
+    await vscode.commands.executeCommand('workbench.action.closeAllEditors');
   });
 });

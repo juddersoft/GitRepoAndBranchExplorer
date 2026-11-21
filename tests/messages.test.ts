@@ -5,6 +5,7 @@ import {
   isExtensionToWebviewMessage,
   isSafeRefArgument,
   isWebviewToExtensionMessage,
+  MAX_SYNC_PINNED_REFS,
 } from '../src/types/messages';
 import type { GitAction } from '../src/types/messages';
 
@@ -103,6 +104,51 @@ describe('isSafeRefArgument', () => {
   });
 });
 
+describe('syncState validation', () => {
+  const sync = (payload: unknown): unknown => ({ type: 'syncState', payload });
+  const valid = {
+    selectedBranchFullName: 'refs/remotes/origin/main',
+    selectedBranchRef: 'origin/main',
+    pinnedBranchFullNames: ['refs/heads/main', 'refs/heads/feature/x'],
+  };
+
+  it('accepts a selection, an empty selection and an empty pin list in both directions', () => {
+    const empty = { selectedBranchFullName: null, selectedBranchRef: null, pinnedBranchFullNames: [] };
+    for (const payload of [valid, empty]) {
+      expect(isWebviewToExtensionMessage(sync(payload))).toBe(true);
+      expect(isExtensionToWebviewMessage(sync(payload))).toBe(true);
+    }
+  });
+
+  it('rejects a half-set selection and unsafe or non-string ref names', () => {
+    const bad: unknown[] = [
+      { ...valid, selectedBranchRef: null },
+      { ...valid, selectedBranchFullName: null },
+      { ...valid, selectedBranchFullName: '--force' },
+      { ...valid, selectedBranchRef: 'has space' },
+      { ...valid, selectedBranchFullName: 7 },
+      { ...valid, pinnedBranchFullNames: ['refs/heads/ok', '-x'] },
+      { ...valid, pinnedBranchFullNames: ['refs/heads/a\nb'] },
+      { ...valid, pinnedBranchFullNames: [1] },
+      { ...valid, pinnedBranchFullNames: 'refs/heads/main' },
+      { selectedBranchFullName: null, selectedBranchRef: null },
+    ];
+    for (const payload of bad) {
+      expect(isWebviewToExtensionMessage(sync(payload)), JSON.stringify(payload)).toBe(false);
+      expect(isExtensionToWebviewMessage(sync(payload)), JSON.stringify(payload)).toBe(false);
+    }
+    expect(isWebviewToExtensionMessage({ type: 'syncState' })).toBe(false);
+  });
+
+  it('bounds the number of pinned refs and rejects prototype-pollution keys', () => {
+    const many = Array.from({ length: MAX_SYNC_PINNED_REFS + 1 }, (_, i) => `refs/heads/b${i}`);
+    expect(isWebviewToExtensionMessage(sync({ ...valid, pinnedBranchFullNames: many }))).toBe(false);
+    expect(isWebviewToExtensionMessage(sync({ ...valid, pinnedBranchFullNames: many.slice(1) }))).toBe(true);
+    const polluted = JSON.parse('{"selectedBranchFullName":null,"selectedBranchRef":null,"pinnedBranchFullNames":[],"__proto__":{"x":1}}');
+    expect(isWebviewToExtensionMessage(sync(polluted))).toBe(false);
+  });
+});
+
 describe('initState tabPinned', () => {
   it('accepts an optional boolean tabPinned', () => {
     const initState = (extra: Record<string, unknown>): unknown => ({
@@ -114,3 +160,4 @@ describe('initState tabPinned', () => {
     expect(isExtensionToWebviewMessage(initState({ tabPinned: 'no' }))).toBe(false);
   });
 });
+

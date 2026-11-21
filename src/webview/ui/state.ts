@@ -1,3 +1,4 @@
+import type { SyncStatePayload } from '../../types/messages';
 import type { BranchInfo, CommitDetails, CommitNode, ExternalIntegrationsInfo, RefBadge, RepoSnapshot, TagInfo } from '../../types/git';
 
 export const NODE_BRANCHES = 'branches';
@@ -93,7 +94,6 @@ export interface ExplorerUiState {
   showRemoteBranchBadges: boolean;
   showTagBadges: boolean;
   selectedCommitHash: string | null;
-  isSidebarCollapsed: boolean;
   expandedNodes: Set<string>;
   /** Commit message bodies and changed files, keyed by commit hash. */
   commitDetails: Map<string, CommitDetails>;
@@ -118,7 +118,6 @@ export function createInitialState(): ExplorerUiState {
     showRemoteBranchBadges: true,
     showTagBadges: true,
     selectedCommitHash: null,
-    isSidebarCollapsed: false,
     expandedNodes: new Set([NODE_BRANCHES, NODE_REPO_ROOT]),
     commitDetails: new Map(),
     integrations: { gitGraphAvailable: false, gitGraphExtensionId: null, githubRemoteUrl: null },
@@ -191,6 +190,52 @@ export function commitMatchesQuery(commit: CommitNode, query: string): boolean {
 /** Selection patch for a ref (or `null` to clear it); the two fields always change together. */
 export function selectRefPatch(target: RefTarget | null): Pick<ExplorerUiState, 'selectedBranchFullName' | 'selectedBranchRef'> {
   return { selectedBranchFullName: target?.fullName ?? null, selectedBranchRef: target?.name ?? null };
+}
+
+type SelectionFields = Pick<ExplorerUiState, 'selectedBranchFullName' | 'selectedBranchRef' | 'pinnedBranchFullNames'>;
+
+/** The part of the UI state that the sidebar tree and the editor timeline keep identical. */
+export function selectionFromState(state: SelectionFields): SyncStatePayload {
+  return {
+    selectedBranchFullName: state.selectedBranchFullName,
+    selectedBranchRef: state.selectedBranchRef,
+    pinnedBranchFullNames: [...state.pinnedBranchFullNames],
+  };
+}
+
+/** Inverse of {@link selectionFromState}, for applying a selection received from the other view. */
+export function selectionPatch(selection: SyncStatePayload): SelectionFields {
+  return {
+    selectedBranchFullName: selection.selectedBranchFullName,
+    selectedBranchRef: selection.selectedBranchRef,
+    pinnedBranchFullNames: new Set(selection.pinnedBranchFullNames),
+  };
+}
+
+/**
+ * Drops pins and a selection that do not exist in `snapshot` (pins must be branches) and re-derives the
+ * selected ref's short name from it, so a stale or forged selection can never name a ref Git does not have.
+ * Without a snapshot there is nothing to check against, so the selection is returned unchanged.
+ */
+export function normalizeSelection(snapshot: RepoSnapshot | null, selection: SyncStatePayload): SyncStatePayload {
+  if (snapshot === null) {
+    return selection;
+  }
+  const branchNames = new Set(getAllBranches(snapshot).map((b) => b.fullName));
+  const selected = findRefTarget(snapshot, selection.selectedBranchFullName);
+  return {
+    ...selectRefPatch(selected),
+    pinnedBranchFullNames: [...new Set(selection.pinnedBranchFullNames)].filter((name) => branchNames.has(name)),
+  };
+}
+
+export function isSameSelection(a: SyncStatePayload, b: SyncStatePayload): boolean {
+  return (
+    a.selectedBranchFullName === b.selectedBranchFullName &&
+    a.selectedBranchRef === b.selectedBranchRef &&
+    a.pinnedBranchFullNames.length === b.pinnedBranchFullNames.length &&
+    a.pinnedBranchFullNames.every((name, i) => name === b.pinnedBranchFullNames[i])
+  );
 }
 
 /** Pinned branches plus the selected ref, de-duplicated, in snapshot order. */

@@ -3,6 +3,19 @@
 All notable changes to **Git Repo & Branch Explorer** are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] - 2026-11-21
+
+### Changed
+- **The Activity Bar view is now the branch tree.** The "Open Git Repository Explorer" launcher button is gone: `gitRepoAndBranchExplorer.launcher` renders the Branch / Remote / Tag tree directly in the Primary Side Bar, with single-click inspect, double-click/Enter checkout, the green **Checked Out** styling, the eye isolate toggle and right-click context menus.
+- **The editor tab is now the timeline only:** Git toolbar (Fetch, Pull, Push, New Branch, Refresh, Pin Tab), ref toggles, filter, scope/status line, commit graph, history table and commit details. It no longer duplicates the branch tree, so the draggable splitter and collapse button were removed.
+- Showing the Activity Bar view opens/reveals the timeline tab at the first tab position without closing the sidebar, so the Activity Bar icon stays highlighted.
+- Unpinned tab auto-close now follows the visibility of the sidebar tree view (still debounced, and deferred while the window is unfocused). A pinned tab stays open when other sidebar views are selected.
+
+### Added
+- A single extension-host coordinator owns the repository snapshot, Git operations and `.git` watcher. It keeps the selected ref, isolated branches, current branch, branches, remotes, tags and busy status identical in the sidebar and the editor tab, replays them to a view that opens later, and re-validates every synced ref against the loaded snapshot. The sidebar keeps working when the tab is closed.
+- `dist/sidebar.js` browser bundle (alongside `dist/webview.js`), loaded with `asWebviewUri`, a nonce and the strict CSP.
+- Sidebar header button to reopen the timeline tab.
+
 ## [1.1.0] - 2026-11-21
 
 ### Added

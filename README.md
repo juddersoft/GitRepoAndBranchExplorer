@@ -1,13 +1,14 @@
 # Git Repo & Branch Explorer
 
-A Visual Studio-style **Git Repository** window for VS Code: a branch and remote tree on the left, a multi-lane commit graph and history table on the right, and commit details with one-click file diffs.
+A Visual Studio-style **Git Repository** window for VS Code: the branch, remote and tag tree lives in the Activity Bar sidebar, while a multi-lane commit graph, history table and commit details with one-click file diffs open in an editor tab next to it. Both stay in sync.
 
 ![Git Repo & Branch Explorer icon](media/icon.png)
 
 ## Features
 
-### Split-pane branch and remote explorer
-- Local branches, `remotes/<name>` groups and tags in one filterable tree.
+### Branch, remote and tag tree in the Activity Bar
+- Local branches, `remotes/<name>` groups and tags in one filterable tree, shown directly in the Primary Side Bar.
+- Selecting a ref, isolating branches (eye button) and the busy status of Git operations are mirrored between the sidebar tree and the editor timeline.
 - The **checked-out** branch is unmistakable: green accent bar, check icon, bold name, a **Checked Out** badge and ahead/behind counts against its upstream.
 - **Single-click** any branch, remote branch or tag to *inspect* it: it is highlighted with the list-selection colours and the history table, breadcrumb and "Showing N of M commits" indicator focus on the commits reachable from it. **Clear filter** returns to the full history.
 - **Double-click** (or press <kbd>Enter</kbd> on) a non-current local branch to check it out. The eye button still isolates several branches at once.
@@ -54,8 +55,8 @@ A Visual Studio-style **Git Repository** window for VS Code: a branch and remote
 
 1. Open a folder that is (or is inside) a Git repository.
 2. Click the **Git Repo & Branch Explorer** icon in the Activity Bar, or run **Git Repo & Branch Explorer: Open Repository Window** from the Command Palette.
-3. The **Git Repository** tab opens in the editor area, moved to the far left of its group, and the Git Repo & Branch Explorer icon stays highlighted in the Activity Bar.
-4. By default the tab closes when you switch to another sidebar view (Explorer, Search, ...) or hide the sidebar. Click **Pin Tab** in the toolbar to keep it open; the choice is remembered.
+3. The branch, remote and tag tree appears in the sidebar and the **Git Repository** timeline tab opens in the editor area, moved to the far left of its group. The Git Repo & Branch Explorer icon stays highlighted in the Activity Bar.
+4. By default the tab closes when you switch to another sidebar view (Explorer, Search, Source Control, ...) or hide the sidebar. Click **Pin Tab** in the toolbar to keep it open; the choice is remembered. If you close the tab yourself, the **Open history timeline** button in the sidebar header brings it back.
 
 ## Commands
 

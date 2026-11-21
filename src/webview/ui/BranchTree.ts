@@ -20,7 +20,8 @@ export interface BranchTreeCallbacks {
   /** Single-click / Enter: inspect this ref and focus the history on it. */
   onSelectRef(target: RefTarget): void;
   onContextMenu(target: RefTarget, x: number, y: number): void;
-  onToggleSidebar(): void;
+  /** Reopens the editor timeline tab (for when it was closed while the tree is still showing). */
+  onOpenTimeline(): void;
 }
 
 function repoTitle(snapshot: RepoSnapshot): string {
@@ -41,35 +42,38 @@ function trackingText(branch: BranchInfo): { text: string; title: string; classN
   return null;
 }
 
-/** Left pane: repository header, branch filter and the Branches / remotes tree. */
+/** Activity Bar view: repository header, branch filter and the Branches / remotes / tags tree. */
 export class BranchTree {
   public readonly element: HTMLElement;
-  /** Narrow strip shown instead of the pane while the sidebar is collapsed. */
-  public readonly collapsedStrip: HTMLElement;
 
   private readonly titleEl: HTMLElement;
+  private readonly busyEl: HTMLElement;
   private readonly search: ReturnType<typeof createSearchBox>;
   private readonly treeEl: HTMLUListElement;
   private refTargets = new Map<string, RefTarget>();
 
   constructor(private readonly callbacks: BranchTreeCallbacks) {
     this.titleEl = el('span', { className: 'sidebar-title', text: 'Loading\u2026' });
-    const collapse = button({ className: 'icon-button', label: 'Collapse branch pane', icon: 'chevronLeft' });
-    collapse.addEventListener('click', () => callbacks.onToggleSidebar());
+    const openTimeline = button({
+      className: 'icon-button',
+      label: 'Open history timeline',
+      title: 'Open the commit history and graph in the editor area',
+      icon: 'graph',
+    });
+    openTimeline.addEventListener('click', () => callbacks.onOpenTimeline());
 
     this.search = createSearchBox('Filter', (value) => callbacks.onFilterChange(value));
+    this.busyEl = el('div', { className: 'sidebar-status busy-indicator', attrs: { role: 'status', 'aria-live': 'polite' } });
+    this.busyEl.hidden = true;
     this.treeEl = el('ul', { className: 'tree', attrs: { role: 'tree', 'aria-label': 'Branches' } });
     this.treeEl.addEventListener('keydown', (event) => this.handleTreeKeydown(event));
 
     this.element = el('aside', { className: 'pane pane-left', attrs: { 'aria-label': 'Branch explorer' } }, [
-      el('div', { className: 'sidebar-header' }, [icon('repo'), this.titleEl, collapse]),
+      el('div', { className: 'sidebar-header' }, [icon('repo'), this.titleEl, openTimeline]),
       el('div', { className: 'sidebar-filter' }, [this.search.element]),
+      this.busyEl,
       el('div', { className: 'tree-scroll' }, [this.treeEl]),
     ]);
-
-    const expand = button({ className: 'icon-button', label: 'Expand branch pane', icon: 'chevronRight' });
-    expand.addEventListener('click', () => callbacks.onToggleSidebar());
-    this.collapsedStrip = el('div', { className: 'collapsed-strip' }, [expand]);
   }
 
   public update(state: ExplorerUiState): void {
@@ -77,6 +81,8 @@ export class BranchTree {
     this.titleEl.textContent = snapshot ? repoTitle(snapshot) : state.errorMessage ? 'No repository' : 'Loading\u2026';
     this.titleEl.title = snapshot?.repoRoot ?? '';
     this.search.sync(state.branchFilterText);
+    this.busyEl.hidden = !state.isBusy;
+    this.busyEl.textContent = state.isBusy ? state.busyMessage ?? 'Working\u2026' : '';
     this.refTargets = new Map();
 
     rebuildPreservingFocus(this.treeEl, () => {
