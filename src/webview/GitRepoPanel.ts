@@ -10,6 +10,7 @@ export const REFRESH_COMMAND = 'gitRepoAndBranchExplorer.refresh';
 /** Built-in command that selects (and, if needed, shows) this extension's Activity Bar container. */
 export const SHOW_CONTAINER_COMMAND = 'workbench.view.extension.gitRepoAndBranchExplorer-container';
 const TAB_PINNED_KEY = 'gitRepoAndBranchExplorer.tabPinned';
+const SHOW_CHECKED_OUT_BADGE_KEY = 'gitRepoAndBranchExplorer.showCheckedOutBadge';
 const MOVE_TO_FIRST_TAB_TIMEOUT_MS = 1500;
 
 const PANEL_TITLE = 'Git Repository';
@@ -25,6 +26,7 @@ export class GitRepoPanel {
   private static coordinator: RepoCoordinator | undefined;
   private static pinStore: vscode.Memento | undefined;
   private static tabPinned = false;
+  private static showCheckedOutBadge = true;
   private static sidebarVisible = false;
   private static opening = false;
   private static autoCloseTimer: ReturnType<typeof setTimeout> | undefined;
@@ -41,10 +43,13 @@ export class GitRepoPanel {
   public static initialize(context: vscode.ExtensionContext, gitDiffProvider: GitShowContentProvider): RepoCoordinator {
     GitRepoPanel.pinStore = context.globalState;
     GitRepoPanel.tabPinned = context.globalState.get<boolean>(TAB_PINNED_KEY, false);
+    GitRepoPanel.showCheckedOutBadge = context.globalState.get<boolean>(SHOW_CHECKED_OUT_BADGE_KEY, true);
     const coordinator = new RepoCoordinator(
       {
         getTabPinned: () => GitRepoPanel.tabPinned,
         setTabPinned: (pinned) => GitRepoPanel.setTabPinned(pinned),
+        getShowCheckedOutBadge: () => GitRepoPanel.getShowCheckedOutBadge(),
+        setShowCheckedOutBadge: (show) => GitRepoPanel.setShowCheckedOutBadge(show),
         openPanel: () => void GitRepoPanel.createOrShow(context.extensionUri),
         onCurrentBranchChange: (currentBranch) => GitRepoPanel.currentPanel?.setBranchTitle(currentBranch),
       },
@@ -117,6 +122,16 @@ export class GitRepoPanel {
     if (pinned) {
       GitRepoPanel.cancelAutoClose();
     }
+  }
+
+  public static getShowCheckedOutBadge(): boolean {
+    return GitRepoPanel.showCheckedOutBadge;
+  }
+
+  public static setShowCheckedOutBadge(show: boolean): void {
+    GitRepoPanel.showCheckedOutBadge = show;
+    void GitRepoPanel.pinStore?.update(SHOW_CHECKED_OUT_BADGE_KEY, show);
+    GitRepoPanel.coordinator?.publishInitState();
   }
 
   public static refresh(): void {

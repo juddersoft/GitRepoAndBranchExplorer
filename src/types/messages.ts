@@ -82,6 +82,7 @@ export type WebviewToExtensionMessage =
   | { type: 'gitAction'; payload: GitActionPayload }
   | { type: 'createBranchAtRef'; payload: { startPoint: string } }
   | { type: 'setTabPinned'; payload: { pinned: boolean } }
+  | { type: 'setShowCheckedOutBadge'; payload: { show: boolean } }
   | { type: 'copyCommitHash'; payload: { hash: string } }
   | { type: 'requestCommitDetails'; payload: { hash: string } }
   | { type: 'openFileDiff'; payload: OpenFileDiffPayload }
@@ -127,6 +128,8 @@ export interface InitStatePayload {
   workspacePath: string | null;
   /** Whether the editor tab is pinned (kept open when another sidebar view is selected). */
   tabPinned?: boolean;
+  /** Whether the sidebar shows the "Checked Out" pill next to the checked-out branch (default `true`). */
+  showCheckedOutBadge: boolean;
 }
 
 export interface RepoErrorPayload {
@@ -253,6 +256,8 @@ export function isWebviewToExtensionMessage(value: unknown): value is WebviewToE
     }
     case 'setTabPinned':
       return payload !== null && typeof ownField(payload, 'pinned') === 'boolean';
+    case 'setShowCheckedOutBadge':
+      return payload !== null && typeof ownField(payload, 'show') === 'boolean';
     case 'copyCommitHash':
     case 'requestCommitDetails':
     case 'openCommitOnGitHub':
@@ -307,7 +312,8 @@ export function isExtensionToWebviewMessage(value: unknown): value is ExtensionT
       return (
         typeof payload.repoName === 'string' &&
         (payload.workspacePath === null || typeof payload.workspacePath === 'string') &&
-        (payload.tabPinned === undefined || typeof payload.tabPinned === 'boolean')
+        (payload.tabPinned === undefined || typeof payload.tabPinned === 'boolean') &&
+        (payload.showCheckedOutBadge === undefined || typeof payload.showCheckedOutBadge === 'boolean')
       );
     case 'repoSnapshot':
       return isRepoSnapshotShape(payload);

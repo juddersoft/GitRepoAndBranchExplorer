@@ -14,6 +14,7 @@ export type MenuActionId =
   | 'fetchTracked'
   | 'newBranch'
   | 'refresh'
+  | 'toggleCheckedOutBadge'
   | 'createBranchHere'
   | 'isolate'
   | 'deleteBranch'
@@ -138,7 +139,7 @@ export function buildRefMenu(snapshot: RepoSnapshot, state: ExplorerUiState, tar
 }
 
 /** Right-click menu for the repository header row in the branch tree. */
-export function buildRepoMenu(snapshot: RepoSnapshot, state: ExplorerUiState): MenuEntry[] {
+export function buildRepoMenu(snapshot: RepoSnapshot, state: ExplorerUiState, showCheckedOutBadge = true): MenuEntry[] {
   const busy = state.isBusy && BUSY_REASON;
   const current = snapshot.localBranches.find((branch) => branch.isCurrent);
   const noBranch = !snapshot.isDetachedHead && current === undefined && 'No branch is checked out yet.';
@@ -158,6 +159,8 @@ export function buildRepoMenu(snapshot: RepoSnapshot, state: ExplorerUiState): M
     item('push', current?.upstream ? 'Push' : 'Publish Branch', push),
     SEPARATOR,
     item('newBranch', 'New Branch\u2026', firstReason(busy)),
+    SEPARATOR,
+    item('toggleCheckedOutBadge', showCheckedOutBadge ? 'Hide "Checked Out" Badge' : 'Show "Checked Out" Badge'),
     SEPARATOR,
     item('refresh', 'Refresh'),
   ];

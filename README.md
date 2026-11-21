@@ -9,7 +9,7 @@ A Visual Studio-style **Git Repository** window for VS Code: the branch, remote 
 ### Branch, remote and tag tree in the Activity Bar
 - Local branches, `remotes/<name>` groups and tags in one filterable tree, shown directly in the Primary Side Bar. A **Repos:** heading sits above the repository row (`<repo> (<branch>)`), and local branches are listed directly under **Branches**.
 - Selecting a ref, isolating branches (eye button) and the busy status of Git operations are mirrored between the sidebar tree and the editor timeline.
-- The **checked-out** branch is unmistakable: green accent bar, check icon, bold name and a **Checked Out** badge.
+- The **checked-out** branch is unmistakable: green accent bar, check icon, bold name and a compact **Checked Out** badge. The badge shrinks as the sidebar narrows, disappears when it would be unreadable, and can be turned off from the repository row's right-click menu (**Hide "Checked Out" Badge**).
 - Every local branch shows explicit **↑ (commits to push) / ↓ (commits to pull)** counts, `↑0 ↓0` when up to date. A branch with no upstream shows `↑– ↓–`, and a branch whose upstream was deleted on the remote shows `↑– ↓–` with a warning tooltip instead of claiming it is up to date.
 - **Single-click** any branch, remote branch or tag to *inspect* it: it is highlighted with the list-selection colours and the history table, breadcrumb and "Showing N of M commits" indicator focus on the commits reachable from it. **Clear filter** returns to the full history.
 - **Double-click** (or press <kbd>Enter</kbd> on) a non-current local branch to check it out. The eye button still isolates several branches at once.
@@ -25,7 +25,7 @@ A Visual Studio-style **Git Repository** window for VS Code: the branch, remote 
 - Rebase and Delete ask for confirmation. If a merge, rebase, cherry-pick or revert stops on conflicts, the error message tells you to resolve them in the Source Control view or abort in a terminal.
 
 ### Multi-lane SVG commit graph
-- The history table has **Branch / Tag**, **Graph**, **Message**, **Author**, **Date** and **ID** columns.
+- The history table has **Branch / Tag**, **Graph**, **Message**, **Author**, **Date** and **ID** columns. Drag any column divider to resize it (double-click a divider to reset that column); widths are remembered.
 - Branches, merges and octopus merges are drawn as coloured lanes that stay readable on light and dark themes.
 - Lanes are recycled after merges, and lanes that lead to commits outside the visible list end cleanly.
 - Filter the history by message, author, hash or ref name.

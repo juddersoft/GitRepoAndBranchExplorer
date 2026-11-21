@@ -3,6 +3,12 @@
 All notable changes to **Git Repo & Branch Explorer** are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [1.4.1] - 2026-11-21
+
+### Changed
+- The sidebar **CHECKED OUT** badge is now compact (about 70% of its previous size), scales down proportionally as the sidebar narrows, hides itself when it would be too small to read, and never crowds out the branch name. Hide or show it from the repository row's right-click menu; the choice is remembered across sessions.
+- The commit history table's column dividers are now draggable (double-click a divider to reset that column), and the column widths are remembered, like Visual Studio's Git Repository history.
+
 ## [1.4.0] - 2026-11-21
 
 ### Added

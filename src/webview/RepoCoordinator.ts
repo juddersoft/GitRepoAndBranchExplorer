@@ -54,13 +54,13 @@ function toRepoErrorPayload(err: unknown): RepoErrorPayload {
   return { message: err instanceof Error ? err.message : 'An unknown error occurred while reading the repository.' };
 }
 
-function getInitState(tabPinned: boolean): InitStatePayload {
+function getInitState(tabPinned: boolean, showCheckedOutBadge: boolean): InitStatePayload {
   const folder = vscode.workspace.workspaceFolders?.[0];
   if (!folder) {
-    return { repoName: 'No folder open', workspacePath: null, tabPinned };
+    return { repoName: 'No folder open', workspacePath: null, tabPinned, showCheckedOutBadge };
   }
   const fsPath = folder.uri.fsPath;
-  return { repoName: folder.name || path.basename(fsPath), workspacePath: fsPath, tabPinned };
+  return { repoName: folder.name || path.basename(fsPath), workspacePath: fsPath, tabPinned, showCheckedOutBadge };
 }
 
 /** Hint appended to failures of operations that can stop half-way through with conflicts. */
@@ -84,6 +84,9 @@ export interface WebviewSurface {
 export interface RepoCoordinatorHost {
   getTabPinned(): boolean;
   setTabPinned(pinned: boolean): void;
+  getShowCheckedOutBadge(): boolean;
+  /** Stores the preference and tells every connected view (see {@link RepoCoordinator.publishInitState}). */
+  setShowCheckedOutBadge(show: boolean): void;
   /** Opens or reveals the editor tab. */
   openPanel(): void;
   /** The checked-out branch of the loaded repository (for the tab title), or null when none is loaded. */
@@ -184,6 +187,9 @@ export class RepoCoordinator implements vscode.Disposable {
       case 'setTabPinned':
         this.host.setTabPinned(message.payload.pinned);
         break;
+      case 'setShowCheckedOutBadge':
+        this.host.setShowCheckedOutBadge(message.payload.show);
+        break;
       case 'copyCommitHash':
         void this.copyCommitHash(message.payload.hash);
         break;
@@ -207,6 +213,21 @@ export class RepoCoordinator implements vscode.Disposable {
     }
   }
 
+  public getInitState(): InitStatePayload {
+    return getInitState(this.host.getTabPinned(), this.host.getShowCheckedOutBadge());
+  }
+
+  /**
+   * Pushes changed preferences to every attached view. A webview treats `initState` as the start of a load,
+   * so the cached snapshot is re-sent right after to end that loading state.
+   */
+  public publishInitState(): void {
+    this.broadcast({ type: 'initState', payload: this.getInitState() });
+    if (this.lastSnapshot !== null) {
+      this.broadcast({ type: 'repoSnapshot', payload: this.lastSnapshot });
+    }
+  }
+
   /** Brings a freshly loaded webview up to date from the cached state, or loads the repository if there is none yet. */
   private sendInitialState(source: SurfaceId): void {
     const surface = this.surfaces.get(source);
@@ -221,7 +242,7 @@ export class RepoCoordinator implements vscode.Disposable {
       void this.loadRepository();
       return;
     }
-    surface.post({ type: 'initState', payload: getInitState(this.host.getTabPinned()) });
+    surface.post({ type: 'initState', payload: this.getInitState() });
     this.host.onCurrentBranchChange(snapshot.currentBranch);
     surface.post({ type: 'repoSnapshot', payload: snapshot });
     surface.post({ type: 'syncState', payload: this.selection });
@@ -852,7 +873,7 @@ export class RepoCoordinator implements vscode.Disposable {
       return;
     }
     const sequence = ++this.loadSequence;
-    const initState = getInitState(this.host.getTabPinned());
+    const initState = this.getInitState();
     this.broadcast({ type: 'initState', payload: initState });
     this.gitDiffProvider?.clearAllowedRepoRoots();
 

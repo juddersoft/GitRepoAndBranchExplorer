@@ -94,6 +94,12 @@ function runRepoMenuAction(id: MenuActionId): void {
     case 'refresh':
       vscode.postMessage({ type: 'requestRefresh' });
       break;
+    case 'toggleCheckedOutBadge': {
+      const show = !state.showCheckedOutBadge;
+      setState({ showCheckedOutBadge: show });
+      vscode.postMessage({ type: 'setShowCheckedOutBadge', payload: { show } });
+      break;
+    }
     default:
       break;
   }
@@ -101,7 +107,7 @@ function runRepoMenuAction(id: MenuActionId): void {
 
 function showRepoContextMenu(x: number, y: number): void {
   if (state.snapshot) {
-    contextMenu.show(x, y, buildRepoMenu(state.snapshot, state), runRepoMenuAction);
+    contextMenu.show(x, y, buildRepoMenu(state.snapshot, state, state.showCheckedOutBadge), runRepoMenuAction);
   }
 }
 
@@ -131,7 +137,11 @@ function handleMessage(message: ExtensionToWebviewMessage): void {
   switch (message.type) {
     case 'initState':
       // The extension sends initState at the start of every load.
-      setState({ isLoading: true, ...(message.payload.tabPinned === undefined ? {} : { tabPinned: message.payload.tabPinned }) });
+      setState({
+        isLoading: true,
+        ...(message.payload.tabPinned === undefined ? {} : { tabPinned: message.payload.tabPinned }),
+        ...(message.payload.showCheckedOutBadge === undefined ? {} : { showCheckedOutBadge: message.payload.showCheckedOutBadge }),
+      });
       break;
     case 'repoSnapshot':
       state = reconcileStateWithSnapshot(state, message.payload, knownRemoteNames);

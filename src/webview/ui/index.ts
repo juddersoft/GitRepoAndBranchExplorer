@@ -2,6 +2,8 @@ import type { CommitNode } from '../../types/git';
 import type { ExtensionToWebviewMessage, GitAction } from '../../types/messages';
 import { isExtensionToWebviewMessage } from '../../types/messages';
 import { ContextMenu } from './ContextMenu';
+import type { StoredColumnWidths } from './columnResize';
+import { sanitizeStoredColumnWidths } from './columnResize';
 import type { MenuActionId } from './contextMenuModel';
 import { buildCommitMenu } from './contextMenuModel';
 import { el } from './dom';
@@ -28,16 +30,17 @@ interface PersistedState {
   showLocalBranchBadges: boolean;
   showRemoteBranchBadges: boolean;
   showTagBadges: boolean;
+  columnWidths: StoredColumnWidths;
 }
 
 const vscodeStateKeys = ['showLocalBranchBadges', 'showRemoteBranchBadges', 'showTagBadges'] as const;
 
-function readPersistedState(raw: unknown): Partial<PersistedState> {
+function readPersistedState(raw: unknown): Partial<Omit<PersistedState, 'columnWidths'>> {
   if (typeof raw !== 'object' || raw === null) {
     return {};
   }
   const r = raw as Record<string, unknown>;
-  const result: Partial<PersistedState> = {};
+  const result: Partial<Omit<PersistedState, 'columnWidths'>> = {};
   for (const key of vscodeStateKeys) {
     if (typeof r[key] === 'boolean') {
       result[key] = r[key] as boolean;
@@ -46,7 +49,12 @@ function readPersistedState(raw: unknown): Partial<PersistedState> {
   return result;
 }
 
+function readPersistedColumnWidths(raw: unknown): StoredColumnWidths {
+  return typeof raw === 'object' && raw !== null ? sanitizeStoredColumnWidths((raw as Record<string, unknown>).columnWidths) : {};
+}
+
 let state: ExplorerUiState = { ...createInitialState(), ...readPersistedState(vscode.getState()) };
+let columnWidths: StoredColumnWidths = readPersistedColumnWidths(vscode.getState());
 const knownRemoteNames = new Set<string>();
 
 function persist(): void {
@@ -54,6 +62,7 @@ function persist(): void {
     showLocalBranchBadges: state.showLocalBranchBadges,
     showRemoteBranchBadges: state.showRemoteBranchBadges,
     showTagBadges: state.showTagBadges,
+    columnWidths,
   };
   vscode.setState(data);
 }
@@ -138,7 +147,11 @@ const historyPane = new HistoryPane({
   onOpenInGitGraph: () => vscode.postMessage({ type: 'openInGitGraph' }),
   onOpenCommitOnGitHub: (hash) => vscode.postMessage({ type: 'openCommitOnGitHub', payload: { hash } }),
   onSignInGitHub: () => vscode.postMessage({ type: 'signInGitHub' }),
-});
+  onColumnWidthsChange: (widths) => {
+    columnWidths = widths;
+    persist();
+  },
+}, columnWidths);
 
 const pendingDetailRequests = new Set<string>();
 
@@ -168,7 +181,11 @@ function handleMessage(message: ExtensionToWebviewMessage): void {
   switch (message.type) {
     case 'initState':
       // The extension sends initState at the start of every load.
-      setState({ isLoading: true, ...(message.payload.tabPinned === undefined ? {} : { tabPinned: message.payload.tabPinned }) });
+      setState({
+        isLoading: true,
+        ...(message.payload.tabPinned === undefined ? {} : { tabPinned: message.payload.tabPinned }),
+        ...(message.payload.showCheckedOutBadge === undefined ? {} : { showCheckedOutBadge: message.payload.showCheckedOutBadge }),
+      });
       break;
     case 'repoSnapshot':
       state = reconcileStateWithSnapshot(state, message.payload, knownRemoteNames);

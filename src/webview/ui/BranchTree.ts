@@ -1,5 +1,6 @@
 import type { BranchInfo, RemoteGroup, RepoSnapshot, TagInfo } from '../../types/git';
 import { button, createSearchBox, el, icon, type IconName, rebuildPreservingFocus } from './dom';
+import { computeCheckedOutPillLayout } from './pillLayout';
 import type { ExplorerUiState, RefTarget, TrackingSummary } from './state';
 import {
   branchRefTarget,
@@ -39,6 +40,21 @@ function trackingElement(summary: TrackingSummary): HTMLElement {
   );
 }
 
+/** Must match the base (scale 1) `.checked-out-badge` metrics in styles.css. */
+const BADGE_BASE = { fontSize: 9, lineHeight: 11, paddingX: 4, borderRadius: 5 } as const;
+
+function pixels(value: string): number {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+/** Width of the label's text itself; `scrollWidth` would only report the stretched flex box. */
+function naturalTextWidth(label: HTMLElement): number {
+  const range = document.createRange();
+  range.selectNodeContents(label);
+  return range.getBoundingClientRect().width;
+}
+
 /** Activity Bar view: `Repos:` heading, repository row, branch filter and the Branches / remotes / tags tree. */
 export class BranchTree {
   public readonly element: HTMLElement;
@@ -48,6 +64,8 @@ export class BranchTree {
   private readonly busyEl: HTMLElement;
   private readonly search: ReturnType<typeof createSearchBox>;
   private readonly treeEl: HTMLUListElement;
+  private readonly treeScroll: HTMLElement;
+  private readonly resizeObserver: ResizeObserver | undefined;
   private refTargets = new Map<string, RefTarget>();
 
   constructor(private readonly callbacks: BranchTreeCallbacks) {
@@ -83,13 +101,24 @@ export class BranchTree {
     this.treeEl = el('ul', { className: 'tree', attrs: { role: 'tree', 'aria-label': 'Branches' } });
     this.treeEl.addEventListener('keydown', (event) => this.handleTreeKeydown(event));
 
+    this.treeScroll = el('div', { className: 'tree-scroll' }, [this.treeEl]);
+
     this.element = el('aside', { className: 'pane pane-left', attrs: { 'aria-label': 'Branch explorer' } }, [
       el('div', { className: 'sidebar-header' }, [el('span', { className: 'sidebar-heading', text: 'Repos:' }), openTimeline]),
       this.repoRow,
       el('div', { className: 'sidebar-filter' }, [this.search.element]),
       this.busyEl,
-      el('div', { className: 'tree-scroll' }, [this.treeEl]),
+      this.treeScroll,
     ]);
+
+    if (typeof ResizeObserver !== 'undefined') {
+      this.resizeObserver = new ResizeObserver(() => this.layoutCheckedOutBadges());
+      this.resizeObserver.observe(this.treeScroll);
+    }
+  }
+
+  public dispose(): void {
+    this.resizeObserver?.disconnect();
   }
 
   public update(state: ExplorerUiState): void {
@@ -119,6 +148,51 @@ export class BranchTree {
         : this.treeEl.querySelector<HTMLElement>('[role="treeitem"]');
     if (tabStop) {
       tabStop.tabIndex = 0;
+    }
+    this.layoutCheckedOutBadges();
+  }
+
+  /**
+   * Fits the "Checked Out" pill into whatever the row has left after the branch name and the ahead/behind
+   * counters, scaling it down (CSSOM only, per the CSP) or hiding it when there is too little room.
+   */
+  private layoutCheckedOutBadges(): void {
+    for (const badge of Array.from(this.treeEl.querySelectorAll<HTMLElement>('.checked-out-badge'))) {
+      const row = badge.parentElement;
+      const label = row?.querySelector<HTMLElement>('.tree-label');
+      if (!row || !label || row.clientWidth === 0) {
+        continue;
+      }
+      badge.classList.remove('checked-out-badge-hidden');
+      badge.style.fontSize = '';
+      badge.style.lineHeight = '';
+      badge.style.paddingLeft = '';
+      badge.style.paddingRight = '';
+      badge.style.borderRadius = '';
+
+      const rowStyle = getComputedStyle(row);
+      const gap = pixels(rowStyle.columnGap);
+      const rowRect = row.getBoundingClientRect();
+      const trailing = Array.from(row.children).filter(
+        (child) => child !== badge && (child.compareDocumentPosition(badge) & Node.DOCUMENT_POSITION_PRECEDING) !== 0,
+      );
+      const layout = computeCheckedOutPillLayout({
+        rowAvailableWidth: row.clientWidth - pixels(rowStyle.paddingLeft) - pixels(rowStyle.paddingRight),
+        prefixWidth: label.getBoundingClientRect().left - rowRect.left - pixels(rowStyle.paddingLeft),
+        branchLabelNaturalWidth: naturalTextWidth(label),
+        trackingWidth: trailing.reduce((sum, child) => sum + child.getBoundingClientRect().width + gap, 0),
+        pillBaseWidth: badge.getBoundingClientRect().width + gap,
+      });
+
+      badge.classList.toggle('checked-out-badge-hidden', !layout.visible);
+      if (layout.visible && layout.scale < 1) {
+        const { scale } = layout;
+        badge.style.fontSize = `${BADGE_BASE.fontSize * scale}px`;
+        badge.style.lineHeight = `${BADGE_BASE.lineHeight * scale}px`;
+        badge.style.paddingLeft = `${BADGE_BASE.paddingX * scale}px`;
+        badge.style.paddingRight = `${BADGE_BASE.paddingX * scale}px`;
+        badge.style.borderRadius = `${BADGE_BASE.borderRadius * scale}px`;
+      }
     }
   }
 
@@ -269,7 +343,7 @@ export class BranchTree {
       el('span', { className: 'twisty-spacer' }),
       branch.isCurrent ? icon('checkCircle', 'icon checked-out-icon') : icon('branch'),
       el('span', { className: 'tree-label', text: branch.displayName }),
-      ...(branch.isCurrent
+      ...(branch.isCurrent && state.showCheckedOutBadge
         ? [el('span', { className: 'checked-out-badge', text: 'Checked Out', title: 'This branch is checked out (HEAD)' })]
         : []),
       ...(tracking ? [trackingElement(tracking)] : []),

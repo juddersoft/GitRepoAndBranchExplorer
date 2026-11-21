@@ -145,6 +145,8 @@ export interface ExplorerUiState {
   selectedBranchRef: string | null;
   /** When false, the editor tab closes automatically once another sidebar view container is selected. */
   tabPinned: boolean;
+  /** Whether the sidebar shows the "Checked Out" pill (the check icon and accent bar always mark HEAD). */
+  showCheckedOutBadge: boolean;
   showLocalBranchBadges: boolean;
   showRemoteBranchBadges: boolean;
   showTagBadges: boolean;
@@ -169,6 +171,7 @@ export function createInitialState(): ExplorerUiState {
     selectedBranchFullName: null,
     selectedBranchRef: null,
     tabPinned: false,
+    showCheckedOutBadge: true,
     showLocalBranchBadges: true,
     showRemoteBranchBadges: true,
     showTagBadges: true,

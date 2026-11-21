@@ -158,7 +158,12 @@ const selection = (fullName: string | null, ref: string | null, pinned: string[]
 });
 
 describe('RepoCoordinator', () => {
-  let host: RepoCoordinatorHost & { setTabPinned: ReturnType<typeof vi.fn>; openPanel: ReturnType<typeof vi.fn> };
+  let host: RepoCoordinatorHost & {
+    setTabPinned: ReturnType<typeof vi.fn>;
+    setShowCheckedOutBadge: ReturnType<typeof vi.fn>;
+    openPanel: ReturnType<typeof vi.fn>;
+  };
+  let showCheckedOutBadge = true;
   let coordinator: RepoCoordinator;
   let sidebar: FakeSurface;
   let editor: FakeSurface;
@@ -170,9 +175,12 @@ describe('RepoCoordinator', () => {
     mocks.getRepoSnapshot.mockImplementation(async () => MAIN_AND_FEATURE());
     mocks.getGitHubRemoteUrl.mockResolvedValue(null);
     mocks.checkoutBranch.mockResolvedValue(undefined);
+    showCheckedOutBadge = true;
     host = {
       getTabPinned: () => false,
       setTabPinned: vi.fn(),
+      getShowCheckedOutBadge: () => showCheckedOutBadge,
+      setShowCheckedOutBadge: vi.fn(),
       openPanel: vi.fn(),
       onCurrentBranchChange: vi.fn(),
     };
@@ -508,6 +516,23 @@ describe('RepoCoordinator', () => {
     coordinator.handleMessage('sidebar', { type: 'openRepositoryPanel' });
     expect(host.setTabPinned).toHaveBeenCalledWith(true);
     expect(host.openPanel).toHaveBeenCalledTimes(1);
+  });
+
+  it('delegates the checked-out badge preference to the host and publishes it to every view', async () => {
+    await openBoth();
+    expect(sidebar.ofType('initState')[0].payload).toMatchObject({ showCheckedOutBadge: true });
+
+    coordinator.handleMessage('sidebar', { type: 'setShowCheckedOutBadge', payload: { show: false } });
+    expect(host.setShowCheckedOutBadge).toHaveBeenCalledWith(false);
+
+    showCheckedOutBadge = false;
+    coordinator.publishInitState();
+    for (const surface of [sidebar, editor]) {
+      const inits = surface.ofType('initState');
+      expect(inits[inits.length - 1].payload).toMatchObject({ showCheckedOutBadge: false });
+      // The snapshot follows so a webview that treats initState as "loading started" settles again.
+      expect(surface.messages[surface.messages.length - 1].type).toBe('repoSnapshot');
+    }
   });
 
   it('forgets the repository once every view is gone and reloads for the next one', async () => {

@@ -405,15 +405,19 @@ button {
 
 .checked-out-badge {
   flex: 0 0 auto;
-  padding: 0 6px;
+  padding: 0 4px;
   border: 1px solid var(--checked-out-accent);
-  border-radius: 8px;
-  font-size: 0.8em;
+  border-radius: 5px;
+  font-size: 9px;
   font-weight: 600;
-  line-height: 15px;
+  line-height: 11px;
   letter-spacing: 0.02em;
   text-transform: uppercase;
   color: var(--checked-out-accent);
+}
+
+.checked-out-badge-hidden {
+  display: none;
 }
 
 /* Selected / inspected ref: list selection colors with an outline, so it never reads as "checked out". */
@@ -630,26 +634,23 @@ button {
 
 .history-table {
   width: 100%;
-  /* Recomputed at runtime as fixed columns + graph width + 180px message (see HistoryPane.ts). */
-  min-width: 765px;
+  /* Recomputed at runtime as the sum of the column widths (see HistoryPane.ts). */
+  min-width: 845px;
   table-layout: fixed;
   border-collapse: collapse;
 }
 
-col.col-refs,
-.history-table .col-refs {
+/* Initial widths; HistoryPane.ts overrides them through the CSSOM when a column is resized. */
+col.col-refs {
   width: 155px;
-  max-width: 155px;
 }
 
 col.col-graph {
   width: 56px;
 }
 
-col.col-message,
-.history-table .col-message {
+col.col-message {
   width: auto;
-  min-width: 180px;
 }
 
 col.col-author {
@@ -674,6 +675,52 @@ col.col-id {
   font-weight: 600;
   background-color: var(--vscode-editor-background);
   border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+/* Each header paints above its right neighbour so the resize handle overhanging that edge stays clickable. */
+.history-table th.col-refs { z-index: 7; }
+.history-table th.col-graph { z-index: 6; }
+.history-table th.col-message { z-index: 5; }
+.history-table th.col-author { z-index: 4; }
+.history-table th.col-date { z-index: 3; }
+.history-table th.col-id { z-index: 2; }
+
+.th-label {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.col-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -4px;
+  width: 8px;
+  z-index: 2;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.col-resizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 2px;
+  background-color: transparent;
+}
+
+/* The last handle stays inside the table so it cannot add horizontal scroll. */
+.history-table th.col-id .col-resizer {
+  right: 0;
+}
+
+.col-resizer:hover::after,
+.col-resizer.resizing::after {
+  background-color: var(--vscode-sash-hoverBorder, var(--vscode-focusBorder));
 }
 
 .history-table td {

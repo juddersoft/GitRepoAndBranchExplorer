@@ -93,6 +93,23 @@ describe('setTabPinned validation', () => {
   });
 });
 
+describe('setShowCheckedOutBadge validation', () => {
+  it('accepts only a boolean show', () => {
+    expect(isWebviewToExtensionMessage({ type: 'setShowCheckedOutBadge', payload: { show: true } })).toBe(true);
+    expect(isWebviewToExtensionMessage({ type: 'setShowCheckedOutBadge', payload: { show: false } })).toBe(true);
+    expect(isWebviewToExtensionMessage({ type: 'setShowCheckedOutBadge', payload: { show: 'yes' } })).toBe(false);
+    expect(isWebviewToExtensionMessage({ type: 'setShowCheckedOutBadge', payload: { show: 1 } })).toBe(false);
+    expect(isWebviewToExtensionMessage({ type: 'setShowCheckedOutBadge', payload: {} })).toBe(false);
+    expect(isWebviewToExtensionMessage({ type: 'setShowCheckedOutBadge' })).toBe(false);
+  });
+
+  it('rejects prototype-pollution keys', () => {
+    const payload = JSON.parse('{"show":true,"__proto__":{"polluted":true}}') as unknown;
+    expect(isWebviewToExtensionMessage({ type: 'setShowCheckedOutBadge', payload })).toBe(false);
+    expect(isWebviewToExtensionMessage(JSON.parse('{"type":"setShowCheckedOutBadge","payload":{"show":true},"constructor":{}}'))).toBe(false);
+  });
+});
+
 describe('context-menu commit and integration messages', () => {
   it('still validates copyCommitHash, openCommitOnGitHub and openInGitGraph', () => {
     expect(isWebviewToExtensionMessage({ type: 'copyCommitHash', payload: { hash: HASH } })).toBe(true);
@@ -170,6 +187,15 @@ describe('initState tabPinned', () => {
     expect(isExtensionToWebviewMessage(initState({}))).toBe(true);
     expect(isExtensionToWebviewMessage(initState({ tabPinned: true }))).toBe(true);
     expect(isExtensionToWebviewMessage(initState({ tabPinned: 'no' }))).toBe(false);
+  });
+
+  it('accepts an optional boolean showCheckedOutBadge', () => {
+    const initState = (extra: Record<string, unknown>): unknown => ({
+      type: 'initState',
+      payload: { repoName: 'r', workspacePath: null, ...extra },
+    });
+    expect(isExtensionToWebviewMessage(initState({ showCheckedOutBadge: false }))).toBe(true);
+    expect(isExtensionToWebviewMessage(initState({ showCheckedOutBadge: 'no' }))).toBe(false);
   });
 });
 

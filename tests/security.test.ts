@@ -146,6 +146,16 @@ describe('static webview sink and Git spawning audit', () => {
     }
   });
 
+  it('contains no innerHTML or inline style= attributes in the new layout and history files', () => {
+    const files = ['pillLayout.ts', 'columnResize.ts', 'BranchTree.ts', 'HistoryPane.ts'];
+    for (const name of files) {
+      const file = path.resolve('src/webview/ui', name);
+      const source = fs.readFileSync(file, 'utf8');
+      expect(source, file).not.toMatch(/\.(innerHTML|outerHTML)\b/);
+      expect(source, file).not.toMatch(/\bstyle\s*=/i);
+    }
+  });
+
   it('prepends color and ext protocol hardening to every Git spawn argv', () => {
     const source = fs.readFileSync(path.resolve('src/git/gitExecutor.ts'), 'utf8');
     expect(source).toContain("['-c', 'color.ui=false', '-c', 'protocol.ext.allow=never', ...args]");

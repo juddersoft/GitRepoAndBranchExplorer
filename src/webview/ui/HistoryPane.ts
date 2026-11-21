@@ -3,6 +3,8 @@ import type { GitAction } from '../../types/messages';
 import { GIT_ACTION_LABELS } from '../../types/messages';
 import { pullPushDisabledReason } from './contextMenuModel';
 import { button, createSearchBox, el, icon, type IconName } from './dom';
+import type { ColumnKey, StoredColumnWidths } from './columnResize';
+import { clampColumnWidth, computeTableMinWidth, resolveColumnWidths } from './columnResize';
 import type { GraphRowLayout } from './graphLayout';
 import { computeGraphLayout } from './graphLayout';
 import type { BadgeKindToggle, ExplorerUiState } from './state';
@@ -32,6 +34,8 @@ export interface HistoryPaneCallbacks {
   onOpenInGitGraph(): void;
   onOpenCommitOnGitHub(hash: string): void;
   onSignInGitHub(): void;
+  /** The user resized (or reset) a column; `widths` holds only the columns that differ from their defaults. */
+  onColumnWidthsChange(widths: StoredColumnWidths): void;
 }
 
 const FILE_STATUS_LABELS: Readonly<Record<ChangedFileStatus, string>> = {
@@ -44,14 +48,14 @@ const FILE_STATUS_LABELS: Readonly<Record<ChangedFileStatus, string>> = {
   U: 'Unmerged',
 };
 
-const COLUMNS = [
+const COLUMNS: ReadonlyArray<{ key: ColumnKey; label: string }> = [
   { key: 'refs', label: 'Branch / Tag' },
   { key: 'graph', label: 'Graph' },
   { key: 'message', label: 'Message' },
   { key: 'author', label: 'Author' },
   { key: 'date', label: 'Date' },
   { key: 'id', label: 'ID' },
-] as const;
+];
 
 const MAX_INLINE_BADGES = 2;
 const AVATAR_COLOR_COUNT = 6;
@@ -64,9 +68,6 @@ export const ROW_HEIGHT = 26;
 export const MAX_RENDERED_LANES = 24;
 export const GRAPH_COLOR_COUNT = 8;
 const MIN_GRAPH_COLUMN_WIDTH = 56;
-/** Sum of the fixed `refs`, `author`, `date` and `id` column widths in styles.css. */
-const FIXED_COLUMNS_WIDTH = 155 + 150 + 140 + 84;
-const MIN_MESSAGE_COLUMN_WIDTH = 180;
 
 export function graphWidth(maxLanes: number): number {
   return Math.min(Math.max(maxLanes, 1), MAX_RENDERED_LANES) * LANE_WIDTH + LEFT_PAD * 2;
@@ -222,7 +223,7 @@ export class HistoryPane {
   private readonly tableScroll: HTMLElement;
   private readonly table: HTMLTableElement;
   private readonly tbody: HTMLTableSectionElement;
-  private readonly graphCol: HTMLTableColElement;
+  private readonly columnEls = new Map<ColumnKey, HTMLTableColElement>();
   private readonly details: HTMLElement;
   private readonly detailsTitle: HTMLElement;
   private readonly detailsToggle: HTMLButtonElement;
@@ -231,8 +232,15 @@ export class HistoryPane {
   private visibleCommits: CommitNode[] = [];
   private isDetailsCollapsed = false;
   private lastState: ExplorerUiState | null = null;
+  private storedColumnWidths: StoredColumnWidths;
+  /** Width the graph column needs for the lanes currently shown; it can never be dragged below this. */
+  private activeGraphWidth = MIN_GRAPH_COLUMN_WIDTH;
 
-  constructor(private readonly callbacks: HistoryPaneCallbacks) {
+  constructor(
+    private readonly callbacks: HistoryPaneCallbacks,
+    initialColumnWidths: StoredColumnWidths = {},
+  ) {
+    this.storedColumnWidths = initialColumnWidths;
     const actions = ACTIONS.map(({ action, icon: iconName, tooltip }) => {
       const btn = button({ className: 'toolbar-button', label: GIT_ACTION_LABELS[action], title: tooltip, icon: iconName, showLabel: true });
       btn.addEventListener('click', () => callbacks.onGitAction(action));
@@ -327,13 +335,17 @@ export class HistoryPane {
       }
     });
 
-    const cols = COLUMNS.map((col) => el('col', { className: `col-${col.key}` }));
-    this.graphCol = cols[COLUMNS.findIndex((col) => col.key === 'graph')];
+    const cols = COLUMNS.map((col) => {
+      const colEl = el('col', { className: `col-${col.key}` });
+      this.columnEls.set(col.key, colEl);
+      return colEl;
+    });
     this.table = el('table', { className: 'history-table', attrs: { 'aria-label': 'Commit history' } }, [
       el('colgroup', {}, cols),
-      el('thead', {}, [el('tr', {}, COLUMNS.map((col) => el('th', { className: `col-${col.key}`, text: col.label, attrs: { scope: 'col' } })))]),
+      el('thead', {}, [el('tr', {}, COLUMNS.map((col) => this.renderHeaderCell(col.key, col.label)))]),
       this.tbody,
     ]);
+    this.applyColumnWidths();
 
     this.tableScroll = el('div', { className: 'table-scroll', attrs: { tabindex: '0', 'aria-label': 'Commit history, use arrow keys to select' } }, [this.table]);
     this.tableScroll.addEventListener('keydown', (event) => this.handleTableKeydown(event));
@@ -452,11 +464,92 @@ export class HistoryPane {
       return;
     }
     const layout = computeGraphLayout(this.visibleCommits);
-    const graphColumnWidth = Math.max(MIN_GRAPH_COLUMN_WIDTH, graphWidth(layout[0]?.maxLanesInWindow ?? 1));
-    // CSSOM assignment is permitted by the CSP (unlike inline style attributes).
-    this.graphCol.style.width = `${graphColumnWidth}px`;
-    this.table.style.minWidth = `${FIXED_COLUMNS_WIDTH + MIN_MESSAGE_COLUMN_WIDTH + graphColumnWidth}px`;
+    this.activeGraphWidth = Math.max(MIN_GRAPH_COLUMN_WIDTH, graphWidth(layout[0]?.maxLanesInWindow ?? 1));
+    this.applyColumnWidths();
     this.tbody.replaceChildren(...this.visibleCommits.map((commit, i) => this.renderRow(commit, layout[i], snapshot, state)));
+  }
+
+  private renderHeaderCell(key: ColumnKey, label: string): HTMLTableCellElement {
+    const resizer = el('span', {
+      className: 'col-resizer',
+      title: 'Drag to resize, double-click to reset',
+      attrs: { role: 'separator', 'aria-orientation': 'vertical', 'aria-label': `Resize ${label} column` },
+    });
+    resizer.addEventListener('pointerdown', (event) => this.beginColumnResize(event, key, resizer));
+    resizer.addEventListener('dblclick', (event) => {
+      event.preventDefault();
+      this.resetColumn(key);
+    });
+    return el('th', { className: `col-${key}`, attrs: { scope: 'col' } }, [el('span', { className: 'th-label', text: label }), resizer]);
+  }
+
+  /**
+   * Writes the column widths through the CSSOM (inline `style` attributes are blocked by the CSP). The message
+   * column stays fluid until the user sizes it; once any width is fixed the table's minimum is the column sum.
+   */
+  private applyColumnWidths(): void {
+    const widths = resolveColumnWidths(this.storedColumnWidths, this.activeGraphWidth);
+    const messageIsFluid = this.storedColumnWidths.message === undefined;
+    for (const [key, colEl] of this.columnEls) {
+      colEl.style.width = key === 'message' && messageIsFluid ? '' : `${widths[key]}px`;
+    }
+    const total = `${computeTableMinWidth(widths, this.activeGraphWidth)}px`;
+    this.table.style.minWidth = total;
+    this.table.style.width = messageIsFluid ? '' : total;
+  }
+
+  private setStoredWidth(key: ColumnKey, width: number | null): void {
+    const next: Partial<Record<ColumnKey, number>> = { ...this.storedColumnWidths };
+    if (width === null) {
+      delete next[key];
+    } else {
+      next[key] = width;
+    }
+    this.storedColumnWidths = next;
+    this.applyColumnWidths();
+  }
+
+  private beginColumnResize(event: PointerEvent, key: ColumnKey, resizer: HTMLElement): void {
+    const th = resizer.parentElement;
+    if (event.button !== 0 || !th) {
+      return;
+    }
+    event.preventDefault();
+    resizer.setPointerCapture(event.pointerId);
+    resizer.classList.add('resizing');
+    const startX = event.clientX;
+    const startWidth = th.getBoundingClientRect().width;
+    let moved = false;
+
+    const onMove = (move: PointerEvent): void => {
+      // A plain click must not turn a fluid column into a fixed-width one.
+      if (!moved && move.clientX === startX) {
+        return;
+      }
+      moved = true;
+      this.setStoredWidth(key, clampColumnWidth(key, startWidth + (move.clientX - startX), this.activeGraphWidth));
+    };
+    const onEnd = (): void => {
+      resizer.removeEventListener('pointermove', onMove);
+      resizer.removeEventListener('pointerup', onEnd);
+      resizer.removeEventListener('pointercancel', onEnd);
+      resizer.classList.remove('resizing');
+      if (resizer.hasPointerCapture(event.pointerId)) {
+        resizer.releasePointerCapture(event.pointerId);
+      }
+      if (moved) {
+        this.callbacks.onColumnWidthsChange(this.storedColumnWidths);
+      }
+    };
+    resizer.addEventListener('pointermove', onMove);
+    resizer.addEventListener('pointerup', onEnd);
+    resizer.addEventListener('pointercancel', onEnd);
+  }
+
+  /** Back to the default width (the message column goes back to filling the free space). */
+  private resetColumn(key: ColumnKey): void {
+    this.setStoredWidth(key, null);
+    this.callbacks.onColumnWidthsChange(this.storedColumnWidths);
   }
 
   private renderRow(commit: CommitNode, graph: GraphRowLayout, snapshot: RepoSnapshot, state: ExplorerUiState): HTMLTableRowElement {

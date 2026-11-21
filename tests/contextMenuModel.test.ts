@@ -257,14 +257,23 @@ describe('buildRepoMenu', () => {
     localBranches,
     ...patch,
   });
-  const menuFor = (snap: RepoSnapshot, patch: Partial<ExplorerUiState> = {}): MenuEntry[] =>
-    buildRepoMenu(snap, state({ snapshot: snap, ...patch }));
+  const menuFor = (snap: RepoSnapshot, patch: Partial<ExplorerUiState> = {}, showCheckedOutBadge?: boolean): MenuEntry[] =>
+    buildRepoMenu(snap, state({ snapshot: snap, ...patch }), showCheckedOutBadge);
 
-  it('offers Fetch, Pull, Push, New Branch and Refresh', () => {
+  it('offers Fetch, Pull, Push, New Branch, the badge toggle and Refresh', () => {
     const menu = menuFor(snapshot);
-    expect(ids(menu)).toEqual(['fetchTracked', 'pull', 'push', 'newBranch', 'refresh']);
+    expect(ids(menu)).toEqual(['fetchTracked', 'pull', 'push', 'newBranch', 'toggleCheckedOutBadge', 'refresh']);
     expect(enabled(menu)).toEqual(ids(menu));
     expect(item(menu, 'push').label).toBe('Push');
+  });
+
+  it('labels the badge toggle by the current preference and never disables it', () => {
+    expect(item(menuFor(snapshot, {}, true), 'toggleCheckedOutBadge')).toMatchObject({ label: 'Hide "Checked Out" Badge', enabled: true });
+    expect(item(menuFor(snapshot), 'toggleCheckedOutBadge').label).toBe('Hide "Checked Out" Badge');
+    expect(item(menuFor(snapshot, { isBusy: true }, false), 'toggleCheckedOutBadge')).toMatchObject({
+      label: 'Show "Checked Out" Badge',
+      enabled: true,
+    });
   });
 
   it('disables Fetch when no local branch tracks a remote, but keeps pull/push rules independent', () => {
@@ -303,9 +312,9 @@ describe('buildRepoMenu', () => {
     expect(item(menu, 'push').enabled).toBe(true);
   });
 
-  it('disables Fetch, Pull, Push and New Branch while busy, but still allows Refresh', () => {
+  it('disables Fetch, Pull, Push and New Branch while busy, but still allows the badge toggle and Refresh', () => {
     const menu = menuFor(snapshot, { isBusy: true });
-    expect(enabled(menu)).toEqual(['refresh']);
+    expect(enabled(menu)).toEqual(['toggleCheckedOutBadge', 'refresh']);
     expect(item(menu, 'fetchTracked').reason).toMatch(/running/i);
   });
 });
