@@ -1,4 +1,5 @@
 import type { BranchInfo, RemoteGroup, RepoSnapshot, TagInfo } from '../../types/git';
+import type { TrackingIndicatorOrder } from '../../types/messages';
 import { button, createSearchBox, el, icon, type IconName, rebuildPreservingFocus } from './dom';
 import { computeCheckedOutPillLayout, MIN_READABLE_PILL_SCALE } from './pillLayout';
 import type { ExplorerUiState, RefTarget, TrackingSummary } from './state';
@@ -31,12 +32,22 @@ function repoTitle(snapshot: RepoSnapshot): string {
   return `${snapshot.repoName} (${snapshot.currentBranch})`;
 }
 
-/** Explicit `↑n ↓n` indicator (`0` when nothing to push/pull; `–` when there is no usable upstream). */
-function trackingElement(summary: TrackingSummary): HTMLElement {
+export function getTrackingOrderSequence(
+  order: TrackingIndicatorOrder,
+): readonly ['down', 'up'] | readonly ['up', 'down'] {
+  return order === 'visualStudio' ? ['up', 'down'] : ['down', 'up'];
+}
+
+/** Explicit ahead/behind indicator, ordered for VS Code or Visual Studio. */
+function trackingElement(summary: TrackingSummary, order: TrackingIndicatorOrder): HTMLElement {
+  const indicators = {
+    up: el('span', { className: 'tracking-up', text: summary.up }),
+    down: el('span', { className: 'tracking-down', text: summary.down }),
+  };
   return el(
     'span',
     { className: `tracking tracking-${summary.kind}`, title: summary.title, attrs: { role: 'img', 'aria-label': summary.label } },
-    [el('span', { className: 'tracking-up', text: summary.up }), el('span', { className: 'tracking-down', text: summary.down })],
+    getTrackingOrderSequence(order).map((direction) => indicators[direction]),
   );
 }
 
@@ -85,6 +96,8 @@ export class BranchTree {
   private readonly treeScroll: HTMLElement;
   private readonly resizeObserver: ResizeObserver | undefined;
   private refTargets = new Map<string, RefTarget>();
+  private trackingOrder: TrackingIndicatorOrder = 'vscode';
+  private lastState: ExplorerUiState | undefined;
 
   constructor(private readonly callbacks: BranchTreeCallbacks) {
     this.titleEl = el('span', { className: 'sidebar-title', text: 'Loading\u2026' });
@@ -139,7 +152,19 @@ export class BranchTree {
     this.resizeObserver?.disconnect();
   }
 
+  public setTrackingOrder(order: TrackingIndicatorOrder): void {
+    if (this.trackingOrder === order) {
+      return;
+    }
+    this.trackingOrder = order;
+    if (this.lastState) {
+      this.update({ ...this.lastState, trackingOrder: order });
+    }
+  }
+
   public update(state: ExplorerUiState): void {
+    this.lastState = state;
+    this.trackingOrder = state.trackingOrder;
     const { snapshot } = state;
     const title = snapshot ? repoTitle(snapshot) : state.errorMessage ? 'No repository' : 'Loading\u2026';
     this.titleEl.textContent = title;
@@ -379,7 +404,7 @@ export class BranchTree {
       ...(branch.isCurrent && state.showCheckedOutBadge
         ? [el('span', { className: 'checked-out-badge', text: 'Checked Out', title: 'This branch is checked out (HEAD)' })]
         : []),
-      ...(tracking ? [trackingElement(tracking)] : []),
+      ...(tracking ? [trackingElement(tracking, this.trackingOrder)] : []),
       eye,
     ]);
     this.wireRefRow(row, target);

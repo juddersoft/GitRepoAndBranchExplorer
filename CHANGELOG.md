@@ -3,6 +3,11 @@
 All notable changes to **Git Repo & Branch Explorer** are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [1.4.3] - 2026-11-21
+
+### Changed
+- Branch commit counters now default to VS Code's incoming-first `↓ ↑` order, with a persisted repository-menu toggle for Visual Studio's `↑ ↓` order.
+
 ## [1.4.2] - 2026-11-21
 
 ### Changed

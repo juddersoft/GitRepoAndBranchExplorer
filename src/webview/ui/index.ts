@@ -185,6 +185,7 @@ function handleMessage(message: ExtensionToWebviewMessage): void {
         isLoading: true,
         ...(message.payload.tabPinned === undefined ? {} : { tabPinned: message.payload.tabPinned }),
         ...(message.payload.showCheckedOutBadge === undefined ? {} : { showCheckedOutBadge: message.payload.showCheckedOutBadge }),
+        ...(message.payload.trackingOrder === undefined ? {} : { trackingOrder: message.payload.trackingOrder }),
       });
       break;
     case 'repoSnapshot':

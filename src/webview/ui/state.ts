@@ -1,4 +1,4 @@
-import type { SyncStatePayload } from '../../types/messages';
+import type { SyncStatePayload, TrackingIndicatorOrder } from '../../types/messages';
 import type { BranchInfo, CommitDetails, CommitNode, ExternalIntegrationsInfo, RefBadge, RepoSnapshot, TagInfo } from '../../types/git';
 
 export const NODE_BRANCHES = 'branches';
@@ -147,6 +147,8 @@ export interface ExplorerUiState {
   tabPinned: boolean;
   /** Whether the sidebar shows the "Checked Out" pill (the check icon and accent bar always mark HEAD). */
   showCheckedOutBadge: boolean;
+  /** Preferred branch ahead/behind counter order. */
+  trackingOrder: TrackingIndicatorOrder;
   showLocalBranchBadges: boolean;
   showRemoteBranchBadges: boolean;
   showTagBadges: boolean;
@@ -172,6 +174,7 @@ export function createInitialState(): ExplorerUiState {
     selectedBranchRef: null,
     tabPinned: false,
     showCheckedOutBadge: true,
+    trackingOrder: 'vscode',
     showLocalBranchBadges: true,
     showRemoteBranchBadges: true,
     showTagBadges: true,

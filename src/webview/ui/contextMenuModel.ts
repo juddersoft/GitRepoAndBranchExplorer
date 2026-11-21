@@ -1,4 +1,5 @@
 import type { CommitNode, RepoSnapshot } from '../../types/git';
+import type { TrackingIndicatorOrder } from '../../types/messages';
 import { planTrackedFetch } from '../../git/trackedFetch';
 import type { ExplorerUiState, RefTarget } from './state';
 import { getHeadHash, isAncestorOfHead } from './state';
@@ -15,6 +16,7 @@ export type MenuActionId =
   | 'newBranch'
   | 'refresh'
   | 'toggleCheckedOutBadge'
+  | 'toggleTrackingOrder'
   | 'createBranchHere'
   | 'isolate'
   | 'deleteBranch'
@@ -139,7 +141,12 @@ export function buildRefMenu(snapshot: RepoSnapshot, state: ExplorerUiState, tar
 }
 
 /** Right-click menu for the repository header row in the branch tree. */
-export function buildRepoMenu(snapshot: RepoSnapshot, state: ExplorerUiState, showCheckedOutBadge = true): MenuEntry[] {
+export function buildRepoMenu(
+  snapshot: RepoSnapshot,
+  state: ExplorerUiState,
+  showCheckedOutBadge = true,
+  trackingOrder: TrackingIndicatorOrder = 'vscode',
+): MenuEntry[] {
   const busy = state.isBusy && BUSY_REASON;
   const current = snapshot.localBranches.find((branch) => branch.isCurrent);
   const noBranch = !snapshot.isDetachedHead && current === undefined && 'No branch is checked out yet.';
@@ -161,6 +168,12 @@ export function buildRepoMenu(snapshot: RepoSnapshot, state: ExplorerUiState, sh
     item('newBranch', 'New Branch\u2026', firstReason(busy)),
     SEPARATOR,
     item('toggleCheckedOutBadge', showCheckedOutBadge ? 'Hide "Checked Out" Badge' : 'Show "Checked Out" Badge'),
+    item(
+      'toggleTrackingOrder',
+      trackingOrder === 'vscode'
+        ? 'Commit Counters: Switch to ↑ ↓ (Visual Studio)'
+        : 'Commit Counters: Switch to ↓ ↑ (VS Code)',
+    ),
     SEPARATOR,
     item('refresh', 'Refresh'),
   ];

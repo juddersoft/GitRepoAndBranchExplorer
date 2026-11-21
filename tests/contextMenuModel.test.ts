@@ -257,12 +257,18 @@ describe('buildRepoMenu', () => {
     localBranches,
     ...patch,
   });
-  const menuFor = (snap: RepoSnapshot, patch: Partial<ExplorerUiState> = {}, showCheckedOutBadge?: boolean): MenuEntry[] =>
-    buildRepoMenu(snap, state({ snapshot: snap, ...patch }), showCheckedOutBadge);
+  const menuFor = (
+    snap: RepoSnapshot,
+    patch: Partial<ExplorerUiState> = {},
+    showCheckedOutBadge?: boolean,
+    trackingOrder?: ExplorerUiState['trackingOrder'],
+  ): MenuEntry[] => buildRepoMenu(snap, state({ snapshot: snap, ...patch }), showCheckedOutBadge, trackingOrder);
 
-  it('offers Fetch, Pull, Push, New Branch, the badge toggle and Refresh', () => {
+  it('offers Fetch, Pull, Push, New Branch, preference toggles and Refresh', () => {
     const menu = menuFor(snapshot);
-    expect(ids(menu)).toEqual(['fetchTracked', 'pull', 'push', 'newBranch', 'toggleCheckedOutBadge', 'refresh']);
+    expect(ids(menu)).toEqual([
+      'fetchTracked', 'pull', 'push', 'newBranch', 'toggleCheckedOutBadge', 'toggleTrackingOrder', 'refresh',
+    ]);
     expect(enabled(menu)).toEqual(ids(menu));
     expect(item(menu, 'push').label).toBe('Push');
   });
@@ -274,6 +280,18 @@ describe('buildRepoMenu', () => {
       label: 'Show "Checked Out" Badge',
       enabled: true,
     });
+  });
+
+  it('labels the tracking order toggle for VS Code by default and Visual Studio when selected', () => {
+    expect(item(menuFor(snapshot), 'toggleTrackingOrder')).toMatchObject({
+      label: 'Commit Counters: Switch to ↑ ↓ (Visual Studio)',
+      enabled: true,
+    });
+    expect(item(menuFor(snapshot, {}, true, 'visualStudio'), 'toggleTrackingOrder')).toMatchObject({
+      label: 'Commit Counters: Switch to ↓ ↑ (VS Code)',
+      enabled: true,
+    });
+    expect(item(menuFor(snapshot, { isBusy: true }, true, 'visualStudio'), 'toggleTrackingOrder').enabled).toBe(true);
   });
 
   it('disables Fetch when no local branch tracks a remote, but keeps pull/push rules independent', () => {
@@ -314,7 +332,7 @@ describe('buildRepoMenu', () => {
 
   it('disables Fetch, Pull, Push and New Branch while busy, but still allows the badge toggle and Refresh', () => {
     const menu = menuFor(snapshot, { isBusy: true });
-    expect(enabled(menu)).toEqual(['toggleCheckedOutBadge', 'refresh']);
+    expect(enabled(menu)).toEqual(['toggleCheckedOutBadge', 'toggleTrackingOrder', 'refresh']);
     expect(item(menu, 'fetchTracked').reason).toMatch(/running/i);
   });
 });

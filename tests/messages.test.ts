@@ -110,6 +110,23 @@ describe('setShowCheckedOutBadge validation', () => {
   });
 });
 
+describe('setTrackingOrder validation', () => {
+  it.each(['vscode', 'visualStudio'])('accepts %s', (order) => {
+    expect(isWebviewToExtensionMessage({ type: 'setTrackingOrder', payload: { order } })).toBe(true);
+  });
+
+  it.each(['default', '', 123, null, undefined])('rejects invalid order %j', (order) => {
+    expect(isWebviewToExtensionMessage({ type: 'setTrackingOrder', payload: { order } })).toBe(false);
+  });
+
+  it('rejects missing and prototype-polluted payloads', () => {
+    expect(isWebviewToExtensionMessage({ type: 'setTrackingOrder' })).toBe(false);
+    expect(isWebviewToExtensionMessage({ type: 'setTrackingOrder', payload: {} })).toBe(false);
+    const payload = JSON.parse('{"order":"vscode","__proto__":{"polluted":true}}') as unknown;
+    expect(isWebviewToExtensionMessage({ type: 'setTrackingOrder', payload })).toBe(false);
+  });
+});
+
 describe('context-menu commit and integration messages', () => {
   it('still validates copyCommitHash, openCommitOnGitHub and openInGitGraph', () => {
     expect(isWebviewToExtensionMessage({ type: 'copyCommitHash', payload: { hash: HASH } })).toBe(true);
@@ -196,6 +213,18 @@ describe('initState tabPinned', () => {
     });
     expect(isExtensionToWebviewMessage(initState({ showCheckedOutBadge: false }))).toBe(true);
     expect(isExtensionToWebviewMessage(initState({ showCheckedOutBadge: 'no' }))).toBe(false);
+  });
+
+  it('accepts only supported trackingOrder values', () => {
+    const initState = (trackingOrder: unknown): unknown => ({
+      type: 'initState',
+      payload: { repoName: 'r', workspacePath: null, trackingOrder },
+    });
+    expect(isExtensionToWebviewMessage(initState('vscode'))).toBe(true);
+    expect(isExtensionToWebviewMessage(initState('visualStudio'))).toBe(true);
+    expect(isExtensionToWebviewMessage(initState('default'))).toBe(false);
+    expect(isExtensionToWebviewMessage(initState(1))).toBe(false);
+    expect(isExtensionToWebviewMessage(initState(null))).toBe(false);
   });
 });
 

@@ -7,6 +7,14 @@ import {
   sanitizeStoredColumnWidths,
 } from '../src/webview/ui/columnResize';
 import { computeCheckedOutPillLayout, MIN_READABLE_PILL_SCALE } from '../src/webview/ui/pillLayout';
+import { getTrackingOrderSequence } from '../src/webview/ui/BranchTree';
+
+describe('tracking indicator order', () => {
+  it('uses incoming then outgoing for VS Code and outgoing then incoming for Visual Studio', () => {
+    expect(getTrackingOrderSequence('vscode')).toEqual(['down', 'up']);
+    expect(getTrackingOrderSequence('visualStudio')).toEqual(['up', 'down']);
+  });
+});
 
 describe('computeCheckedOutPillLayout', () => {
   const base = { prefixWidth: 40, branchLabelNaturalWidth: 100, trackingWidth: 50, pillBaseWidth: 60 };

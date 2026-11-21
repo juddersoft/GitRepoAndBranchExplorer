@@ -1,5 +1,7 @@
 import type { ChangedFileStatus, CommitDetails, ExternalIntegrationsInfo, RepoSnapshot } from './git';
 
+export type TrackingIndicatorOrder = 'vscode' | 'visualStudio';
+
 export type GitAction =
   | 'fetch'
   | 'fetchTracked'
@@ -83,6 +85,7 @@ export type WebviewToExtensionMessage =
   | { type: 'createBranchAtRef'; payload: { startPoint: string } }
   | { type: 'setTabPinned'; payload: { pinned: boolean } }
   | { type: 'setShowCheckedOutBadge'; payload: { show: boolean } }
+  | { type: 'setTrackingOrder'; payload: { order: TrackingIndicatorOrder } }
   | { type: 'copyCommitHash'; payload: { hash: string } }
   | { type: 'requestCommitDetails'; payload: { hash: string } }
   | { type: 'openFileDiff'; payload: OpenFileDiffPayload }
@@ -130,6 +133,8 @@ export interface InitStatePayload {
   tabPinned?: boolean;
   /** Whether the sidebar shows the "Checked Out" pill next to the checked-out branch (default `true`). */
   showCheckedOutBadge: boolean;
+  /** Display incoming before outgoing counters like VS Code, or Visual Studio's outgoing-first order. */
+  trackingOrder?: TrackingIndicatorOrder;
 }
 
 export interface RepoErrorPayload {
@@ -171,6 +176,10 @@ function ownField(record: Record<string, unknown>, key: string): unknown {
 
 function isGitAction(value: unknown): value is GitAction {
   return typeof value === 'string' && Object.prototype.hasOwnProperty.call(GIT_ACTION_LABELS, value);
+}
+
+function isTrackingIndicatorOrder(value: unknown): value is TrackingIndicatorOrder {
+  return value === 'vscode' || value === 'visualStudio';
 }
 
 /**
@@ -258,6 +267,8 @@ export function isWebviewToExtensionMessage(value: unknown): value is WebviewToE
       return payload !== null && typeof ownField(payload, 'pinned') === 'boolean';
     case 'setShowCheckedOutBadge':
       return payload !== null && typeof ownField(payload, 'show') === 'boolean';
+    case 'setTrackingOrder':
+      return payload !== null && isTrackingIndicatorOrder(ownField(payload, 'order'));
     case 'copyCommitHash':
     case 'requestCommitDetails':
     case 'openCommitOnGitHub':
@@ -313,7 +324,8 @@ export function isExtensionToWebviewMessage(value: unknown): value is ExtensionT
         typeof payload.repoName === 'string' &&
         (payload.workspacePath === null || typeof payload.workspacePath === 'string') &&
         (payload.tabPinned === undefined || typeof payload.tabPinned === 'boolean') &&
-        (payload.showCheckedOutBadge === undefined || typeof payload.showCheckedOutBadge === 'boolean')
+        (payload.showCheckedOutBadge === undefined || typeof payload.showCheckedOutBadge === 'boolean') &&
+        (payload.trackingOrder === undefined || isTrackingIndicatorOrder(payload.trackingOrder))
       );
     case 'repoSnapshot':
       return isRepoSnapshotShape(payload);

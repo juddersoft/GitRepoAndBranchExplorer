@@ -161,9 +161,11 @@ describe('RepoCoordinator', () => {
   let host: RepoCoordinatorHost & {
     setTabPinned: ReturnType<typeof vi.fn>;
     setShowCheckedOutBadge: ReturnType<typeof vi.fn>;
+    setTrackingOrder: ReturnType<typeof vi.fn>;
     openPanel: ReturnType<typeof vi.fn>;
   };
   let showCheckedOutBadge = true;
+  let trackingOrder: 'vscode' | 'visualStudio' = 'vscode';
   let coordinator: RepoCoordinator;
   let sidebar: FakeSurface;
   let editor: FakeSurface;
@@ -176,11 +178,16 @@ describe('RepoCoordinator', () => {
     mocks.getGitHubRemoteUrl.mockResolvedValue(null);
     mocks.checkoutBranch.mockResolvedValue(undefined);
     showCheckedOutBadge = true;
+    trackingOrder = 'vscode';
     host = {
       getTabPinned: () => false,
       setTabPinned: vi.fn(),
       getShowCheckedOutBadge: () => showCheckedOutBadge,
       setShowCheckedOutBadge: vi.fn(),
+      getTrackingOrder: () => trackingOrder,
+      setTrackingOrder: vi.fn((order: 'vscode' | 'visualStudio') => {
+        trackingOrder = order;
+      }),
       openPanel: vi.fn(),
       onCurrentBranchChange: vi.fn(),
     };
@@ -532,6 +539,22 @@ describe('RepoCoordinator', () => {
       expect(inits[inits.length - 1].payload).toMatchObject({ showCheckedOutBadge: false });
       // The snapshot follows so a webview that treats initState as "loading started" settles again.
       expect(surface.messages[surface.messages.length - 1].type).toBe('repoSnapshot');
+    }
+  });
+
+  it('includes the default tracking order and broadcasts persisted order changes with the snapshot', async () => {
+    await openBoth();
+    expect(coordinator.getInitState()).toMatchObject({ trackingOrder: 'vscode' });
+    expect(sidebar.ofType('initState')[0].payload).toMatchObject({ trackingOrder: 'vscode' });
+
+    coordinator.handleMessage('sidebar', { type: 'setTrackingOrder', payload: { order: 'visualStudio' } });
+
+    expect(host.setTrackingOrder).toHaveBeenCalledWith('visualStudio');
+    for (const surface of [sidebar, editor]) {
+      const inits = surface.ofType('initState');
+      expect(inits[inits.length - 1].payload).toMatchObject({ trackingOrder: 'visualStudio' });
+      expect(surface.messages[surface.messages.length - 1].type).toBe('repoSnapshot');
+      expect(surface.ofType('repoSnapshot')).toHaveLength(2);
     }
   });
 

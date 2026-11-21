@@ -100,6 +100,13 @@ function runRepoMenuAction(id: MenuActionId): void {
       vscode.postMessage({ type: 'setShowCheckedOutBadge', payload: { show } });
       break;
     }
+    case 'toggleTrackingOrder': {
+      const order = state.trackingOrder === 'vscode' ? 'visualStudio' : 'vscode';
+      branchTree.setTrackingOrder(order);
+      setState({ trackingOrder: order });
+      vscode.postMessage({ type: 'setTrackingOrder', payload: { order } });
+      break;
+    }
     default:
       break;
   }
@@ -107,7 +114,12 @@ function runRepoMenuAction(id: MenuActionId): void {
 
 function showRepoContextMenu(x: number, y: number): void {
   if (state.snapshot) {
-    contextMenu.show(x, y, buildRepoMenu(state.snapshot, state, state.showCheckedOutBadge), runRepoMenuAction);
+    contextMenu.show(
+      x,
+      y,
+      buildRepoMenu(state.snapshot, state, state.showCheckedOutBadge, state.trackingOrder),
+      runRepoMenuAction,
+    );
   }
 }
 
@@ -141,6 +153,7 @@ function handleMessage(message: ExtensionToWebviewMessage): void {
         isLoading: true,
         ...(message.payload.tabPinned === undefined ? {} : { tabPinned: message.payload.tabPinned }),
         ...(message.payload.showCheckedOutBadge === undefined ? {} : { showCheckedOutBadge: message.payload.showCheckedOutBadge }),
+        ...(message.payload.trackingOrder === undefined ? {} : { trackingOrder: message.payload.trackingOrder }),
       });
       break;
     case 'repoSnapshot':

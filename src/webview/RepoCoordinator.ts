@@ -17,6 +17,7 @@ import type {
   OpenFileDiffPayload,
   RepoErrorPayload,
   SyncStatePayload,
+  TrackingIndicatorOrder,
 } from '../types/messages';
 import { isChangedFileStatus, isWebviewToExtensionMessage, MAX_ACTION_STATUS_LENGTH } from '../types/messages';
 import type { RefTarget } from './ui/state';
@@ -54,13 +55,23 @@ function toRepoErrorPayload(err: unknown): RepoErrorPayload {
   return { message: err instanceof Error ? err.message : 'An unknown error occurred while reading the repository.' };
 }
 
-function getInitState(tabPinned: boolean, showCheckedOutBadge: boolean): InitStatePayload {
+function getInitState(
+  tabPinned: boolean,
+  showCheckedOutBadge: boolean,
+  trackingOrder: TrackingIndicatorOrder,
+): InitStatePayload {
   const folder = vscode.workspace.workspaceFolders?.[0];
   if (!folder) {
-    return { repoName: 'No folder open', workspacePath: null, tabPinned, showCheckedOutBadge };
+    return { repoName: 'No folder open', workspacePath: null, tabPinned, showCheckedOutBadge, trackingOrder };
   }
   const fsPath = folder.uri.fsPath;
-  return { repoName: folder.name || path.basename(fsPath), workspacePath: fsPath, tabPinned, showCheckedOutBadge };
+  return {
+    repoName: folder.name || path.basename(fsPath),
+    workspacePath: fsPath,
+    tabPinned,
+    showCheckedOutBadge,
+    trackingOrder,
+  };
 }
 
 /** Hint appended to failures of operations that can stop half-way through with conflicts. */
@@ -87,6 +98,8 @@ export interface RepoCoordinatorHost {
   getShowCheckedOutBadge(): boolean;
   /** Stores the preference and tells every connected view (see {@link RepoCoordinator.publishInitState}). */
   setShowCheckedOutBadge(show: boolean): void;
+  getTrackingOrder(): TrackingIndicatorOrder;
+  setTrackingOrder(order: TrackingIndicatorOrder): void;
   /** Opens or reveals the editor tab. */
   openPanel(): void;
   /** The checked-out branch of the loaded repository (for the tab title), or null when none is loaded. */
@@ -190,6 +203,10 @@ export class RepoCoordinator implements vscode.Disposable {
       case 'setShowCheckedOutBadge':
         this.host.setShowCheckedOutBadge(message.payload.show);
         break;
+      case 'setTrackingOrder':
+        this.host.setTrackingOrder(message.payload.order);
+        this.publishInitState();
+        break;
       case 'copyCommitHash':
         void this.copyCommitHash(message.payload.hash);
         break;
@@ -214,7 +231,11 @@ export class RepoCoordinator implements vscode.Disposable {
   }
 
   public getInitState(): InitStatePayload {
-    return getInitState(this.host.getTabPinned(), this.host.getShowCheckedOutBadge());
+    return getInitState(
+      this.host.getTabPinned(),
+      this.host.getShowCheckedOutBadge(),
+      this.host.getTrackingOrder(),
+    );
   }
 
   /**

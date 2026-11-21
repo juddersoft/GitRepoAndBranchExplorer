@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import type { GitShowContentProvider } from '../git/gitDiffProvider';
+import type { TrackingIndicatorOrder } from '../types/messages';
 import { AUTO_CLOSE_DELAY_MS, decideAutoClose } from './panelLifecycle';
 import type { WebviewSurface } from './RepoCoordinator';
 import { RepoCoordinator } from './RepoCoordinator';
@@ -11,6 +12,7 @@ export const REFRESH_COMMAND = 'gitRepoAndBranchExplorer.refresh';
 export const SHOW_CONTAINER_COMMAND = 'workbench.view.extension.gitRepoAndBranchExplorer-container';
 const TAB_PINNED_KEY = 'gitRepoAndBranchExplorer.tabPinned';
 const SHOW_CHECKED_OUT_BADGE_KEY = 'gitRepoAndBranchExplorer.showCheckedOutBadge';
+const TRACKING_ORDER_KEY = 'gitRepoAndBranchExplorer.trackingOrder';
 const MOVE_TO_FIRST_TAB_TIMEOUT_MS = 1500;
 
 const PANEL_TITLE = 'Git Repository';
@@ -27,6 +29,7 @@ export class GitRepoPanel {
   private static pinStore: vscode.Memento | undefined;
   private static tabPinned = false;
   private static showCheckedOutBadge = true;
+  private static trackingOrder: TrackingIndicatorOrder = 'vscode';
   private static sidebarVisible = false;
   private static opening = false;
   private static autoCloseTimer: ReturnType<typeof setTimeout> | undefined;
@@ -44,12 +47,16 @@ export class GitRepoPanel {
     GitRepoPanel.pinStore = context.globalState;
     GitRepoPanel.tabPinned = context.globalState.get<boolean>(TAB_PINNED_KEY, false);
     GitRepoPanel.showCheckedOutBadge = context.globalState.get<boolean>(SHOW_CHECKED_OUT_BADGE_KEY, true);
+    const storedTrackingOrder = context.globalState.get<unknown>(TRACKING_ORDER_KEY);
+    GitRepoPanel.trackingOrder = storedTrackingOrder === 'visualStudio' ? 'visualStudio' : 'vscode';
     const coordinator = new RepoCoordinator(
       {
         getTabPinned: () => GitRepoPanel.tabPinned,
         setTabPinned: (pinned) => GitRepoPanel.setTabPinned(pinned),
         getShowCheckedOutBadge: () => GitRepoPanel.getShowCheckedOutBadge(),
         setShowCheckedOutBadge: (show) => GitRepoPanel.setShowCheckedOutBadge(show),
+        getTrackingOrder: () => GitRepoPanel.getTrackingOrder(),
+        setTrackingOrder: (order) => GitRepoPanel.setTrackingOrder(order),
         openPanel: () => void GitRepoPanel.createOrShow(context.extensionUri),
         onCurrentBranchChange: (currentBranch) => GitRepoPanel.currentPanel?.setBranchTitle(currentBranch),
       },
@@ -132,6 +139,15 @@ export class GitRepoPanel {
     GitRepoPanel.showCheckedOutBadge = show;
     void GitRepoPanel.pinStore?.update(SHOW_CHECKED_OUT_BADGE_KEY, show);
     GitRepoPanel.coordinator?.publishInitState();
+  }
+
+  public static getTrackingOrder(): TrackingIndicatorOrder {
+    return GitRepoPanel.trackingOrder;
+  }
+
+  public static setTrackingOrder(order: TrackingIndicatorOrder): void {
+    GitRepoPanel.trackingOrder = order;
+    void GitRepoPanel.pinStore?.update(TRACKING_ORDER_KEY, order);
   }
 
   public static refresh(): void {
