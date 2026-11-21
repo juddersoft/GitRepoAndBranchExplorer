@@ -5,7 +5,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 
-const EXTENSION_ID = 'PeterJudd.git-repo-and-branch-explorer';
+const EXTENSION_ID = 'juddersoft.git-repo-and-branch-explorer';
 const OPEN_REPOSITORY_COMMAND = 'gitRepoAndBranchExplorer.openRepository';
 const REFRESH_COMMAND = 'gitRepoAndBranchExplorer.refresh';
 const SHOW_CONTAINER_COMMAND = 'workbench.view.extension.gitRepoAndBranchExplorer-container';

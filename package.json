@@ -3,17 +3,17 @@
   "displayName": "Git Repo & Branch Explorer",
   "description": "Visual Studio-style Git Repository explorer: branch/remote/tag tree in the Activity Bar, multi-lane SVG commit graph and history timeline in the editor, file diff inspection, and GitHub/Git Graph integration.",
   "version": "1.4.3",
-  "publisher": "PeterJudd",
+  "publisher": "juddersoft",
   "license": "MIT",
   "icon": "media/icon.png",
   "repository": {
     "type": "git",
-    "url": "https://github.com/PeterJudd/GitRepoAndBranchExplorer.git"
+    "url": "https://github.com/juddersoft/GitRepoAndBranchExplorer.git"
   },
   "bugs": {
-    "url": "https://github.com/PeterJudd/GitRepoAndBranchExplorer/issues"
+    "url": "https://github.com/juddersoft/GitRepoAndBranchExplorer/issues"
   },
-  "homepage": "https://github.com/PeterJudd/GitRepoAndBranchExplorer#readme",
+  "homepage": "https://github.com/juddersoft/GitRepoAndBranchExplorer#readme",
   "engines": {
     "vscode": "^1.95.0"
   },

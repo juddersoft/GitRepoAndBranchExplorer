@@ -104,4 +104,4 @@ Press <kbd>F5</kbd> with the **Run Extension** launch configuration to debug in 
 
 ## License
 
-[MIT](LICENSE) © 2026 Peter Judd
+[MIT](LICENSE) © 2026 JudderSoft

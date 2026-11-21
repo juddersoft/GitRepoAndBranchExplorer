@@ -117,4 +117,4 @@ First public release.
 ### Added
 - Initial scaffold: editor-area webview panel, Activity Bar launcher, strict Content Security Policy, esbuild dual-target build and Vitest smoke tests.
 
-[1.0.0]: https://github.com/PeterJudd/GitRepoAndBranchExplorer/releases/tag/v1.0.0
+[1.0.0]: https://github.com/juddersoft/GitRepoAndBranchExplorer/releases/tag/v1.0.0
