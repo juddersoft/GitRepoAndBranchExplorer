@@ -1,20 +1,59 @@
 import type { ChangedFileStatus, CommitDetails, ExternalIntegrationsInfo, RepoSnapshot } from './git';
 
-export type GitAction = 'fetch' | 'pull' | 'push' | 'createBranch';
+export type GitAction =
+  | 'fetch'
+  | 'pull'
+  | 'push'
+  | 'createBranch'
+  | 'merge'
+  | 'rebase'
+  | 'cherryPick'
+  | 'revert'
+  | 'deleteBranch'
+  | 'checkoutRemoteBranch';
 
 export const GIT_ACTION_LABELS: Readonly<Record<GitAction, string>> = {
   fetch: 'Fetch',
   pull: 'Pull',
   push: 'Push',
   createBranch: 'New Branch',
+  merge: 'Merge',
+  rebase: 'Rebase',
+  cherryPick: 'Cherry-Pick',
+  revert: 'Revert',
+  deleteBranch: 'Delete Branch',
+  checkoutRemoteBranch: 'Check Out as Local Branch',
 };
+
+/** What a `gitAction` must carry in `target`: nothing, a ref name (branch/tag), or a full commit hash. */
+export type GitActionTargetKind = 'none' | 'ref' | 'commit';
+
+export const GIT_ACTION_TARGETS: Readonly<Record<GitAction, GitActionTargetKind>> = {
+  fetch: 'none',
+  pull: 'none',
+  push: 'none',
+  createBranch: 'none',
+  merge: 'ref',
+  rebase: 'ref',
+  cherryPick: 'commit',
+  revert: 'commit',
+  deleteBranch: 'ref',
+  checkoutRemoteBranch: 'ref',
+};
+
+export interface GitActionPayload {
+  action: GitAction;
+  target?: string;
+}
 
 export type WebviewToExtensionMessage =
   | { type: 'webviewReady' }
   | { type: 'openRepositoryPanel' }
   | { type: 'requestRefresh' }
   | { type: 'checkoutBranch'; payload: { branchName: string } }
-  | { type: 'gitAction'; payload: { action: GitAction } }
+  | { type: 'gitAction'; payload: GitActionPayload }
+  | { type: 'createBranchAtRef'; payload: { startPoint: string } }
+  | { type: 'setTabPinned'; payload: { pinned: boolean } }
   | { type: 'copyCommitHash'; payload: { hash: string } }
   | { type: 'requestCommitDetails'; payload: { hash: string } }
   | { type: 'openFileDiff'; payload: OpenFileDiffPayload }
@@ -58,6 +97,8 @@ export function isSafeRepoRelativePath(value: unknown): value is string {
 export interface InitStatePayload {
   repoName: string;
   workspacePath: string | null;
+  /** Whether the editor tab is pinned (kept open when another sidebar view is selected). */
+  tabPinned?: boolean;
 }
 
 export interface RepoErrorPayload {
@@ -100,6 +141,40 @@ function isGitAction(value: unknown): value is GitAction {
   return typeof value === 'string' && Object.prototype.hasOwnProperty.call(GIT_ACTION_LABELS, value);
 }
 
+/**
+ * Cheap syntactic screen for a ref name received from a webview (bounded, no control characters or
+ * whitespace, no option-like leading `-`). The extension still runs `validateGitRef` and matches the
+ * name against the loaded snapshot before any Git command runs.
+ */
+export function isSafeRefArgument(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= MAX_BRANCH_NAME_LENGTH &&
+    !value.startsWith('-') &&
+    !/[\x00-\x20\x7f]/.test(value)
+  );
+}
+
+function isValidGitActionPayload(payload: Record<string, unknown> | null): boolean {
+  if (payload === null) {
+    return false;
+  }
+  const action = ownField(payload, 'action');
+  if (!isGitAction(action)) {
+    return false;
+  }
+  const target = ownField(payload, 'target');
+  switch (GIT_ACTION_TARGETS[action]) {
+    case 'none':
+      return target === undefined;
+    case 'ref':
+      return isSafeRefArgument(target);
+    case 'commit':
+      return isCommitHash(target);
+  }
+}
+
 /** Validates untrusted data received from a webview before the extension acts on it. */
 export function isWebviewToExtensionMessage(value: unknown): value is WebviewToExtensionMessage {
   if (!isSafeRecord(value)) {
@@ -120,7 +195,13 @@ export function isWebviewToExtensionMessage(value: unknown): value is WebviewToE
       return typeof branchName === 'string' && branchName.length > 0 && branchName.length <= MAX_BRANCH_NAME_LENGTH;
     }
     case 'gitAction':
-      return payload !== null && isGitAction(ownField(payload, 'action'));
+      return isValidGitActionPayload(payload);
+    case 'createBranchAtRef': {
+      const startPoint = payload === null ? undefined : ownField(payload, 'startPoint');
+      return isCommitHash(startPoint) || isSafeRefArgument(startPoint);
+    }
+    case 'setTabPinned':
+      return payload !== null && typeof ownField(payload, 'pinned') === 'boolean';
     case 'copyCommitHash':
     case 'requestCommitDetails':
     case 'openCommitOnGitHub':
@@ -174,7 +255,8 @@ export function isExtensionToWebviewMessage(value: unknown): value is ExtensionT
     case 'initState':
       return (
         typeof payload.repoName === 'string' &&
-        (payload.workspacePath === null || typeof payload.workspacePath === 'string')
+        (payload.workspacePath === null || typeof payload.workspacePath === 'string') &&
+        (payload.tabPinned === undefined || typeof payload.tabPinned === 'boolean')
       );
     case 'repoSnapshot':
       return isRepoSnapshotShape(payload);

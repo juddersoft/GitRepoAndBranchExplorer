@@ -103,4 +103,32 @@ suite('Git Repo & Branch Explorer extension host', () => {
 
     await vscode.commands.executeCommand('workbench.action.closeAllEditors');
   });
+
+  test('openRepository moves the panel tab to the far left of its group', async () => {
+    assert.ok(repoPath);
+    const document = await vscode.workspace.openTextDocument(path.join(repoPath, 'README.md'));
+    await vscode.window.showTextDocument(document, { preview: false });
+
+    await vscode.commands.executeCommand(OPEN_REPOSITORY_COMMAND);
+    const panelTab = await waitForPanelTab(10_000);
+    assert.ok(panelTab, 'The Git Repository webview panel did not open.');
+
+    const group = panelTab.group;
+    assert.ok(group.tabs.length >= 2, 'Expected the README tab next to the panel tab.');
+    assert.strictEqual(group.tabs[0], panelTab, 'The panel tab should be first in its editor group.');
+
+    await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+  });
+
+  test('an unpinned panel closes when another sidebar view container is selected', async () => {
+    await vscode.commands.executeCommand(OPEN_REPOSITORY_COMMAND);
+    assert.ok(await waitForPanelTab(10_000), 'The Git Repository webview panel did not open.');
+
+    await vscode.commands.executeCommand('workbench.view.explorer');
+    const deadline = Date.now() + 10_000;
+    while ((await waitForPanelTab(0)) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.strictEqual(await waitForPanelTab(0), undefined, 'The unpinned panel should close after switching sidebar views.');
+  });
 });

@@ -100,6 +100,11 @@ const ICONS = {
   ],
   linkExternal: [{ tag: 'path', d: 'M9 2.5h4.5V7M13.5 2.5 7.5 8.5M12 9.5v4H2.5V4h4' }],
   file: [{ tag: 'path', d: 'M4 1.5h5l3.5 3.5v9.5H4zM9 1.5V5h3.5' }],
+  pin: [{ tag: 'path', d: 'M6 2.5h4M7 2.5v4L5 9h6L9 6.5v-4M8 9v4.5' }],
+  checkCircle: [
+    { tag: 'circle', cx: 8, cy: 8, r: 5.5 },
+    { tag: 'path', d: 'M5.5 8.2l1.8 1.8 3.3-3.6' },
+  ],
 } satisfies Record<string, Shape[]>;
 
 export type IconName = keyof typeof ICONS;

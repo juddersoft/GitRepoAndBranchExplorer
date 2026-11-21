@@ -1,19 +1,32 @@
 import type { ChangedFileEntry, ChangedFileStatus, CommitDetails, CommitNode, RefBadge, RepoSnapshot } from '../../types/git';
 import type { GitAction } from '../../types/messages';
 import { GIT_ACTION_LABELS } from '../../types/messages';
+import { pullPushDisabledReason } from './contextMenuModel';
 import { button, createSearchBox, el, icon, type IconName } from './dom';
 import type { GraphRowLayout } from './graphLayout';
 import { computeGraphLayout } from './graphLayout';
 import type { BadgeKindToggle, ExplorerUiState } from './state';
-import { computeVisibleCommits, filterVisibleBadges, getPinnedBranches } from './state';
+import {
+  computeVisibleCommits,
+  describeCommitCount,
+  describeEmptyHistory,
+  describeHistoryFocus,
+  describeRefFilterStatus,
+  filterVisibleBadges,
+  hasHistoryFocus,
+  summarizeRefToggles,
+} from './state';
 
 export interface HistoryPaneCallbacks {
   onGitAction(action: GitAction): void;
   onRefresh(): void;
   onToggleBadgeKind(kind: BadgeKindToggle): void;
+  onToggleTabPinned(): void;
   onHistoryFilterChange(text: string): void;
-  onClearPins(): void;
+  /** Clears the selected ref and every isolated (pinned) branch. */
+  onClearFocus(): void;
   onSelectCommit(hash: string | null): void;
+  onCommitContextMenu(commit: CommitNode, x: number, y: number): void;
   onCopyHash(hash: string): void;
   onOpenFileDiff(hash: string, file: ChangedFileEntry): void;
   onOpenInGitGraph(): void;
@@ -121,10 +134,10 @@ const ACTIONS: ReadonlyArray<{ action: GitAction; icon: IconName; tooltip: strin
   { action: 'createBranch', icon: 'newBranch', tooltip: 'New Branch: create a branch from the current commit' },
 ];
 
-const BADGE_TOGGLES: ReadonlyArray<{ kind: BadgeKindToggle; label: string; icon: IconName; stateKey: keyof ExplorerUiState }> = [
-  { kind: 'local', label: 'Local Branches', icon: 'branch', stateKey: 'showLocalBranchBadges' },
-  { kind: 'remote', label: 'Remote Branches', icon: 'remote', stateKey: 'showRemoteBranchBadges' },
-  { kind: 'tag', label: 'Tags', icon: 'tag', stateKey: 'showTagBadges' },
+const BADGE_TOGGLES: ReadonlyArray<{ kind: BadgeKindToggle; label: string; icon: IconName }> = [
+  { kind: 'local', label: 'Local Branches', icon: 'branch' },
+  { kind: 'remote', label: 'Remote Branches', icon: 'remote' },
+  { kind: 'tag', label: 'Tags', icon: 'tag' },
 ];
 
 const dateFormatter = new Intl.DateTimeFormat(undefined, {
@@ -193,14 +206,18 @@ function renderPills(refs: readonly RefBadge[], snapshot: RepoSnapshot): HTMLSpa
 export class HistoryPane {
   public readonly element: HTMLElement;
 
-  private readonly actionButtons: HTMLButtonElement[] = [];
+  private readonly actionButtons = new Map<GitAction, HTMLButtonElement>();
   private readonly refreshButton: HTMLButtonElement;
   private readonly gitGraphButton: HTMLButtonElement;
+  private readonly tabPinButton: HTMLButtonElement;
   private readonly busyIndicator: HTMLElement;
   private readonly toggleButtons = new Map<BadgeKindToggle, HTMLButtonElement>();
+  private readonly toggleCounts = new Map<BadgeKindToggle, HTMLElement>();
   private readonly search: ReturnType<typeof createSearchBox>;
   private readonly banner: HTMLElement;
   private readonly breadcrumbText: HTMLElement;
+  private readonly refFilterStatus: HTMLElement;
+  private readonly commitCountStatus: HTMLElement;
   private readonly clearPinsButton: HTMLButtonElement;
   private readonly tableScroll: HTMLElement;
   private readonly table: HTMLTableElement;
@@ -219,7 +236,7 @@ export class HistoryPane {
     const actions = ACTIONS.map(({ action, icon: iconName, tooltip }) => {
       const btn = button({ className: 'toolbar-button', label: GIT_ACTION_LABELS[action], title: tooltip, icon: iconName, showLabel: true });
       btn.addEventListener('click', () => callbacks.onGitAction(action));
-      this.actionButtons.push(btn);
+      this.actionButtons.set(action, btn);
       return btn;
     });
 
@@ -244,19 +261,32 @@ export class HistoryPane {
         icon: iconName,
         showLabel: true,
       });
+      const count = el('span', { className: 'toggle-count' });
+      btn.append(count);
       btn.addEventListener('click', () => callbacks.onToggleBadgeKind(kind));
       this.toggleButtons.set(kind, btn);
+      this.toggleCounts.set(kind, count);
       return btn;
     });
 
     this.search = createSearchBox('Filter History', (value) => callbacks.onHistoryFilterChange(value));
 
+    this.tabPinButton = button({
+      className: 'toolbar-button toggle-button pin-button',
+      label: 'Pin Tab',
+      title: 'Keep this tab open when another sidebar view is selected',
+      icon: 'pin',
+      showLabel: true,
+    });
+    this.tabPinButton.addEventListener('click', () => callbacks.onToggleTabPinned());
+
     const toolbar = el('div', { className: 'toolbar', attrs: { role: 'toolbar', 'aria-label': 'Git history actions' } }, [
       el('div', { className: 'toolbar-group' }, [...actions, this.refreshButton, this.gitGraphButton]),
       el('div', { className: 'toolbar-separator', attrs: { role: 'separator' } }),
-      el('div', { className: 'toolbar-group' }, toggles),
+      el('div', { className: 'toolbar-group', attrs: { role: 'group', 'aria-label': 'Ref labels shown in the Branch / Tag column' } }, toggles),
       el('div', { className: 'toolbar-spacer' }),
       el('div', { className: 'toolbar-search' }, [this.search.element]),
+      this.tabPinButton,
     ]);
 
     this.banner = el('div', { className: 'status-banner', attrs: { role: 'alert' } });
@@ -264,13 +294,19 @@ export class HistoryPane {
 
     this.breadcrumbText = el('span', { className: 'breadcrumb-text' });
     this.clearPinsButton = button({ className: 'link-button', label: 'Clear filter', showLabel: true });
-    this.clearPinsButton.addEventListener('click', () => callbacks.onClearPins());
+    this.clearPinsButton.addEventListener('click', () => callbacks.onClearFocus());
+    this.refFilterStatus = el('span', { className: 'filter-status', attrs: { role: 'status', 'aria-live': 'polite' } });
+    this.refFilterStatus.hidden = true;
+    this.commitCountStatus = el('span', { className: 'filter-status commit-count', attrs: { role: 'status', 'aria-live': 'polite' } });
+    this.commitCountStatus.hidden = true;
     this.busyIndicator = el('span', { className: 'busy-indicator', attrs: { role: 'status', 'aria-live': 'polite' } });
     this.busyIndicator.hidden = true;
     const breadcrumb = el('div', { className: 'breadcrumb' }, [
       this.breadcrumbText,
       this.clearPinsButton,
       el('span', { className: 'toolbar-spacer' }),
+      this.commitCountStatus,
+      this.refFilterStatus,
       this.busyIndicator,
     ]);
 
@@ -279,6 +315,15 @@ export class HistoryPane {
       const row = event.target instanceof Element ? event.target.closest<HTMLElement>('tr[data-hash]') : null;
       if (row?.dataset.hash) {
         callbacks.onSelectCommit(row.dataset.hash);
+      }
+    });
+    this.tbody.addEventListener('contextmenu', (event) => {
+      const row = event.target instanceof Element ? event.target.closest<HTMLElement>('tr[data-hash]') : null;
+      const commit = row?.dataset.hash ? this.visibleCommits.find((c) => c.hash === row.dataset.hash) : undefined;
+      if (commit) {
+        event.preventDefault();
+        callbacks.onSelectCommit(commit.hash);
+        callbacks.onCommitContextMenu(commit, event.clientX, event.clientY);
       }
     });
 
@@ -318,8 +363,14 @@ export class HistoryPane {
     this.lastState = state;
     const { snapshot } = state;
 
-    for (const btn of this.actionButtons) {
+    for (const [action, btn] of this.actionButtons) {
       btn.disabled = snapshot === null || state.isBusy;
+      if (action === 'pull' || action === 'push') {
+        const current = snapshot?.localBranches.find((b) => b.isCurrent);
+        const reason = snapshot === null ? undefined : pullPushDisabledReason(action, snapshot.isDetachedHead, current?.upstream ?? null);
+        btn.disabled ||= reason !== undefined;
+        btn.title = reason ?? ACTIONS.find((a) => a.action === action)?.tooltip ?? GIT_ACTION_LABELS[action];
+      }
     }
     this.refreshButton.disabled = state.isLoading || state.isBusy;
     this.refreshButton.classList.toggle('spinning', state.isLoading);
@@ -328,11 +379,31 @@ export class HistoryPane {
     this.busyIndicator.hidden = !state.isBusy;
     this.busyIndicator.textContent = state.isBusy ? state.busyMessage ?? 'Working\u2026' : '';
 
-    for (const { kind, stateKey } of BADGE_TOGGLES) {
-      const pressed = state[stateKey] === true;
-      const btn = this.toggleButtons.get(kind);
-      btn?.setAttribute('aria-pressed', String(pressed));
-      btn?.classList.toggle('active', pressed);
+    this.tabPinButton.setAttribute('aria-pressed', String(state.tabPinned));
+    this.tabPinButton.classList.toggle('active', state.tabPinned);
+    const pinLabel = state.tabPinned ? 'Pinned' : 'Pin Tab';
+    this.tabPinButton.setAttribute('aria-label', state.tabPinned ? 'Unpin tab' : 'Pin tab');
+    this.tabPinButton.title = state.tabPinned
+      ? 'Pinned: this tab stays open when another sidebar view is selected. Click to unpin.'
+      : 'Keep this tab open when another sidebar view is selected';
+    const pinLabelEl = this.tabPinButton.querySelector('.button-label');
+    if (pinLabelEl) {
+      pinLabelEl.textContent = pinLabel;
+    }
+
+    for (const summary of summarizeRefToggles(snapshot, state)) {
+      const btn = this.toggleButtons.get(summary.kind);
+      btn?.setAttribute('aria-pressed', String(summary.enabled));
+      btn?.classList.toggle('active', summary.enabled);
+      btn?.classList.toggle('empty', summary.count === 0);
+      if (btn) {
+        btn.title = `${summary.enabled ? 'Hide' : 'Show'} ${summary.noun} in the Branch / Tag column (${summary.count} in this repository)`;
+      }
+      const count = this.toggleCounts.get(summary.kind);
+      if (count) {
+        count.textContent = snapshot ? String(summary.count) : '';
+        count.hidden = snapshot === null;
+      }
     }
     this.search.sync(state.historyFilterText);
 
@@ -349,28 +420,35 @@ export class HistoryPane {
 
   private renderBreadcrumb(state: ExplorerUiState): void {
     const { snapshot } = state;
-    const pinned = snapshot ? getPinnedBranches(snapshot, state) : [];
-    this.clearPinsButton.hidden = pinned.length === 0;
+    const focus = snapshot ? describeHistoryFocus(snapshot, state) : [];
+    this.clearPinsButton.hidden = !hasHistoryFocus(state);
     if (!snapshot) {
       this.breadcrumbText.textContent = 'Branches:';
-    } else if (pinned.length > 0) {
-      this.breadcrumbText.textContent = `Branches: ${pinned.map((b) => b.name).join(', ')}`;
+    } else if (focus.length > 0) {
+      this.breadcrumbText.textContent = `Branches: ${focus.join(', ')}`;
     } else {
       this.breadcrumbText.textContent = `Branches: All (${snapshot.currentBranch})`;
     }
+
+    const refStatus = describeRefFilterStatus(snapshot, state);
+    this.refFilterStatus.hidden = refStatus === null;
+    this.refFilterStatus.textContent = refStatus ?? '';
   }
 
   private renderRows(state: ExplorerUiState): void {
     const { snapshot } = state;
     if (!snapshot) {
       this.visibleCommits = [];
+      this.commitCountStatus.hidden = true;
       this.tbody.replaceChildren(this.placeholderRow(state.errorMessage ? 'No history available.' : 'Loading\u2026'));
       return;
     }
     this.visibleCommits = computeVisibleCommits(snapshot, state);
+    const countText = describeCommitCount(snapshot, this.visibleCommits.length);
+    this.commitCountStatus.hidden = countText === null;
+    this.commitCountStatus.textContent = countText ?? '';
     if (this.visibleCommits.length === 0) {
-      const filtered = state.historyFilterText.trim() !== '' || state.pinnedBranchFullNames.size > 0;
-      this.tbody.replaceChildren(this.placeholderRow(filtered ? 'No commits match the current filters.' : 'No commits yet.'));
+      this.tbody.replaceChildren(this.placeholderRow(describeEmptyHistory(snapshot, state)));
       return;
     }
     const layout = computeGraphLayout(this.visibleCommits);
@@ -540,6 +618,18 @@ export class HistoryPane {
         this.callbacks.onSelectCommit(null);
         event.preventDefault();
         return;
+      case 'ContextMenu':
+      case 'F10': {
+        const commit = this.visibleCommits[current];
+        const row = this.tbody.querySelector('tr.selected');
+        if (!commit || !row || (event.key === 'F10' && !event.shiftKey)) {
+          return;
+        }
+        const rect = row.getBoundingClientRect();
+        this.callbacks.onCommitContextMenu(commit, rect.left + 48, rect.bottom);
+        event.preventDefault();
+        return;
+      }
       default:
         return;
     }

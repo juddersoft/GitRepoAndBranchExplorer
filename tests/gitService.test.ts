@@ -18,6 +18,7 @@ import {
   parseGitLogOutput,
   parseUpstreamTrack,
   validateRevSpec,
+  WORKTREE_GIT_TIMEOUT_MS,
 } from '../src/git/gitService';
 import type { RefBadge } from '../src/types/git';
 
@@ -421,6 +422,61 @@ describe('GitService operations (fake runner)', () => {
     ]);
   });
 
+  it('runs merge, rebase, cherry-pick and revert as non-interactive argument arrays', async () => {
+    const { calls, service } = recorder();
+    await service.mergeBranch(ROOT, 'feature/x');
+    await service.mergeBranch(ROOT, 'origin/main');
+    await service.rebaseOnto(ROOT, 'main');
+    await service.cherryPickCommit(ROOT, HASH);
+    await service.revertCommit(ROOT, HASH.toUpperCase());
+    expect(calls).toEqual([
+      { args: ['merge', '--no-edit', 'feature/x'], timeoutMs: WORKTREE_GIT_TIMEOUT_MS },
+      { args: ['merge', '--no-edit', 'origin/main'], timeoutMs: WORKTREE_GIT_TIMEOUT_MS },
+      { args: ['rebase', 'main'], timeoutMs: WORKTREE_GIT_TIMEOUT_MS },
+      { args: ['cherry-pick', HASH], timeoutMs: WORKTREE_GIT_TIMEOUT_MS },
+      { args: ['revert', '--no-edit', HASH], timeoutMs: WORKTREE_GIT_TIMEOUT_MS },
+    ]);
+  });
+
+  it('deletes local branches with -d, or -D when forced', async () => {
+    const { calls, service } = recorder();
+    await service.deleteLocalBranch(ROOT, 'feature/old');
+    await service.deleteLocalBranch(ROOT, 'feature/old', false);
+    await service.deleteLocalBranch(ROOT, 'feature/old', true);
+    expect(calls.map((c) => c.args)).toEqual([
+      ['branch', '-d', 'feature/old'],
+      ['branch', '-d', 'feature/old'],
+      ['branch', '-D', 'feature/old'],
+    ]);
+  });
+
+  it('checks out a remote branch as a new tracking branch', async () => {
+    const { calls, service } = recorder();
+    await service.checkoutRemoteBranch(ROOT, 'origin/feature/x', 'feature/x');
+    expect(calls).toEqual([
+      { args: ['checkout', '-b', 'feature/x', '--track', 'origin/feature/x'], timeoutMs: WORKTREE_GIT_TIMEOUT_MS },
+    ]);
+  });
+
+  it.each([
+    ['merge', (s: GitService) => s.mergeBranch(ROOT, '--abort')],
+    ['merge with range syntax', (s: GitService) => s.mergeBranch(ROOT, 'a..b')],
+    ['rebase', (s: GitService) => s.rebaseOnto(ROOT, '-i')],
+    ['rebase with whitespace', (s: GitService) => s.rebaseOnto(ROOT, 'main --root')],
+    ['cherry-pick of a ref', (s: GitService) => s.cherryPickCommit(ROOT, 'HEAD')],
+    ['cherry-pick of a short hash', (s: GitService) => s.cherryPickCommit(ROOT, HASH.slice(0, 8))],
+    ['cherry-pick option', (s: GitService) => s.cherryPickCommit(ROOT, '--abort')],
+    ['revert of a ref', (s: GitService) => s.revertCommit(ROOT, 'HEAD~1')],
+    ['delete', (s: GitService) => s.deleteLocalBranch(ROOT, '-D')],
+    ['delete with revision syntax', (s: GitService) => s.deleteLocalBranch(ROOT, 'main^')],
+    ['tracking checkout remote', (s: GitService) => s.checkoutRemoteBranch(ROOT, '--orphan', 'x')],
+    ['tracking checkout local name', (s: GitService) => s.checkoutRemoteBranch(ROOT, 'origin/x', '-f')],
+  ])('rejects invalid input for %s before running Git', async (_label, run) => {
+    const { calls, service } = recorder();
+    await expect(run(service)).rejects.toThrow();
+    expect(calls).toEqual([]);
+  });
+
   it('runs checkout and branch creation with a trailing `--`', async () => {
     const { calls, service } = recorder();
     await service.checkoutBranch(ROOT, 'feature/x');
@@ -623,4 +679,84 @@ describe.skipIf(!isGitAvailable())('GitService against real repositories', () =>
     expect(snapshot.currentBranch).toBe('feature/from-head');
     expect(snapshot.localBranches.map((b) => b.name)).toEqual(['feature/from-first', 'feature/from-head', 'main']);
   });
-}, 30_000);
+
+  it('merges, rebases, cherry-picks, reverts and deletes branches', async () => {
+    const dir = makeTempDir();
+    // The service runs Git without the helper's -c identity flags, so give the repository its own.
+    await git(dir, 'init', '-b', 'main');
+    await git(dir, 'config', 'user.name', 'Test User');
+    await git(dir, 'config', 'user.email', 'test@example.com');
+    await git(dir, 'config', 'commit.gpgsign', 'false');
+
+    const commitFile = async (name: string, message: string): Promise<string> => {
+      fs.writeFileSync(path.join(dir, name), `${message}\n`);
+      await git(dir, 'add', name);
+      await git(dir, 'commit', '-m', message);
+      return (await git(dir, 'rev-parse', 'HEAD')).trim();
+    };
+    const head = async (): Promise<string> => (await git(dir, 'rev-parse', 'HEAD')).trim();
+    const subject = async (): Promise<string> => (await git(dir, 'log', '-1', '--format=%s')).trim();
+
+    const base = await commitFile('base.txt', 'base');
+    await git(dir, 'checkout', '-b', 'feature');
+    await commitFile('feature.txt', 'feature work');
+    await git(dir, 'checkout', 'main');
+    await commitFile('main.txt', 'main work');
+
+    // Merge: creates a two-parent commit without opening an editor.
+    await service.mergeBranch(dir, 'feature');
+    expect((await git(dir, 'rev-list', '--parents', '-n', '1', 'HEAD')).trim().split(' ')).toHaveLength(3);
+
+    // Delete: -d succeeds for a merged branch.
+    await service.deleteLocalBranch(dir, 'feature');
+    expect((await service.getRepoSnapshot(dir)).localBranches.map((b) => b.name)).toEqual(['main']);
+
+    // Delete: -d refuses an unmerged branch (and says why); force removes it.
+    await git(dir, 'checkout', '-b', 'wip', base);
+    const wipCommit = await commitFile('wip.txt', 'wip work');
+    await git(dir, 'checkout', 'main');
+    const refused = await service.deleteLocalBranch(dir, 'wip').catch((err: unknown) => err);
+    expect(refused).toBeInstanceOf(GitExecutionError);
+    expect((refused as GitExecutionError).stderr).toMatch(/not fully merged/i);
+    await service.deleteLocalBranch(dir, 'wip', true);
+    expect((await service.getRepoSnapshot(dir)).localBranches.map((b) => b.name)).toEqual(['main']);
+
+    // Cherry-pick: replays the commit onto main (the branch is gone but the object remains).
+    await service.cherryPickCommit(dir, wipCommit);
+    expect(await subject()).toBe('wip work');
+    expect(fs.existsSync(path.join(dir, 'wip.txt'))).toBe(true);
+
+    // Revert: adds a revert commit that removes the change again.
+    await service.revertCommit(dir, await head());
+    expect(await subject()).toMatch(/^Revert "wip work"/);
+    expect(fs.existsSync(path.join(dir, 'wip.txt'))).toBe(false);
+
+    // Rebase: moves a side branch on top of main.
+    await git(dir, 'checkout', '-b', 'side', base);
+    await commitFile('side.txt', 'side work');
+    await service.rebaseOnto(dir, 'main');
+    const mainTip = (await git(dir, 'rev-parse', 'main')).trim();
+    expect((await git(dir, 'rev-parse', 'HEAD~1')).trim()).toBe(mainTip);
+    expect(await subject()).toBe('side work');
+  });
+
+  it('checks out a remote branch as a new local tracking branch', async () => {
+    const remote = makeTempDir();
+    await git(remote, 'init', '--bare', '-b', 'main');
+    const dir = makeTempDir();
+    await git(dir, 'init', '-b', 'main');
+    await git(dir, 'commit', '--allow-empty', '-m', 'one');
+    await git(dir, 'checkout', '-b', 'topic');
+    await git(dir, 'commit', '--allow-empty', '-m', 'topic work');
+    await git(dir, 'checkout', 'main');
+    await git(dir, 'remote', 'add', 'origin', remote);
+    await git(dir, 'push', 'origin', 'main', 'topic');
+    await git(dir, 'branch', '-D', 'topic');
+
+    await service.checkoutRemoteBranch(dir, 'origin/topic', 'my-topic');
+
+    const snapshot = await service.getRepoSnapshot(dir);
+    expect(snapshot.currentBranch).toBe('my-topic');
+    expect(snapshot.localBranches.find((b) => b.name === 'my-topic')?.upstream).toBe('origin/topic');
+  });
+}, 60_000);

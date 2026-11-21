@@ -4,10 +4,9 @@ import { GitRepoPanel, OPEN_REPOSITORY_COMMAND, REFRESH_COMMAND, SidebarLauncher
 
 export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
+    GitRepoPanel.initialize(context.globalState),
     registerGitShowContentProvider(),
-    vscode.commands.registerCommand(OPEN_REPOSITORY_COMMAND, () => {
-      GitRepoPanel.createOrShow(context.extensionUri);
-    }),
+    vscode.commands.registerCommand(OPEN_REPOSITORY_COMMAND, () => GitRepoPanel.createOrShow(context.extensionUri)),
     vscode.commands.registerCommand(REFRESH_COMMAND, () => {
       GitRepoPanel.refresh();
     }),

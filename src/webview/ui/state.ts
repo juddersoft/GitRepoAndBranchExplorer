@@ -1,11 +1,55 @@
-import type { BranchInfo, CommitDetails, CommitNode, ExternalIntegrationsInfo, RefBadge, RepoSnapshot } from '../../types/git';
+import type { BranchInfo, CommitDetails, CommitNode, ExternalIntegrationsInfo, RefBadge, RepoSnapshot, TagInfo } from '../../types/git';
 
 export const NODE_BRANCHES = 'branches';
 export const NODE_REPO_ROOT = 'repoRoot';
+export const NODE_TAGS = 'tags';
 export const MAX_CACHED_COMMIT_DETAILS = 200;
 
 export function remoteNodeKey(remoteName: string): string {
   return `remote:${remoteName}`;
+}
+
+export type RefKind = 'local' | 'remote' | 'tag';
+
+/** A branch or tag that can be selected/inspected, regardless of which tree section it lives in. */
+export interface RefTarget {
+  kind: RefKind;
+  /** Name Git understands: `feature/x`, `origin/feature/x` or `v1.0.0`. */
+  name: string;
+  /** Full ref, e.g. `refs/heads/feature/x`, `refs/remotes/origin/x` or `refs/tags/v1`. */
+  fullName: string;
+  tipHash: string;
+  /** The branch record for local/remote refs; null for tags. */
+  branch: BranchInfo | null;
+}
+
+export function branchRefTarget(branch: BranchInfo): RefTarget {
+  return {
+    kind: branch.isRemote ? 'remote' : 'local',
+    name: branch.name,
+    fullName: branch.fullName,
+    tipHash: branch.tipHash,
+    branch,
+  };
+}
+
+export function tagRefTarget(tag: TagInfo): RefTarget {
+  return { kind: 'tag', name: tag.name, fullName: tag.fullName, tipHash: tag.targetHash, branch: null };
+}
+
+export function listRefTargets(snapshot: RepoSnapshot): RefTarget[] {
+  return [
+    ...snapshot.localBranches.map(branchRefTarget),
+    ...snapshot.remoteGroups.flatMap((group) => group.branches.map(branchRefTarget)),
+    ...snapshot.tags.map(tagRefTarget),
+  ];
+}
+
+export function findRefTarget(snapshot: RepoSnapshot, fullName: string | null): RefTarget | null {
+  if (fullName === null) {
+    return null;
+  }
+  return listRefTargets(snapshot).find((target) => target.fullName === fullName) ?? null;
 }
 
 /**
@@ -39,6 +83,12 @@ export interface ExplorerUiState {
   historyFilterText: string;
   /** Branches isolated via the eye toggle; empty means every branch's history is shown. */
   pinnedBranchFullNames: Set<string>;
+  /** Branch/tag inspected via single-click (full ref name); its history is focused. Distinct from the checked-out branch. */
+  selectedBranchFullName: string | null;
+  /** Git-usable short name of the selected ref (e.g. `origin/main`), kept in sync with the snapshot. */
+  selectedBranchRef: string | null;
+  /** When false, the editor tab closes automatically once another sidebar view container is selected. */
+  tabPinned: boolean;
   showLocalBranchBadges: boolean;
   showRemoteBranchBadges: boolean;
   showTagBadges: boolean;
@@ -61,6 +111,9 @@ export function createInitialState(): ExplorerUiState {
     branchFilterText: '',
     historyFilterText: '',
     pinnedBranchFullNames: new Set(),
+    selectedBranchFullName: null,
+    selectedBranchRef: null,
+    tabPinned: false,
     showLocalBranchBadges: true,
     showRemoteBranchBadges: true,
     showTagBadges: true,
@@ -84,6 +137,11 @@ export function filterBranches(branches: readonly BranchInfo[], query: string): 
     return [...branches];
   }
   return branches.filter((b) => b.name.toLowerCase().includes(q) || b.displayName.toLowerCase().includes(q));
+}
+
+export function filterTags(tags: readonly TagInfo[], query: string): TagInfo[] {
+  const q = normalizeQuery(query);
+  return q === '' ? [...tags] : tags.filter((t) => t.name.toLowerCase().includes(q));
 }
 
 export function getAllBranches(snapshot: RepoSnapshot): BranchInfo[] {
@@ -130,14 +188,115 @@ export function commitMatchesQuery(commit: CommitNode, query: string): boolean {
   );
 }
 
+/** Selection patch for a ref (or `null` to clear it); the two fields always change together. */
+export function selectRefPatch(target: RefTarget | null): Pick<ExplorerUiState, 'selectedBranchFullName' | 'selectedBranchRef'> {
+  return { selectedBranchFullName: target?.fullName ?? null, selectedBranchRef: target?.name ?? null };
+}
+
+/** Pinned branches plus the selected ref, de-duplicated, in snapshot order. */
+export function getFocusedRefs(snapshot: RepoSnapshot, state: ExplorerUiState): RefTarget[] {
+  return listRefTargets(snapshot).filter(
+    (target) => target.fullName === state.selectedBranchFullName || state.pinnedBranchFullNames.has(target.fullName),
+  );
+}
+
+export function hasHistoryFocus(state: ExplorerUiState): boolean {
+  return state.pinnedBranchFullNames.size > 0 || state.selectedBranchFullName !== null;
+}
+
+/** HEAD's commit: the checked-out branch tip, or the commit carrying the HEAD badge when detached. */
+export function getHeadHash(snapshot: RepoSnapshot): string | null {
+  const current = snapshot.localBranches.find((b) => b.isCurrent);
+  if (current && !snapshot.isDetachedHead) {
+    return current.tipHash;
+  }
+  return snapshot.commits.find((c) => c.refs.some((ref) => ref.kind === 'head'))?.hash ?? null;
+}
+
+export function isAncestorOfHead(snapshot: RepoSnapshot, hash: string): boolean {
+  const head = getHeadHash(snapshot);
+  return head !== null && collectReachableHashes(snapshot.commits, [head]).has(hash);
+}
+
 export function computeVisibleCommits(snapshot: RepoSnapshot, state: ExplorerUiState): CommitNode[] {
   let commits: readonly CommitNode[] = snapshot.commits;
-  if (state.pinnedBranchFullNames.size > 0) {
-    const tips = getPinnedBranches(snapshot, state).map((b) => b.tipHash);
+  if (hasHistoryFocus(state)) {
+    const tips = getFocusedRefs(snapshot, state).map((target) => target.tipHash);
     const reachable = collectReachableHashes(snapshot.commits, tips);
     commits = commits.filter((c) => reachable.has(c.hash));
   }
   return commits.filter((c) => commitMatchesQuery(c, state.historyFilterText));
+}
+
+/** Names of the branches/tags whose history is shown (selected ref first), or `[]` when showing everything. */
+export function describeHistoryFocus(snapshot: RepoSnapshot, state: ExplorerUiState): string[] {
+  const names = getFocusedRefs(snapshot, state).map((target) => target.name);
+  const selected = state.selectedBranchRef;
+  return selected !== null && names.includes(selected) ? [selected, ...names.filter((n) => n !== selected)] : names;
+}
+
+/** Why the history table is empty, so a filtered-out timeline never looks like a broken one. */
+export function describeEmptyHistory(snapshot: RepoSnapshot, state: ExplorerUiState): string {
+  if (snapshot.commits.length === 0) {
+    return 'No commits yet.';
+  }
+  const loaded = new Set(snapshot.commits.map((c) => c.hash));
+  const unloaded = getFocusedRefs(snapshot, state).filter((target) => !loaded.has(target.tipHash));
+  if (state.historyFilterText.trim() === '' && unloaded.length > 0) {
+    return `${unloaded.map((t) => t.name).join(', ')} points to a commit outside the loaded history window.`;
+  }
+  return 'No commits match the current filters.';
+}
+
+export interface RefToggleSummary {
+  kind: BadgeKindToggle;
+  label: string;
+  /** Lower-case plural noun used in status sentences. */
+  noun: string;
+  enabled: boolean;
+  /** Number of refs of this kind in the repository (HEAD is counted with local branches' toggle, not here). */
+  count: number;
+}
+
+export function summarizeRefToggles(snapshot: RepoSnapshot | null, state: ExplorerUiState): RefToggleSummary[] {
+  const remoteCount = snapshot?.remoteGroups.reduce((sum, group) => sum + group.branches.length, 0) ?? 0;
+  return [
+    { kind: 'local', label: 'Local Branches', noun: 'local branches', enabled: state.showLocalBranchBadges, count: snapshot?.localBranches.length ?? 0 },
+    { kind: 'remote', label: 'Remote Branches', noun: 'remote branches', enabled: state.showRemoteBranchBadges, count: remoteCount },
+    { kind: 'tag', label: 'Tags', noun: 'tags', enabled: state.showTagBadges, count: snapshot?.tags.length ?? 0 },
+  ];
+}
+
+/**
+ * One-line explanation of how the ref toggles affect the Branch / Tag column, or `null` when nothing
+ * is hidden and every enabled kind has refs to show. Toggles hide labels, never commits.
+ */
+export function describeRefFilterStatus(snapshot: RepoSnapshot | null, state: ExplorerUiState): string | null {
+  if (!snapshot) {
+    return null;
+  }
+  const summaries = summarizeRefToggles(snapshot, state);
+  if (summaries.every((s) => !s.enabled)) {
+    return 'All ref labels are hidden';
+  }
+  const parts: string[] = [];
+  const hidden = summaries.filter((s) => !s.enabled && s.count > 0);
+  if (hidden.length > 0) {
+    parts.push(`Hiding ${hidden.map((s) => `${s.noun} (${s.count})`).join(', ')}`);
+  }
+  const empty = summaries.filter((s) => s.enabled && s.count === 0);
+  if (empty.length > 0) {
+    parts.push(`No ${empty.map((s) => s.noun).join(' or ')} in this repository`);
+  }
+  return parts.length > 0 ? parts.join(' \u00b7 ') : null;
+}
+
+/** "Showing 3 of 120 commits" while history is narrowed, otherwise `null`. */
+export function describeCommitCount(snapshot: RepoSnapshot | null, visibleCount: number): string | null {
+  if (!snapshot || visibleCount === snapshot.commits.length) {
+    return null;
+  }
+  return `Showing ${visibleCount} of ${snapshot.commits.length} commits`;
 }
 
 export function filterVisibleBadges(refs: readonly RefBadge[], state: ExplorerUiState): RefBadge[] {
@@ -173,6 +332,7 @@ export function reconcileStateWithSnapshot(
 ): ExplorerUiState {
   const fullNames = new Set(getAllBranches(snapshot).map((b) => b.fullName));
   const pinned = new Set([...state.pinnedBranchFullNames].filter((name) => fullNames.has(name)));
+  const selectedRef = findRefTarget(snapshot, state.selectedBranchFullName);
   const selectedExists = snapshot.commits.some((c) => c.hash === state.selectedCommitHash);
   const expandedNodes = new Set(state.expandedNodes);
   for (const group of snapshot.remoteGroups) {
@@ -186,6 +346,7 @@ export function reconcileStateWithSnapshot(
     errorMessage: null,
     isLoading: false,
     pinnedBranchFullNames: pinned,
+    ...selectRefPatch(selectedRef),
     selectedCommitHash: selectedExists ? state.selectedCommitHash : null,
     expandedNodes,
   };

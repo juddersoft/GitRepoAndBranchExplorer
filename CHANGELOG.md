@@ -3,6 +3,20 @@
 All notable changes to **Git Repo & Branch Explorer** are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] - 2026-11-21
+
+### Added
+- **Inspect vs. checked out:** single-click a branch, remote branch or tag to select it and focus the history on commits reachable from it. The checked-out branch keeps its own green accent bar, check icon and **Checked Out** badge. Tags now appear in the branch tree.
+- **Context menus** (`--vscode-menu-*` themed, keyboard accessible) for branches, remote branches, tags and commit rows, with inapplicable actions disabled and explained.
+- **New Git operations:** merge, rebase, cherry-pick, revert, delete branch (`-d`, with a force `-D` prompt when not fully merged), check out a remote branch as a tracking branch, and create a branch from any ref or commit. All run through the existing progress/busy/refresh pipeline; refs and hashes are validated and Git runs with argument arrays. `git merge` is run with `--no-edit` so it never waits for an editor.
+- **Pin Tab** toolbar toggle (persisted). Unpinned, the panel closes when the Activity Bar container is no longer the visible one (for example when Explorer is selected).
+- Ref-toggle feedback: filled active state, per-kind counts and a status line for hidden or empty ref kinds, plus a "Showing N of M commits" indicator and clearer empty-history messages.
+- Toolbar **Pull** is disabled when the checked-out branch has no upstream, and Pull/Push when HEAD is detached.
+
+### Changed
+- Opening the panel moves its tab to the far left of the editor group and keeps the Activity Bar container selected. The launcher no longer collapses the sidebar (that removed the Activity Bar highlight).
+- Revealing an existing panel keeps it in its current editor group instead of moving it to the active editor's column.
+
 ## [1.0.0] - 2026-11-20
 
 First public release.

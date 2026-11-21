@@ -2,7 +2,7 @@
   "name": "git-repo-and-branch-explorer",
   "displayName": "Git Repo & Branch Explorer",
   "description": "Unified Visual Studio-style Git Repository explorer with split-pane branch tree, multi-lane SVG commit graph, file diff inspection, and GitHub/Git Graph integration.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "publisher": "PeterJudd",
   "license": "MIT",
   "icon": "media/icon.png",

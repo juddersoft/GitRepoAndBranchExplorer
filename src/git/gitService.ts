@@ -34,6 +34,9 @@ export type GitRunner = (args: readonly string[], cwd: string, options?: ExecGit
 /** Network operations (fetch/pull/push) may legitimately take much longer than local reads. */
 export const NETWORK_GIT_TIMEOUT_MS = 120_000;
 
+/** Merge, rebase, cherry-pick, revert and tracking checkouts can rewrite many files in a large worktree. */
+export const WORKTREE_GIT_TIMEOUT_MS = 120_000;
+
 const STRICT_COMMIT_HASH = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i;
 
 /** Full-length SHA-1 (40 hex) or SHA-256 (64 hex) commit hash check applied before any hash reaches Git. */
@@ -390,6 +393,38 @@ export class GitService {
     }
     args.push('--');
     await this.runGit(args, repoRoot);
+  }
+
+  /** `--no-edit` keeps Git from opening an editor for the merge message (there is no terminal to host it). */
+  public async mergeBranch(repoRoot: string, refName: string): Promise<void> {
+    const ref = validateGitRef(refName);
+    await this.runGit(['merge', '--no-edit', ref], repoRoot, { timeoutMs: WORKTREE_GIT_TIMEOUT_MS });
+  }
+
+  public async rebaseOnto(repoRoot: string, refName: string): Promise<void> {
+    const ref = validateGitRef(refName);
+    await this.runGit(['rebase', ref], repoRoot, { timeoutMs: WORKTREE_GIT_TIMEOUT_MS });
+  }
+
+  public async cherryPickCommit(repoRoot: string, hash: string): Promise<void> {
+    await this.runGit(['cherry-pick', assertCommitHash(hash)], repoRoot, { timeoutMs: WORKTREE_GIT_TIMEOUT_MS });
+  }
+
+  public async revertCommit(repoRoot: string, hash: string): Promise<void> {
+    await this.runGit(['revert', '--no-edit', assertCommitHash(hash)], repoRoot, { timeoutMs: WORKTREE_GIT_TIMEOUT_MS });
+  }
+
+  /** `-d` refuses unmerged branches; `-D` (force) deletes regardless. */
+  public async deleteLocalBranch(repoRoot: string, branchName: string, force = false): Promise<void> {
+    const ref = validateGitRef(branchName);
+    await this.runGit(['branch', force ? '-D' : '-d', ref], repoRoot);
+  }
+
+  /** Creates `localBranchName` tracking `remoteBranchName` (e.g. `origin/main`) and checks it out. */
+  public async checkoutRemoteBranch(repoRoot: string, remoteBranchName: string, localBranchName: string): Promise<void> {
+    const remote = validateGitRef(remoteBranchName);
+    const local = validateGitRef(localBranchName);
+    await this.runGit(['checkout', '-b', local, '--track', remote], repoRoot, { timeoutMs: WORKTREE_GIT_TIMEOUT_MS });
   }
 
   public async getGitHubRemoteUrl(repoRoot: string): Promise<string | null> {

@@ -8,14 +8,25 @@ A Visual Studio-style **Git Repository** window for VS Code: a branch and remote
 
 ### Split-pane branch and remote explorer
 - Local branches, `remotes/<name>` groups and tags in one filterable tree.
-- The current branch is highlighted, with ahead/behind counts against its upstream.
-- Double-click a local branch to check it out.
+- The **checked-out** branch is unmistakable: green accent bar, check icon, bold name, a **Checked Out** badge and ahead/behind counts against its upstream.
+- **Single-click** any branch, remote branch or tag to *inspect* it: it is highlighted with the list-selection colours and the history table, breadcrumb and "Showing N of M commits" indicator focus on the commits reachable from it. **Clear filter** returns to the full history.
+- **Double-click** (or press <kbd>Enter</kbd> on) a non-current local branch to check it out. The eye button still isolates several branches at once.
+- **Right-click** a branch, remote branch, tag or commit for a context menu (<kbd>Shift</kbd>+<kbd>F10</kbd> / the Menu key work too). Inapplicable actions are disabled and say why.
+
+### Context menus and Git operations
+- Local branch: Check Out, Merge into current, Rebase current onto this, Pull, Push/Publish, Fetch, Create Branch from Here, Show Only This Branch, Delete Branch (with a force-delete prompt when Git says it is not fully merged).
+- Remote branch: Check Out as Local Tracking Branch, Merge, Rebase, Create Branch from Here.
+- Tag: Create Branch from Here, Merge, Rebase.
+- Commit: Copy Commit Hash, Create Branch from Here, Cherry-Pick, Revert, Open in Git Graph, Open on GitHub.
+- Merge, Rebase and Delete are disabled for the checked-out branch or a detached HEAD; Pull is disabled without an upstream or for a branch that is not checked out; Cherry-Pick is disabled for commits already in the current history; merge commits cannot be cherry-picked or reverted from the view.
+- Rebase and Delete ask for confirmation. If a merge, rebase, cherry-pick or revert stops on conflicts, the error message tells you to resolve them in the Source Control view or abort in a terminal.
 
 ### Multi-lane SVG commit graph
 - The history table has **Branch / Tag**, **Graph**, **Message**, **Author**, **Date** and **ID** columns.
 - Branches, merges and octopus merges are drawn as coloured lanes that stay readable on light and dark themes.
 - Lanes are recycled after merges, and lanes that lead to commits outside the visible list end cleanly.
 - Filter the history by message, author, hash or ref name.
+- The **Local Branches**, **Remote Branches** and **Tags** toggles control which ref labels appear in the Branch / Tag column. Active toggles are filled with the button colour and show how many refs of that kind exist; a status line explains what is hidden or missing ("Hiding tags (3)", "No tags in this repository"). Toggles hide labels only, never commits.
 
 ### Live Git actions
 - **Fetch** (all remotes, with prune), **Pull** and **Push** from the toolbar.
@@ -43,7 +54,8 @@ A Visual Studio-style **Git Repository** window for VS Code: a branch and remote
 
 1. Open a folder that is (or is inside) a Git repository.
 2. Click the **Git Repo & Branch Explorer** icon in the Activity Bar, or run **Git Repo & Branch Explorer: Open Repository Window** from the Command Palette.
-3. The **Git Repository** tab opens in the editor area and the sidebar collapses to give it the full width.
+3. The **Git Repository** tab opens in the editor area, moved to the far left of its group, and the Git Repo & Branch Explorer icon stays highlighted in the Activity Bar.
+4. By default the tab closes when you switch to another sidebar view (Explorer, Search, ...) or hide the sidebar. Click **Pin Tab** in the toolbar to keep it open; the choice is remembered.
 
 ## Commands
 

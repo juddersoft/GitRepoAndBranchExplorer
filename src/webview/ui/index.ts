@@ -1,10 +1,14 @@
-import type { ExtensionToWebviewMessage, WebviewToExtensionMessage } from '../../types/messages';
+import type { ExtensionToWebviewMessage, GitAction, WebviewToExtensionMessage } from '../../types/messages';
 import { isExtensionToWebviewMessage } from '../../types/messages';
 import { BranchTree } from './BranchTree';
+import { ContextMenu } from './ContextMenu';
+import type { MenuActionId } from './contextMenuModel';
+import { buildCommitMenu, buildRefMenu } from './contextMenuModel';
 import { el } from './dom';
 import { HistoryPane } from './HistoryPane';
-import type { BadgeKindToggle, ExplorerUiState } from './state';
-import { cacheCommitDetails, createInitialState, reconcileStateWithSnapshot, toggleSetMember } from './state';
+import type { BadgeKindToggle, ExplorerUiState, RefTarget } from './state';
+import { cacheCommitDetails, createInitialState, reconcileStateWithSnapshot, selectRefPatch, toggleSetMember } from './state';
+import type { CommitNode } from '../../types/git';
 
 interface VsCodeApi {
   postMessage(message: WebviewToExtensionMessage): void;
@@ -73,11 +77,91 @@ const BADGE_STATE_KEYS: Readonly<Record<BadgeKindToggle, 'showLocalBranchBadges'
   tag: 'showTagBadges',
 };
 
+const contextMenu = new ContextMenu();
+
+function postGitAction(action: GitAction, target?: string): void {
+  vscode.postMessage({ type: 'gitAction', payload: target === undefined ? { action } : { action, target } });
+}
+
+function selectRef(target: RefTarget): void {
+  // Skip no-op selections so a double-click (two clicks) does not rebuild the tree between them.
+  if (state.selectedBranchFullName !== target.fullName) {
+    setState(selectRefPatch(target));
+  }
+}
+
+function runRefMenuAction(id: MenuActionId, target: RefTarget): void {
+  switch (id) {
+    case 'checkout':
+      if (target.branch) {
+        vscode.postMessage({ type: 'checkoutBranch', payload: { branchName: target.branch.name } });
+      }
+      break;
+    case 'checkoutRemote':
+    case 'merge':
+    case 'rebase':
+    case 'deleteBranch':
+      postGitAction(id === 'checkoutRemote' ? 'checkoutRemoteBranch' : id, target.name);
+      break;
+    case 'pull':
+    case 'push':
+    case 'fetch':
+      postGitAction(id);
+      break;
+    case 'createBranchHere':
+      vscode.postMessage({ type: 'createBranchAtRef', payload: { startPoint: target.name } });
+      break;
+    case 'isolate':
+      setState({ pinnedBranchFullNames: toggleSetMember(state.pinnedBranchFullNames, target.fullName) });
+      break;
+    default:
+      break;
+  }
+}
+
+function runCommitMenuAction(id: MenuActionId, commit: CommitNode): void {
+  switch (id) {
+    case 'copyHash':
+      vscode.postMessage({ type: 'copyCommitHash', payload: { hash: commit.hash } });
+      break;
+    case 'createBranchHere':
+      vscode.postMessage({ type: 'createBranchAtRef', payload: { startPoint: commit.hash } });
+      break;
+    case 'cherryPick':
+    case 'revert':
+      postGitAction(id, commit.hash);
+      break;
+    case 'openGitGraph':
+      vscode.postMessage({ type: 'openInGitGraph' });
+      break;
+    case 'openGitHub':
+      vscode.postMessage({ type: 'openCommitOnGitHub', payload: { hash: commit.hash } });
+      break;
+    default:
+      break;
+  }
+}
+
+function showRefContextMenu(target: RefTarget, x: number, y: number): void {
+  selectRef(target);
+  if (state.snapshot) {
+    contextMenu.show(x, y, buildRefMenu(state.snapshot, state, target), (id) => runRefMenuAction(id, target));
+  }
+}
+
+function showCommitContextMenu(commit: CommitNode, x: number, y: number): void {
+  if (state.snapshot) {
+    contextMenu.show(x, y, buildCommitMenu(state.snapshot, state, commit), (id) => runCommitMenuAction(id, commit));
+  }
+}
+
 const branchTree = new BranchTree({
   onFilterChange: (text) => setState({ branchFilterText: text }),
   onToggleNode: (key) => setState({ expandedNodes: toggleSetMember(state.expandedNodes, key) }),
   onTogglePin: (fullName) => setState({ pinnedBranchFullNames: toggleSetMember(state.pinnedBranchFullNames, fullName) }),
   onCheckout: (branch) => vscode.postMessage({ type: 'checkoutBranch', payload: { branchName: branch.name } }),
+  onSelectRef: selectRef,
+  onContextMenu: showRefContextMenu,
   onToggleSidebar: () => {
     setState({ isSidebarCollapsed: !state.isSidebarCollapsed });
     persist();
@@ -85,16 +169,22 @@ const branchTree = new BranchTree({
 });
 
 const historyPane = new HistoryPane({
-  onGitAction: (action) => vscode.postMessage({ type: 'gitAction', payload: { action } }),
+  onGitAction: (action) => postGitAction(action),
   onRefresh: requestRefresh,
   onToggleBadgeKind: (kind) => {
     const key = BADGE_STATE_KEYS[kind];
     setState({ [key]: !state[key] });
     persist();
   },
+  onToggleTabPinned: () => {
+    const pinned = !state.tabPinned;
+    setState({ tabPinned: pinned });
+    vscode.postMessage({ type: 'setTabPinned', payload: { pinned } });
+  },
   onHistoryFilterChange: (text) => setState({ historyFilterText: text }),
-  onClearPins: () => setState({ pinnedBranchFullNames: new Set() }),
+  onClearFocus: () => setState({ pinnedBranchFullNames: new Set(), ...selectRefPatch(null) }),
   onSelectCommit: selectCommit,
+  onCommitContextMenu: showCommitContextMenu,
   onCopyHash: (hash) => vscode.postMessage({ type: 'copyCommitHash', payload: { hash } }),
   onOpenFileDiff: (hash, file) =>
     vscode.postMessage({
@@ -209,7 +299,7 @@ function handleMessage(message: ExtensionToWebviewMessage): void {
   switch (message.type) {
     case 'initState':
       // The extension sends initState at the start of every load.
-      setState({ isLoading: true });
+      setState({ isLoading: true, ...(message.payload.tabPinned === undefined ? {} : { tabPinned: message.payload.tabPinned }) });
       break;
     case 'repoSnapshot':
       state = reconcileStateWithSnapshot(state, message.payload, knownRemoteNames);

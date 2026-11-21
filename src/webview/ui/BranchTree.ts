@@ -1,13 +1,25 @@
-import type { BranchInfo, RemoteGroup, RepoSnapshot } from '../../types/git';
+import type { BranchInfo, RemoteGroup, RepoSnapshot, TagInfo } from '../../types/git';
 import { button, createSearchBox, el, icon, type IconName, rebuildPreservingFocus } from './dom';
-import type { ExplorerUiState } from './state';
-import { filterBranches, NODE_BRANCHES, NODE_REPO_ROOT, remoteNodeKey } from './state';
+import type { ExplorerUiState, RefTarget } from './state';
+import {
+  branchRefTarget,
+  filterBranches,
+  filterTags,
+  NODE_BRANCHES,
+  NODE_REPO_ROOT,
+  NODE_TAGS,
+  remoteNodeKey,
+  tagRefTarget,
+} from './state';
 
 export interface BranchTreeCallbacks {
   onFilterChange(text: string): void;
   onToggleNode(key: string): void;
   onTogglePin(fullName: string): void;
   onCheckout(branch: BranchInfo): void;
+  /** Single-click / Enter: inspect this ref and focus the history on it. */
+  onSelectRef(target: RefTarget): void;
+  onContextMenu(target: RefTarget, x: number, y: number): void;
   onToggleSidebar(): void;
 }
 
@@ -38,7 +50,7 @@ export class BranchTree {
   private readonly titleEl: HTMLElement;
   private readonly search: ReturnType<typeof createSearchBox>;
   private readonly treeEl: HTMLUListElement;
-  private checkoutTargets = new Map<string, BranchInfo>();
+  private refTargets = new Map<string, RefTarget>();
 
   constructor(private readonly callbacks: BranchTreeCallbacks) {
     this.titleEl = el('span', { className: 'sidebar-title', text: 'Loading\u2026' });
@@ -65,13 +77,13 @@ export class BranchTree {
     this.titleEl.textContent = snapshot ? repoTitle(snapshot) : state.errorMessage ? 'No repository' : 'Loading\u2026';
     this.titleEl.title = snapshot?.repoRoot ?? '';
     this.search.sync(state.branchFilterText);
-    this.checkoutTargets = new Map();
+    this.refTargets = new Map();
 
     rebuildPreservingFocus(this.treeEl, () => {
       if (!snapshot) {
         return [this.placeholder(state.errorMessage ? 'Unavailable' : 'Loading\u2026', 0)];
       }
-      return [this.renderBranchesNode(snapshot, state)];
+      return [this.renderBranchesNode(snapshot, state), ...this.renderTagsNode(snapshot, state)];
     });
 
     // Roving tabindex: the focused item (or the first one) is the single tab stop.
@@ -116,6 +128,27 @@ export class BranchTree {
       open: isOpen(NODE_BRANCHES),
       children: [repoNode, ...remoteNodes],
     });
+  }
+
+  private renderTagsNode(snapshot: RepoSnapshot, state: ExplorerUiState): HTMLLIElement[] {
+    if (snapshot.tags.length === 0) {
+      return [];
+    }
+    const filtering = state.branchFilterText.trim() !== '';
+    const tags = filterTags(snapshot.tags, state.branchFilterText);
+    if (filtering && tags.length === 0) {
+      return [];
+    }
+    return [
+      this.renderGroup({
+        key: NODE_TAGS,
+        label: 'Tags',
+        iconName: null,
+        depth: 0,
+        open: filtering || state.expandedNodes.has(NODE_TAGS),
+        children: tags.map((tag) => this.renderTag(tag, state)),
+      }),
+    ];
   }
 
   private renderRemote(
@@ -192,31 +225,71 @@ export class BranchTree {
     });
     eye.addEventListener('dblclick', (event) => event.stopPropagation());
 
+    const target = branchRefTarget(branch);
+    const selected = state.selectedBranchFullName === branch.fullName;
     const tracking = trackingText(branch);
-    const tooltip = [branch.fullName, branch.upstream ? `Tracking ${branch.upstream}` : null, canCheckout ? 'Double-click to check out' : null]
+    const tooltip = [
+      branch.fullName,
+      branch.isCurrent ? 'Checked out' : null,
+      branch.upstream ? `Tracking ${branch.upstream}` : null,
+      'Click to inspect its history',
+      canCheckout ? 'Double-click to check out' : null,
+      'Right-click for more actions',
+    ]
       .filter((line): line is string => line !== null)
       .join('\n');
 
-    const row = el('div', { className: `tree-row depth-${depth}${branch.isCurrent ? ' current-branch' : ''}`, title: tooltip }, [
+    const rowClasses = ['tree-row', `depth-${depth}`];
+    if (branch.isCurrent) {
+      rowClasses.push('current-branch');
+    }
+    if (selected) {
+      rowClasses.push('selected-ref');
+    }
+    const row = el('div', { className: rowClasses.join(' '), title: tooltip }, [
       el('span', { className: 'twisty-spacer' }),
-      icon('branch'),
+      branch.isCurrent ? icon('checkCircle', 'icon checked-out-icon') : icon('branch'),
       el('span', { className: 'tree-label', text: branch.displayName }),
+      ...(branch.isCurrent
+        ? [el('span', { className: 'checked-out-badge', text: 'Checked Out', title: 'This branch is checked out (HEAD)' })]
+        : []),
       ...(tracking ? [el('span', { className: tracking.className, text: tracking.text, title: tracking.title })] : []),
       eye,
     ]);
+    this.wireRefRow(row, target);
     if (canCheckout) {
-      this.checkoutTargets.set(branch.fullName, branch);
       row.addEventListener('dblclick', () => this.callbacks.onCheckout(branch));
     }
 
+    const classes = ['tree-node', 'tree-branch'];
+    if (pinned) {
+      classes.push('pinned');
+    }
+    if (selected) {
+      classes.push('selected-ref');
+    }
+    if (branch.isCurrent) {
+      classes.push('checked-out');
+    }
+    const labelParts = [branch.name];
+    if (branch.isCurrent) {
+      labelParts.push('checked out');
+    }
+    if (selected) {
+      labelParts.push('selected');
+    }
+    if (pinned) {
+      labelParts.push('isolated in history');
+    }
     return el(
       'li',
       {
-        className: pinned ? 'tree-node tree-branch pinned' : 'tree-node tree-branch',
+        className: classes.join(' '),
         attrs: {
           role: 'treeitem',
           'aria-level': String(depth + 1),
-          'aria-label': `${branch.name}${branch.isCurrent ? ' (current)' : ''}${pinned ? ', isolated in history' : ''}`,
+          'aria-label': labelParts.join(', '),
+          'aria-selected': String(selected),
           'aria-current': branch.isCurrent ? 'true' : 'false',
           tabindex: '-1',
           'data-focus-key': `branch:${branch.fullName}`,
@@ -225,6 +298,47 @@ export class BranchTree {
       },
       [row],
     );
+  }
+
+  private renderTag(tag: TagInfo, state: ExplorerUiState): HTMLLIElement {
+    const target = tagRefTarget(tag);
+    const selected = state.selectedBranchFullName === tag.fullName;
+    const row = el(
+      'div',
+      {
+        className: selected ? 'tree-row depth-1 tree-leaf selected-ref' : 'tree-row depth-1 tree-leaf',
+        title: `${tag.fullName}\nClick to inspect its history\nRight-click for more actions`,
+      },
+      [el('span', { className: 'twisty-spacer' }), icon('tag'), el('span', { className: 'tree-label', text: tag.name })],
+    );
+    this.wireRefRow(row, target);
+
+    return el(
+      'li',
+      {
+        className: selected ? 'tree-node tree-tag selected-ref' : 'tree-node tree-tag',
+        attrs: {
+          role: 'treeitem',
+          'aria-level': '2',
+          'aria-label': `${tag.name}, tag${selected ? ', selected' : ''}`,
+          'aria-selected': String(selected),
+          tabindex: '-1',
+          'data-focus-key': `tag:${tag.fullName}`,
+          'data-full-name': tag.fullName,
+        },
+      },
+      [row],
+    );
+  }
+
+  /** Registers the ref for keyboard handling and wires single-click selection and the right-click menu. */
+  private wireRefRow(row: HTMLElement, target: RefTarget): void {
+    this.refTargets.set(target.fullName, target);
+    row.addEventListener('click', () => this.callbacks.onSelectRef(target));
+    row.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      this.callbacks.onContextMenu(target, event.clientX, event.clientY);
+    });
   }
 
   private placeholder(text: string, depth: number): HTMLLIElement {
@@ -243,6 +357,7 @@ export class BranchTree {
     const index = items.indexOf(target);
     const nodeKey = target.dataset.nodeKey;
     const fullName = target.dataset.fullName;
+    const ref = fullName ? this.refTargets.get(fullName) : undefined;
     const expanded = target.getAttribute('aria-expanded') === 'true';
 
     const focusItem = (next: HTMLElement | undefined): void => {
@@ -281,18 +396,33 @@ export class BranchTree {
       case 'Enter':
         if (nodeKey) {
           this.callbacks.onToggleNode(nodeKey);
-        } else if (fullName) {
-          const branch = this.checkoutTargets.get(fullName);
-          if (branch) {
-            this.callbacks.onCheckout(branch);
+        } else if (ref) {
+          if (ref.kind === 'local' && ref.branch?.isCurrent === false) {
+            this.callbacks.onCheckout(ref.branch);
+          } else {
+            this.callbacks.onSelectRef(ref);
           }
         }
         break;
       case ' ':
         if (nodeKey) {
           this.callbacks.onToggleNode(nodeKey);
-        } else if (fullName) {
-          this.callbacks.onTogglePin(fullName);
+        } else if (ref) {
+          if (ref.kind === 'tag') {
+            this.callbacks.onSelectRef(ref);
+          } else {
+            this.callbacks.onTogglePin(ref.fullName);
+          }
+        }
+        break;
+      case 'ContextMenu':
+      case 'F10':
+        if (!ref || (event.key === 'F10' && !event.shiftKey)) {
+          return;
+        }
+        {
+          const rect = target.getBoundingClientRect();
+          this.callbacks.onContextMenu(ref, rect.left + 24, rect.bottom);
         }
         break;
       default:

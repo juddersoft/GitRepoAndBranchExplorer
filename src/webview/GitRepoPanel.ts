@@ -5,7 +5,7 @@ import { GitExecutionError, validateGitRef } from '../git/gitExecutor';
 import { findGitGraphExtensionId, openInGitGraph } from '../git/gitGraphInterop';
 import { GitService, isValidCommitHash } from '../git/gitService';
 import { GitHubService } from '../github/githubService';
-import type { ExternalIntegrationsInfo, RepoSnapshot } from '../types/git';
+import type { BranchInfo, ExternalIntegrationsInfo, RepoSnapshot } from '../types/git';
 import type {
   ExtensionToWebviewMessage,
   GitAction,
@@ -14,10 +14,17 @@ import type {
   RepoErrorPayload,
 } from '../types/messages';
 import { isChangedFileStatus, isWebviewToExtensionMessage, MAX_ACTION_STATUS_LENGTH } from '../types/messages';
+import { AUTO_CLOSE_DELAY_MS, shouldAutoClosePanel } from './panelLifecycle';
 import { buildContentSecurityPolicy, escapeHtml, getNonce } from './security';
+import type { RefTarget } from './ui/state';
+import { listRefTargets } from './ui/state';
 
 export const OPEN_REPOSITORY_COMMAND = 'gitRepoAndBranchExplorer.openRepository';
 export const REFRESH_COMMAND = 'gitRepoAndBranchExplorer.refresh';
+/** Built-in command that selects (and, if needed, shows) this extension's Activity Bar container. */
+export const SHOW_CONTAINER_COMMAND = 'workbench.view.extension.gitRepoAndBranchExplorer-container';
+const TAB_PINNED_KEY = 'gitRepoAndBranchExplorer.tabPinned';
+const MOVE_TO_FIRST_TAB_TIMEOUT_MS = 1500;
 
 const PANEL_TITLE = 'Git Repository';
 
@@ -59,19 +66,34 @@ function getStylesUri(webview: vscode.Webview, extensionUri: vscode.Uri): vscode
   return webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'src', 'webview', 'ui', 'styles.css'));
 }
 
-function getInitState(): InitStatePayload {
+function getInitState(tabPinned: boolean): InitStatePayload {
   const folder = vscode.workspace.workspaceFolders?.[0];
   if (!folder) {
-    return { repoName: 'No folder open', workspacePath: null };
+    return { repoName: 'No folder open', workspacePath: null, tabPinned };
   }
   const fsPath = folder.uri.fsPath;
-  return { repoName: folder.name || path.basename(fsPath), workspacePath: fsPath };
+  return { repoName: folder.name || path.basename(fsPath), workspacePath: fsPath, tabPinned };
+}
+
+/** Hint appended to failures of operations that can stop half-way through with conflicts. */
+function conflictHint(command: string): string {
+  return `If Git reported conflicts, resolve them in the Source Control view or run "git ${command} --abort" in a terminal.`;
+}
+
+function isNotFullyMergedError(err: unknown): boolean {
+  return err instanceof GitExecutionError && /not fully merged/i.test(err.stderr);
 }
 
 /** Singleton editor-area panel, analogous to Visual Studio's "Git Repository" window. */
 export class GitRepoPanel {
   public static readonly viewType = 'gitRepoAndBranchExplorer.panel';
   private static currentPanel: GitRepoPanel | undefined;
+  private static pinStore: vscode.Memento | undefined;
+  private static tabPinned = false;
+  private static launcherVisible = false;
+  private static opening = false;
+  private static autoCloseTimer: ReturnType<typeof setTimeout> | undefined;
+  private static autoCloseDeferred = false;
 
   private readonly disposables: vscode.Disposable[] = [];
   private readonly gitService = new GitService();
@@ -90,21 +112,71 @@ export class GitRepoPanel {
   private watchedRepoRoot: string | null = null;
   private watchDebounceTimer: ReturnType<typeof setTimeout> | undefined;
 
-  public static createOrShow(extensionUri: vscode.Uri): void {
-    const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
+  /** Restores the persisted pin and watches window focus so a deferred auto-close can still happen. */
+  public static initialize(store: vscode.Memento): vscode.Disposable {
+    GitRepoPanel.pinStore = store;
+    GitRepoPanel.tabPinned = store.get<boolean>(TAB_PINNED_KEY, false);
+    return vscode.window.onDidChangeWindowState((windowState) => {
+      if (windowState.focused && GitRepoPanel.autoCloseDeferred) {
+        GitRepoPanel.autoCloseDeferred = false;
+        GitRepoPanel.scheduleAutoClose();
+      }
+    });
+  }
 
-    if (GitRepoPanel.currentPanel) {
-      GitRepoPanel.currentPanel.panel.reveal(column);
+  /**
+   * Opens (or reveals) the panel, moves its tab to the far left and makes sure this extension's Activity Bar
+   * container is the selected one, so unpinned-tab auto-close tracks the container the user is looking at.
+   */
+  public static async createOrShow(extensionUri: vscode.Uri): Promise<void> {
+    if (GitRepoPanel.opening) {
       return;
     }
+    GitRepoPanel.opening = true;
+    GitRepoPanel.cancelAutoClose();
+    try {
+      const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
+      let instance = GitRepoPanel.currentPanel;
 
-    const panel = vscode.window.createWebviewPanel(GitRepoPanel.viewType, PANEL_TITLE, column, {
-      enableScripts: true,
-      retainContextWhenHidden: true,
-      localResourceRoots: getLocalResourceRoots(extensionUri),
-    });
+      if (instance) {
+        instance.panel.reveal(instance.panel.viewColumn ?? column);
+      } else {
+        const panel = vscode.window.createWebviewPanel(GitRepoPanel.viewType, PANEL_TITLE, column, {
+          enableScripts: true,
+          retainContextWhenHidden: true,
+          localResourceRoots: getLocalResourceRoots(extensionUri),
+        });
+        instance = new GitRepoPanel(panel, extensionUri);
+        GitRepoPanel.currentPanel = instance;
+      }
 
-    GitRepoPanel.currentPanel = new GitRepoPanel(panel, extensionUri);
+      await instance.moveToFirstTab();
+      await GitRepoPanel.ensureContainerSelected(instance);
+    } finally {
+      GitRepoPanel.opening = false;
+    }
+  }
+
+  /** Called by the launcher view whenever it becomes visible or hidden. */
+  public static setLauncherVisible(visible: boolean): void {
+    GitRepoPanel.launcherVisible = visible;
+    if (visible) {
+      GitRepoPanel.cancelAutoClose();
+    } else {
+      GitRepoPanel.scheduleAutoClose();
+    }
+  }
+
+  public static isTabPinned(): boolean {
+    return GitRepoPanel.tabPinned;
+  }
+
+  public static setTabPinned(pinned: boolean): void {
+    GitRepoPanel.tabPinned = pinned;
+    void GitRepoPanel.pinStore?.update(TAB_PINNED_KEY, pinned);
+    if (pinned) {
+      GitRepoPanel.cancelAutoClose();
+    }
   }
 
   public static refresh(): void {
@@ -112,7 +184,55 @@ export class GitRepoPanel {
   }
 
   public static disposeCurrent(): void {
+    GitRepoPanel.cancelAutoClose();
     GitRepoPanel.currentPanel?.dispose();
+  }
+
+  private static async ensureContainerSelected(instance: GitRepoPanel): Promise<void> {
+    if (GitRepoPanel.launcherVisible) {
+      return;
+    }
+    try {
+      await vscode.commands.executeCommand(SHOW_CONTAINER_COMMAND);
+      // Selecting the container focuses its view; hand focus back to the panel the user asked for.
+      if (!instance.disposed) {
+        instance.panel.reveal(instance.panel.viewColumn);
+      }
+    } catch {
+      // The Activity Bar indicator is cosmetic; never let it prevent the panel from opening.
+    }
+  }
+
+  private static scheduleAutoClose(): void {
+    GitRepoPanel.cancelAutoClose();
+    if (!GitRepoPanel.currentPanel) {
+      return;
+    }
+    GitRepoPanel.autoCloseTimer = setTimeout(() => {
+      GitRepoPanel.autoCloseTimer = undefined;
+      const windowFocused = vscode.window.state.focused;
+      if (!windowFocused) {
+        GitRepoPanel.autoCloseDeferred = true;
+        return;
+      }
+      const shouldClose = shouldAutoClosePanel({
+        tabPinned: GitRepoPanel.tabPinned,
+        panelOpening: GitRepoPanel.opening,
+        windowFocused,
+        launcherVisible: GitRepoPanel.launcherVisible,
+      });
+      if (shouldClose) {
+        GitRepoPanel.currentPanel?.dispose();
+      }
+    }, AUTO_CLOSE_DELAY_MS);
+  }
+
+  private static cancelAutoClose(): void {
+    if (GitRepoPanel.autoCloseTimer !== undefined) {
+      clearTimeout(GitRepoPanel.autoCloseTimer);
+      GitRepoPanel.autoCloseTimer = undefined;
+    }
+    GitRepoPanel.autoCloseDeferred = false;
   }
 
   private constructor(
@@ -132,6 +252,36 @@ export class GitRepoPanel {
     vscode.extensions.onDidChange(() => void this.publishIntegrations(), null, this.disposables);
   }
 
+  /** Moves the panel's tab to the far left of its group, but only while it really is the active editor. */
+  private async moveToFirstTab(): Promise<void> {
+    if (!this.panel.active) {
+      await new Promise<void>((resolve) => {
+        const subscription = this.panel.onDidChangeViewState((event) => {
+          if (event.webviewPanel.active) {
+            finish();
+          }
+        });
+        const timer = setTimeout(finish, MOVE_TO_FIRST_TAB_TIMEOUT_MS);
+        function finish(): void {
+          clearTimeout(timer);
+          subscription.dispose();
+          resolve();
+        }
+        if (this.panel.active) {
+          finish();
+        }
+      });
+    }
+    if (this.disposed || !this.panel.active) {
+      return;
+    }
+    try {
+      await vscode.commands.executeCommand('moveActiveEditor', { to: 'first', by: 'tab' });
+    } catch {
+      // Tab placement is a nicety; the panel is still usable where it is.
+    }
+  }
+
   private handleMessage(message: unknown): void {
     if (!isWebviewToExtensionMessage(message)) {
       return;
@@ -148,7 +298,13 @@ export class GitRepoPanel {
         void this.handleCheckout(message.payload.branchName);
         break;
       case 'gitAction':
-        void this.handleGitAction(message.payload.action);
+        void this.handleGitAction(message.payload.action, message.payload.target);
+        break;
+      case 'createBranchAtRef':
+        void this.handleCreateBranch(message.payload.startPoint);
+        break;
+      case 'setTabPinned':
+        GitRepoPanel.setTabPinned(message.payload.pinned);
         break;
       case 'copyCommitHash':
         void this.copyCommitHash(message.payload.hash);
@@ -174,7 +330,11 @@ export class GitRepoPanel {
   }
 
   /** Runs a mutating Git operation with progress UI, then refreshes the snapshot. One at a time. */
-  private async runGitOperation(title: string, operation: (repoRoot: string) => Promise<void>): Promise<void> {
+  private async runGitOperation(
+    title: string,
+    operation: (repoRoot: string) => Promise<void>,
+    failureHint?: string,
+  ): Promise<void> {
     const snapshot = this.lastSnapshot;
     if (!snapshot) {
       void vscode.window.showWarningMessage('No Git repository is loaded.');
@@ -192,7 +352,9 @@ export class GitRepoPanel {
         () => operation(snapshot.repoRoot),
       );
     } catch (err) {
-      void vscode.window.showErrorMessage(`${title} failed: ${describeError(err)}`);
+      void vscode.window.showErrorMessage(
+        `${title} failed: ${describeError(err)}${failureHint === undefined ? '' : ` ${failureHint}`}`,
+      );
     } finally {
       this.operationInProgress = false;
       this.postActionStatus(false);
@@ -226,13 +388,13 @@ export class GitRepoPanel {
     await this.runGitOperation(`Checking out ${ref}`, (root) => this.gitService.checkoutBranch(root, ref));
   }
 
-  private async handleGitAction(action: GitAction): Promise<void> {
+  private async handleGitAction(action: GitAction, target?: string): Promise<void> {
     switch (action) {
       case 'fetch':
         await this.runGitOperation('Fetching all remotes', (root) => this.gitService.fetchAll(root));
         break;
       case 'pull':
-        await this.runGitOperation('Pulling', (root) => this.gitService.pullCurrentBranch(root));
+        await this.handlePull();
         break;
       case 'push':
         await this.handlePush();
@@ -240,7 +402,216 @@ export class GitRepoPanel {
       case 'createBranch':
         await this.handleCreateBranch();
         break;
+      case 'merge':
+        await this.handleMerge(target);
+        break;
+      case 'rebase':
+        await this.handleRebase(target);
+        break;
+      case 'cherryPick':
+      case 'revert':
+        await this.handleCommitOperation(action, target);
+        break;
+      case 'deleteBranch':
+        await this.handleDeleteBranch(target);
+        break;
+      case 'checkoutRemoteBranch':
+        await this.handleCheckoutRemoteBranch(target);
+        break;
     }
+  }
+
+  /** Resolves a webview-supplied name to a branch/tag of the loaded snapshot, warning when it is not one. */
+  private resolveRef(name: string | undefined, kinds: ReadonlyArray<RefTarget['kind']>): RefTarget | null {
+    const snapshot = this.lastSnapshot;
+    if (!snapshot || name === undefined) {
+      return null;
+    }
+    let ref: string;
+    try {
+      ref = validateGitRef(name);
+    } catch (err) {
+      void vscode.window.showWarningMessage(`Invalid ref: ${describeError(err)}`);
+      return null;
+    }
+    const found = listRefTargets(snapshot).find((target) => target.name === ref && kinds.includes(target.kind));
+    if (!found) {
+      void vscode.window.showWarningMessage(`"${ref}" is not a known ${kinds.join('/')} ref in this repository.`);
+      return null;
+    }
+    return found;
+  }
+
+  /** The checked-out branch, or null (with a warning) when HEAD is detached or unborn. */
+  private requireCurrentBranch(action: string): BranchInfo | null {
+    const snapshot = this.lastSnapshot;
+    const current = snapshot?.localBranches.find((b) => b.isCurrent);
+    if (!snapshot || snapshot.isDetachedHead || !current) {
+      void vscode.window.showWarningMessage(`Check out a branch before ${action}.`);
+      return null;
+    }
+    return current;
+  }
+
+  private async handlePull(): Promise<void> {
+    const current = this.requireCurrentBranch('pulling');
+    if (!current) {
+      return;
+    }
+    if (current.upstream === null) {
+      void vscode.window.showWarningMessage(`"${current.name}" has no upstream branch to pull from.`);
+      return;
+    }
+    await this.runGitOperation('Pulling', (root) => this.gitService.pullCurrentBranch(root));
+  }
+
+  private async handleMerge(refName: string | undefined): Promise<void> {
+    const target = this.resolveRef(refName, ['local', 'remote', 'tag']);
+    const current = target ? this.requireCurrentBranch('merging') : null;
+    if (!target || !current) {
+      return;
+    }
+    if (target.kind === 'local' && target.name === current.name) {
+      void vscode.window.showWarningMessage('A branch cannot be merged into itself.');
+      return;
+    }
+    await this.runGitOperation(
+      `Merging ${target.name} into ${current.name}`,
+      (root) => this.gitService.mergeBranch(root, target.name),
+      conflictHint('merge'),
+    );
+  }
+
+  private async handleRebase(refName: string | undefined): Promise<void> {
+    const target = this.resolveRef(refName, ['local', 'remote', 'tag']);
+    const current = target ? this.requireCurrentBranch('rebasing') : null;
+    if (!target || !current) {
+      return;
+    }
+    if (target.kind === 'local' && target.name === current.name) {
+      void vscode.window.showWarningMessage('A branch cannot be rebased onto itself.');
+      return;
+    }
+    const rebase = 'Rebase';
+    const choice = await vscode.window.showWarningMessage(
+      `Rebase "${current.name}" onto "${target.name}"? This rewrites the commits of "${current.name}".`,
+      { modal: true },
+      rebase,
+    );
+    if (choice !== rebase) {
+      return;
+    }
+    await this.runGitOperation(
+      `Rebasing ${current.name} onto ${target.name}`,
+      (root) => this.gitService.rebaseOnto(root, target.name),
+      conflictHint('rebase'),
+    );
+  }
+
+  private async handleCommitOperation(action: 'cherryPick' | 'revert', hash: string | undefined): Promise<void> {
+    const snapshot = this.lastSnapshot;
+    if (!snapshot || hash === undefined || !isValidCommitHash(hash)) {
+      return;
+    }
+    const lower = hash.toLowerCase();
+    const commit = snapshot.commits.find((c) => c.hash === lower);
+    if (!commit) {
+      void vscode.window.showWarningMessage('That commit is not part of the loaded history.');
+      return;
+    }
+    if (commit.parents.length > 1) {
+      void vscode.window.showWarningMessage('Merge commits cannot be cherry-picked or reverted from this view.');
+      return;
+    }
+    if (action === 'cherryPick') {
+      await this.runGitOperation(
+        `Cherry-picking ${commit.shortHash}`,
+        (root) => this.gitService.cherryPickCommit(root, lower),
+        conflictHint('cherry-pick'),
+      );
+    } else {
+      await this.runGitOperation(
+        `Reverting ${commit.shortHash}`,
+        (root) => this.gitService.revertCommit(root, lower),
+        conflictHint('revert'),
+      );
+    }
+  }
+
+  private async handleDeleteBranch(branchName: string | undefined): Promise<void> {
+    const target = this.resolveRef(branchName, ['local']);
+    if (!target) {
+      return;
+    }
+    const snapshot = this.lastSnapshot;
+    if (snapshot?.isDetachedHead || target.branch?.isCurrent) {
+      void vscode.window.showWarningMessage(
+        target.branch?.isCurrent ? 'The checked-out branch cannot be deleted.' : 'Check out a branch before deleting branches.',
+      );
+      return;
+    }
+    const deleteLabel = 'Delete';
+    const choice = await vscode.window.showWarningMessage(`Delete local branch "${target.name}"?`, { modal: true }, deleteLabel);
+    if (choice !== deleteLabel) {
+      return;
+    }
+    let needsForce = false as boolean;
+    await this.runGitOperation(`Deleting branch ${target.name}`, async (root) => {
+      try {
+        await this.gitService.deleteLocalBranch(root, target.name);
+      } catch (err) {
+        if (!isNotFullyMergedError(err)) {
+          throw err;
+        }
+        needsForce = true;
+      }
+    });
+    if (!needsForce) {
+      return;
+    }
+    const force = 'Force Delete';
+    const forceChoice = await vscode.window.showWarningMessage(
+      `"${target.name}" is not fully merged. Force-delete it and lose its unmerged commits?`,
+      { modal: true },
+      force,
+    );
+    if (forceChoice === force) {
+      await this.runGitOperation(`Force-deleting branch ${target.name}`, (root) =>
+        this.gitService.deleteLocalBranch(root, target.name, true),
+      );
+    }
+  }
+
+  private async handleCheckoutRemoteBranch(remoteBranchName: string | undefined): Promise<void> {
+    const snapshot = this.lastSnapshot;
+    const target = this.resolveRef(remoteBranchName, ['remote']);
+    if (!snapshot || !target || !target.branch) {
+      return;
+    }
+    const existing = new Set(snapshot.localBranches.map((b) => b.name));
+    const input = await vscode.window.showInputBox({
+      title: 'Check Out as Local Tracking Branch',
+      prompt: `Local branch that will track ${target.name}`,
+      value: target.branch.displayName,
+      validateInput: (value) => {
+        if (value.trim().length === 0) {
+          return 'Enter a branch name.';
+        }
+        try {
+          const ref = validateGitRef(value);
+          return existing.has(ref) ? `A branch named "${ref}" already exists.` : null;
+        } catch (err) {
+          return describeError(err);
+        }
+      },
+    });
+    if (input === undefined) {
+      return;
+    }
+    const localName = validateGitRef(input);
+    await this.runGitOperation(`Checking out ${target.name} as ${localName}`, (root) =>
+      this.gitService.checkoutRemoteBranch(root, target.name, localName),
+    );
   }
 
   private async handlePush(): Promise<void> {
@@ -270,15 +641,36 @@ export class GitRepoPanel {
     await this.runGitOperation(title, (root) => this.gitService.pushCurrentBranch(root, current.name, hasUpstream));
   }
 
-  private async handleCreateBranch(): Promise<void> {
+  /** Creates and checks out a branch from HEAD, or from `startPoint` (a full commit hash or a known ref name). */
+  private async handleCreateBranch(startPoint?: string): Promise<void> {
     const snapshot = this.lastSnapshot;
     if (!snapshot) {
       return;
     }
+    let startRef: string | undefined;
+    let startLabel = snapshot.currentBranch;
+    if (startPoint !== undefined) {
+      if (isValidCommitHash(startPoint)) {
+        const hash = startPoint.toLowerCase();
+        if (!snapshot.commits.some((c) => c.hash === hash)) {
+          void vscode.window.showWarningMessage('That commit is not part of the loaded history.');
+          return;
+        }
+        startRef = hash;
+        startLabel = hash.slice(0, 8);
+      } else {
+        const target = this.resolveRef(startPoint, ['local', 'remote', 'tag']);
+        if (!target) {
+          return;
+        }
+        startRef = target.name;
+        startLabel = target.name;
+      }
+    }
     const existing = new Set(snapshot.localBranches.map((b) => b.name));
     const input = await vscode.window.showInputBox({
       title: 'Create New Branch',
-      prompt: `New branch from ${snapshot.currentBranch}`,
+      prompt: `New branch from ${startLabel}`,
       placeHolder: 'feature/my-branch',
       validateInput: (value) => {
         if (value.trim().length === 0) {
@@ -296,7 +688,7 @@ export class GitRepoPanel {
       return;
     }
     const name = validateGitRef(input);
-    await this.runGitOperation(`Creating branch ${name}`, (root) => this.gitService.createBranch(root, name));
+    await this.runGitOperation(`Creating branch ${name}`, (root) => this.gitService.createBranch(root, name, startRef));
   }
 
   private async sendCommitDetails(hash: string): Promise<void> {
@@ -363,7 +755,7 @@ export class GitRepoPanel {
 
   private async loadRepository(): Promise<void> {
     const sequence = ++this.loadSequence;
-    const initState = getInitState();
+    const initState = getInitState(GitRepoPanel.tabPinned);
     this.post({ type: 'initState', payload: initState });
 
     if (initState.workspacePath === null) {
@@ -462,6 +854,7 @@ export class GitRepoPanel {
     this.disposeGitWatcher();
     if (GitRepoPanel.currentPanel === this) {
       GitRepoPanel.currentPanel = undefined;
+      GitRepoPanel.cancelAutoClose();
     }
     this.panel.dispose();
     while (this.disposables.length) {
@@ -493,13 +886,11 @@ export class GitRepoPanel {
 }
 
 /**
- * Opens the editor-area panel and collapses the now-redundant launcher sidebar, leaving the
- * Visual Studio-style full-width two-pane layout (branch tree | graph & history).
+ * Opens the editor-area panel from the Activity Bar launcher. The sidebar is deliberately left open: the
+ * Activity Bar only shows this extension's icon as active while its container is the visible one.
  */
-function openPanelAndCollapseSidebar(): void {
-  void Promise.resolve(vscode.commands.executeCommand(OPEN_REPOSITORY_COMMAND)).then(() =>
-    vscode.commands.executeCommand('workbench.action.closeSidebar'),
-  );
+function openPanelFromLauncher(): void {
+  void Promise.resolve(vscode.commands.executeCommand(OPEN_REPOSITORY_COMMAND));
 }
 
 /** Activity Bar sidebar view that launches the editor-area panel. */
@@ -518,19 +909,24 @@ export class SidebarLauncherProvider implements vscode.WebviewViewProvider {
     const subscriptions: vscode.Disposable[] = [
       webviewView.webview.onDidReceiveMessage((message: unknown) => {
         if (isWebviewToExtensionMessage(message) && message.type === 'openRepositoryPanel') {
-          openPanelAndCollapseSidebar();
+          openPanelFromLauncher();
         }
       }),
       webviewView.onDidChangeVisibility(() => {
+        GitRepoPanel.setLauncherVisible(webviewView.visible);
         if (webviewView.visible) {
-          openPanelAndCollapseSidebar();
+          openPanelFromLauncher();
         }
       }),
     ];
-    webviewView.onDidDispose(() => subscriptions.forEach((d) => d.dispose()));
+    webviewView.onDidDispose(() => {
+      subscriptions.forEach((d) => d.dispose());
+      GitRepoPanel.setLauncherVisible(false);
+    });
 
     // Clicking the Activity Bar icon resolves/reveals this view; open the main panel automatically.
-    openPanelAndCollapseSidebar();
+    GitRepoPanel.setLauncherVisible(webviewView.visible);
+    openPanelFromLauncher();
   }
 
   private getHtml(webview: vscode.Webview): string {
@@ -549,7 +945,7 @@ export class SidebarLauncherProvider implements vscode.WebviewViewProvider {
   <title>Repository Explorer</title>
 </head>
 <body class="launcher">
-  <p class="launcher-hint">Browse branches, remotes, and commit history in a dedicated editor tab.</p>
+  <p class="launcher-hint">Browse branches, remotes, and commit history in a dedicated editor tab. Pin the tab to keep it open while you use other sidebar views.</p>
   <button id="open-repo" class="primary-button" type="button">${label}</button>
   <script nonce="${nonce}">
     (function () {

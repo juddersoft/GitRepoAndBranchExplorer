@@ -5,10 +5,22 @@ import {
   cacheCommitDetails,
   computeVisibleCommits,
   createInitialState,
+  describeCommitCount,
+  describeEmptyHistory,
+  describeHistoryFocus,
+  describeRefFilterStatus,
   filterBranches,
+  filterTags,
   filterVisibleBadges,
+  findRefTarget,
+  getFocusedRefs,
+  getHeadHash,
+  isAncestorOfHead,
+  listRefTargets,
   reconcileStateWithSnapshot,
   remoteNodeKey,
+  selectRefPatch,
+  summarizeRefToggles,
 } from '../src/webview/ui/state';
 
 const sha = (char: string): string => char.repeat(40);
@@ -223,5 +235,188 @@ describe('reconcileStateWithSnapshot', () => {
   it('keeps a selection that still exists', () => {
     const next = reconcileStateWithSnapshot(stateWith({ selectedCommitHash: B }), snapshot, new Set());
     expect(next.selectedCommitHash).toBe(B);
+  });
+
+  it('keeps a selected ref and refreshes its short name, or clears it once the ref is gone', () => {
+    const kept = reconcileStateWithSnapshot(
+      stateWith({ selectedBranchFullName: feature.fullName, selectedBranchRef: 'stale-name' }),
+      snapshot,
+      new Set(),
+    );
+    expect(kept.selectedBranchFullName).toBe(feature.fullName);
+    expect(kept.selectedBranchRef).toBe('feature');
+
+    const cleared = reconcileStateWithSnapshot(
+      stateWith({ selectedBranchFullName: 'refs/heads/deleted', selectedBranchRef: 'deleted' }),
+      snapshot,
+      new Set(),
+    );
+    expect(cleared.selectedBranchFullName).toBeNull();
+    expect(cleared.selectedBranchRef).toBeNull();
+  });
+
+  it('preserves the tab pin across snapshots', () => {
+    expect(reconcileStateWithSnapshot(stateWith({ tabPinned: true }), snapshot, new Set()).tabPinned).toBe(true);
+  });
+});
+
+describe('ref selection (checked-out vs. inspected)', () => {
+  const v1 = { name: 'v1.0.0', fullName: 'refs/tags/v1.0.0', targetHash: A };
+  const checkedOutMain: BranchInfo = { ...main, isCurrent: true };
+  const withHead: RepoSnapshot = {
+    ...snapshot,
+    localBranches: [checkedOutMain, feature, orphan],
+    tags: [v1],
+  };
+  const stateOn = (patch: Partial<ExplorerUiState>): ExplorerUiState => ({ ...createInitialState(), snapshot: withHead, ...patch });
+
+  it('starts with no selection and the tab unpinned', () => {
+    const initial = createInitialState();
+    expect(initial.selectedBranchFullName).toBeNull();
+    expect(initial.selectedBranchRef).toBeNull();
+    expect(initial.tabPinned).toBe(false);
+  });
+
+  it('lists local, remote and tag refs with their kinds and tips', () => {
+    expect(listRefTargets(withHead).map((t) => [t.kind, t.name, t.tipHash])).toEqual([
+      ['local', 'main', M],
+      ['local', 'feature', F2],
+      ['local', 'orphan', X],
+      ['remote', 'origin/main', B],
+      ['tag', 'v1.0.0', A],
+    ]);
+    expect(findRefTarget(withHead, 'refs/tags/v1.0.0')?.branch).toBeNull();
+    expect(findRefTarget(withHead, 'refs/heads/main')?.branch?.isCurrent).toBe(true);
+    expect(findRefTarget(withHead, 'refs/heads/nope')).toBeNull();
+    expect(findRefTarget(withHead, null)).toBeNull();
+  });
+
+  it('builds a selection patch whose two fields change together', () => {
+    const target = findRefTarget(withHead, feature.fullName);
+    expect(selectRefPatch(target)).toEqual({ selectedBranchFullName: feature.fullName, selectedBranchRef: 'feature' });
+    expect(selectRefPatch(null)).toEqual({ selectedBranchFullName: null, selectedBranchRef: null });
+  });
+
+  it('focuses history on commits reachable from a selected local, remote or tag ref', () => {
+    expect(hashes(computeVisibleCommits(withHead, stateOn({ selectedBranchFullName: feature.fullName })))).toEqual([F2, F1, A]);
+    expect(hashes(computeVisibleCommits(withHead, stateOn({ selectedBranchFullName: originMain.fullName })))).toEqual([B, A]);
+    expect(hashes(computeVisibleCommits(withHead, stateOn({ selectedBranchFullName: v1.fullName })))).toEqual([A]);
+  });
+
+  it('inspecting a branch does not require it to be the checked-out one', () => {
+    const state = stateOn({ selectedBranchFullName: orphan.fullName });
+    expect(hashes(computeVisibleCommits(withHead, state))).toEqual([X]);
+    expect(withHead.currentBranch).toBe('main');
+  });
+
+  it('unions the selection with isolated (pinned) branches in commit order', () => {
+    const state = stateOn({ selectedBranchFullName: feature.fullName, pinnedBranchFullNames: new Set([orphan.fullName]) });
+    expect(hashes(computeVisibleCommits(withHead, state))).toEqual([F2, F1, A, X]);
+    expect(getFocusedRefs(withHead, state).map((t) => t.name)).toEqual(['feature', 'orphan']);
+  });
+
+  it('shows nothing for a selection that no longer exists in the snapshot', () => {
+    expect(computeVisibleCommits(withHead, stateOn({ selectedBranchFullName: 'refs/heads/gone' }))).toEqual([]);
+  });
+
+  it('still applies the history text filter on top of the selection', () => {
+    const state = stateOn({ selectedBranchFullName: feature.fullName, historyFilterText: 'part one' });
+    expect(hashes(computeVisibleCommits(withHead, state))).toEqual([F1]);
+  });
+
+  it('describes the focus with the selected ref first and without duplicates', () => {
+    const state = stateOn({
+      selectedBranchFullName: orphan.fullName,
+      selectedBranchRef: 'orphan',
+      pinnedBranchFullNames: new Set([feature.fullName, orphan.fullName]),
+    });
+    expect(describeHistoryFocus(withHead, state)).toEqual(['orphan', 'feature']);
+    expect(describeHistoryFocus(withHead, stateOn({}))).toEqual([]);
+  });
+
+  it('resolves HEAD from the checked-out branch, or the HEAD badge when detached', () => {
+    expect(getHeadHash(withHead)).toBe(M);
+    const detached: RepoSnapshot = { ...withHead, isDetachedHead: true, localBranches: [main, feature, orphan] };
+    expect(getHeadHash(detached)).toBe(M);
+    expect(getHeadHash({ ...detached, commits: [] })).toBeNull();
+  });
+
+  it('detects commits that are already ancestors of HEAD', () => {
+    expect(isAncestorOfHead(withHead, F1)).toBe(true);
+    expect(isAncestorOfHead(withHead, M)).toBe(true);
+    expect(isAncestorOfHead(withHead, X)).toBe(false);
+    const behind: RepoSnapshot = { ...withHead, localBranches: [{ ...main, isCurrent: true, tipHash: B }, feature, orphan] };
+    expect(isAncestorOfHead(behind, F2)).toBe(false);
+  });
+
+  it('filters tags for the branch-tree filter box', () => {
+    const tags = [v1, { name: 'release-2', fullName: 'refs/tags/release-2', targetHash: B }];
+    expect(filterTags(tags, '').map((t) => t.name)).toEqual(['v1.0.0', 'release-2']);
+    expect(filterTags(tags, 'RELEASE').map((t) => t.name)).toEqual(['release-2']);
+    expect(filterTags(tags, 'zzz')).toEqual([]);
+  });
+});
+
+describe('ref toggle feedback', () => {
+  const withTag: RepoSnapshot = { ...snapshot, tags: [{ name: 'v1.0.0', fullName: 'refs/tags/v1.0.0', targetHash: A }] };
+  const stateOn = (patch: Partial<ExplorerUiState>, snap: RepoSnapshot | null = withTag): ExplorerUiState => ({
+    ...createInitialState(),
+    snapshot: snap,
+    ...patch,
+  });
+
+  it('counts refs per toggle', () => {
+    expect(summarizeRefToggles(withTag, stateOn({})).map((s) => [s.kind, s.count, s.enabled])).toEqual([
+      ['local', 3, true],
+      ['remote', 1, true],
+      ['tag', 1, true],
+    ]);
+    expect(summarizeRefToggles(null, createInitialState()).map((s) => s.count)).toEqual([0, 0, 0]);
+  });
+
+  it('reports nothing when every kind is shown and populated', () => {
+    expect(describeRefFilterStatus(withTag, stateOn({}))).toBeNull();
+    expect(describeRefFilterStatus(null, createInitialState())).toBeNull();
+  });
+
+  it('explains which populated kinds are hidden', () => {
+    expect(describeRefFilterStatus(withTag, stateOn({ showTagBadges: false }))).toBe('Hiding tags (1)');
+    expect(describeRefFilterStatus(withTag, stateOn({ showLocalBranchBadges: false, showRemoteBranchBadges: false }))).toBe(
+      'Hiding local branches (3), remote branches (1)',
+    );
+  });
+
+  it('explains when an enabled kind has nothing to show', () => {
+    expect(describeRefFilterStatus(snapshot, stateOn({}, snapshot))).toBe('No tags in this repository');
+    expect(describeRefFilterStatus(snapshot, stateOn({ showTagBadges: false }, snapshot))).toBeNull();
+  });
+
+  it('combines hidden and empty kinds, and flags the all-hidden case', () => {
+    expect(describeRefFilterStatus(snapshot, stateOn({ showLocalBranchBadges: false }, snapshot))).toBe(
+      'Hiding local branches (3) \u00b7 No tags in this repository',
+    );
+    expect(
+      describeRefFilterStatus(withTag, stateOn({ showLocalBranchBadges: false, showRemoteBranchBadges: false, showTagBadges: false })),
+    ).toBe('All ref labels are hidden');
+  });
+
+  it('reports how many commits are shown only while history is narrowed', () => {
+    expect(describeCommitCount(snapshot, snapshot.commits.length)).toBeNull();
+    expect(describeCommitCount(snapshot, 0)).toBe('Showing 0 of 6 commits');
+    expect(describeCommitCount(snapshot, 3)).toBe('Showing 3 of 6 commits');
+    expect(describeCommitCount(null, 0)).toBeNull();
+  });
+
+  it('explains an empty history table', () => {
+    expect(describeEmptyHistory({ ...snapshot, commits: [] }, stateOn({}, snapshot))).toBe('No commits yet.');
+    expect(describeEmptyHistory(snapshot, stateOn({ historyFilterText: 'zzz' }, snapshot))).toBe('No commits match the current filters.');
+
+    const outsideWindow: RepoSnapshot = {
+      ...snapshot,
+      tags: [{ name: 'ancient', fullName: 'refs/tags/ancient', targetHash: sha('9') }],
+    };
+    expect(describeEmptyHistory(outsideWindow, stateOn({ selectedBranchFullName: 'refs/tags/ancient' }, outsideWindow))).toBe(
+      'ancient points to a commit outside the loaded history window.',
+    );
   });
 });
