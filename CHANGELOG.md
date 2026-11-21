@@ -3,6 +3,21 @@
 All notable changes to **Git Repo & Branch Explorer** are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] - 2026-11-21
+
+### Added
+- **Repository context menu:** right-click the repository row (or press <kbd>Shift</kbd>+<kbd>F10</kbd> / the Menu key / <kbd>Enter</kbd> on it) for Fetch, Pull, Push/Publish, New Branch… and Refresh, with inapplicable items disabled and explained.
+- **Fetch** from that menu fetches only the remotes tracked by local branches (`git fetch --prune -- <remote>`), skips branches with no upstream without failing, keeps going if one remote fails, and reports a summary.
+- Explicit **↑n ↓n** commit counts on every local branch (`↑0 ↓0` when up to date; `↑– ↓–` with an explanatory tooltip and screen-reader label when there is no upstream).
+
+### Changed
+- The Activity Bar view is named **Git Repo & Branch Explorer** so it no longer truncates to "Rep…" in narrow sidebars.
+- A **Repos:** heading now sits above the repository row, and the repository name is no longer repeated as a tree node; local branches are listed directly under **Branches**.
+- Pull is refused (menu item disabled, and a warning if requested) when the checked-out branch's upstream no longer exists.
+
+### Fixed
+- A branch whose upstream was deleted (`[gone]`) is no longer reported as up to date with zero ahead/behind.
+
 ## [1.2.0] - 2026-11-21
 
 ### Changed

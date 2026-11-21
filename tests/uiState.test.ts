@@ -25,9 +25,53 @@ import {
   selectionPatch,
   selectRefPatch,
   summarizeRefToggles,
+  trackingSummary,
 } from '../src/webview/ui/state';
 
 const sha = (char: string): string => char.repeat(40);
+
+describe('trackingSummary', () => {
+  const local = (patch: Partial<BranchInfo> = {}): BranchInfo => ({ ...branch('main', sha('a')), upstream: 'origin/main', ...patch });
+
+  it('shows explicit zero counts when a tracked branch is up to date', () => {
+    expect(trackingSummary(local())).toMatchObject({
+      kind: 'synced',
+      up: '\u21910',
+      down: '\u21930',
+      title: 'Up to date with origin/main: nothing to push or pull.',
+      label: 'up to date with origin/main',
+    });
+  });
+
+  it('shows the commits to push (up) and to pull (down)', () => {
+    expect(trackingSummary(local({ ahead: 2, behind: 5 }))).toMatchObject({
+      kind: 'diverged',
+      up: '\u21912',
+      down: '\u21935',
+      title: '2 commits to push, 5 commits to pull (origin/main).',
+      label: '2 commits to push, 5 commits to pull',
+    });
+    expect(trackingSummary(local({ ahead: 1 }))).toMatchObject({ up: '\u21911', down: '\u21930', label: '1 commit to push, 0 commits to pull' });
+    expect(trackingSummary(local({ behind: 1 }))).toMatchObject({ up: '\u21910', down: '\u21931' });
+  });
+
+  it('distinguishes a branch with no upstream from an up-to-date one', () => {
+    const none = trackingSummary(local({ upstream: null }));
+    expect(none).toMatchObject({ kind: 'noUpstream', up: '\u2191\u2013', down: '\u2193\u2013' });
+    expect(none?.title).toMatch(/no upstream/i);
+    expect(trackingSummary(local({ upstream: '' }))?.kind).toBe('noUpstream');
+  });
+
+  it('reports a deleted upstream instead of claiming the branch is up to date', () => {
+    const gone = trackingSummary(local({ upstreamGone: true }));
+    expect(gone).toMatchObject({ kind: 'gone', up: '\u2191\u2013', down: '\u2193\u2013' });
+    expect(gone?.title).toBe('Upstream origin/main no longer exists on the remote.');
+  });
+
+  it('has no indicator for remote branches', () => {
+    expect(trackingSummary(branch('origin/main', sha('a'), 'origin'))).toBeNull();
+  });
+});
 
 describe('cacheCommitDetails', () => {
   const details = (char: string) => ({ hash: sha(char), body: char, files: [] });
@@ -61,6 +105,7 @@ function branch(name: string, tipHash: string, remoteName: string | null = null)
     upstream: null,
     ahead: 0,
     behind: 0,
+    upstreamGone: false,
   };
 }
 

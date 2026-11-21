@@ -1,15 +1,15 @@
 import type { BranchInfo, RemoteGroup, RepoSnapshot, TagInfo } from '../../types/git';
 import { button, createSearchBox, el, icon, type IconName, rebuildPreservingFocus } from './dom';
-import type { ExplorerUiState, RefTarget } from './state';
+import type { ExplorerUiState, RefTarget, TrackingSummary } from './state';
 import {
   branchRefTarget,
   filterBranches,
   filterTags,
   NODE_BRANCHES,
-  NODE_REPO_ROOT,
   NODE_TAGS,
   remoteNodeKey,
   tagRefTarget,
+  trackingSummary,
 } from './state';
 
 export interface BranchTreeCallbacks {
@@ -20,6 +20,8 @@ export interface BranchTreeCallbacks {
   /** Single-click / Enter: inspect this ref and focus the history on it. */
   onSelectRef(target: RefTarget): void;
   onContextMenu(target: RefTarget, x: number, y: number): void;
+  /** Right-click / Shift+F10 / Menu key on the repository row. */
+  onRepoContextMenu(x: number, y: number): void;
   /** Reopens the editor timeline tab (for when it was closed while the tree is still showing). */
   onOpenTimeline(): void;
 }
@@ -28,25 +30,21 @@ function repoTitle(snapshot: RepoSnapshot): string {
   return `${snapshot.repoName} (${snapshot.currentBranch})`;
 }
 
-function trackingText(branch: BranchInfo): { text: string; title: string; className: string } | null {
-  if (branch.ahead > 0 || branch.behind > 0) {
-    return {
-      text: `\u2191${branch.ahead} / \u2193${branch.behind}`,
-      title: `${branch.ahead} outgoing, ${branch.behind} incoming (${branch.upstream ?? 'upstream'})`,
-      className: 'tracking',
-    };
-  }
-  if (branch.upstream) {
-    return { text: '\u2022', title: `Up to date with ${branch.upstream}`, className: 'tracking tracking-synced' };
-  }
-  return null;
+/** Explicit `↑n ↓n` indicator (`0` when nothing to push/pull; `–` when there is no usable upstream). */
+function trackingElement(summary: TrackingSummary): HTMLElement {
+  return el(
+    'span',
+    { className: `tracking tracking-${summary.kind}`, title: summary.title, attrs: { role: 'img', 'aria-label': summary.label } },
+    [el('span', { className: 'tracking-up', text: summary.up }), el('span', { className: 'tracking-down', text: summary.down })],
+  );
 }
 
-/** Activity Bar view: repository header, branch filter and the Branches / remotes / tags tree. */
+/** Activity Bar view: `Repos:` heading, repository row, branch filter and the Branches / remotes / tags tree. */
 export class BranchTree {
   public readonly element: HTMLElement;
 
   private readonly titleEl: HTMLElement;
+  private readonly repoRow: HTMLElement;
   private readonly busyEl: HTMLElement;
   private readonly search: ReturnType<typeof createSearchBox>;
   private readonly treeEl: HTMLUListElement;
@@ -62,6 +60,23 @@ export class BranchTree {
     });
     openTimeline.addEventListener('click', () => callbacks.onOpenTimeline());
 
+    this.repoRow = el('div', { className: 'repo-row', attrs: { role: 'button', tabindex: '0', 'aria-haspopup': 'menu' } }, [
+      icon('repo'),
+      this.titleEl,
+    ]);
+    this.repoRow.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      callbacks.onRepoContextMenu(event.clientX, event.clientY);
+    });
+    this.repoRow.addEventListener('keydown', (event) => {
+      const opensMenu = event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey) || event.key === 'Enter' || event.key === ' ';
+      if (opensMenu) {
+        event.preventDefault();
+        const rect = this.repoRow.getBoundingClientRect();
+        callbacks.onRepoContextMenu(rect.left + 24, rect.bottom);
+      }
+    });
+
     this.search = createSearchBox('Filter', (value) => callbacks.onFilterChange(value));
     this.busyEl = el('div', { className: 'sidebar-status busy-indicator', attrs: { role: 'status', 'aria-live': 'polite' } });
     this.busyEl.hidden = true;
@@ -69,7 +84,8 @@ export class BranchTree {
     this.treeEl.addEventListener('keydown', (event) => this.handleTreeKeydown(event));
 
     this.element = el('aside', { className: 'pane pane-left', attrs: { 'aria-label': 'Branch explorer' } }, [
-      el('div', { className: 'sidebar-header' }, [icon('repo'), this.titleEl, openTimeline]),
+      el('div', { className: 'sidebar-header' }, [el('span', { className: 'sidebar-heading', text: 'Repos:' }), openTimeline]),
+      this.repoRow,
       el('div', { className: 'sidebar-filter' }, [this.search.element]),
       this.busyEl,
       el('div', { className: 'tree-scroll' }, [this.treeEl]),
@@ -78,8 +94,11 @@ export class BranchTree {
 
   public update(state: ExplorerUiState): void {
     const { snapshot } = state;
-    this.titleEl.textContent = snapshot ? repoTitle(snapshot) : state.errorMessage ? 'No repository' : 'Loading\u2026';
-    this.titleEl.title = snapshot?.repoRoot ?? '';
+    const title = snapshot ? repoTitle(snapshot) : state.errorMessage ? 'No repository' : 'Loading\u2026';
+    this.titleEl.textContent = title;
+    this.repoRow.title = snapshot ? `${snapshot.repoRoot}\nRight-click for repository actions` : '';
+    this.repoRow.setAttribute('aria-label', snapshot ? `Repository ${title}, press Enter for actions` : title);
+    this.repoRow.setAttribute('aria-disabled', String(!snapshot));
     this.search.sync(state.branchFilterText);
     this.busyEl.hidden = !state.isBusy;
     this.busyEl.textContent = state.isBusy ? state.busyMessage ?? 'Working\u2026' : '';
@@ -110,17 +129,8 @@ export class BranchTree {
     const locals = filterBranches(snapshot.localBranches, state.branchFilterText);
     const localItems =
       locals.length > 0
-        ? locals.map((b) => this.renderBranch(b, state, 2))
-        : [this.placeholder(filtering ? 'No matching branches' : `${snapshot.currentBranch} (no commits yet)`, 2)];
-
-    const repoNode = this.renderGroup({
-      key: NODE_REPO_ROOT,
-      label: repoTitle(snapshot),
-      iconName: 'repo',
-      depth: 1,
-      open: isOpen(NODE_REPO_ROOT),
-      children: localItems,
-    });
+        ? locals.map((b) => this.renderBranch(b, state, 1))
+        : [this.placeholder(filtering ? 'No matching branches' : `${snapshot.currentBranch} (no commits yet)`, 1)];
 
     const remoteNodes = snapshot.remoteGroups
       .map((group) => this.renderRemote(group, state, filtering, isOpen))
@@ -132,7 +142,7 @@ export class BranchTree {
       iconName: null,
       depth: 0,
       open: isOpen(NODE_BRANCHES),
-      children: [repoNode, ...remoteNodes],
+      children: [...localItems, ...remoteNodes],
     });
   }
 
@@ -233,7 +243,7 @@ export class BranchTree {
 
     const target = branchRefTarget(branch);
     const selected = state.selectedBranchFullName === branch.fullName;
-    const tracking = trackingText(branch);
+    const tracking = trackingSummary(branch);
     const tooltip = [
       branch.fullName,
       branch.isCurrent ? 'Checked out' : null,
@@ -246,6 +256,9 @@ export class BranchTree {
       .join('\n');
 
     const rowClasses = ['tree-row', `depth-${depth}`];
+    if (depth === 1) {
+      rowClasses.push('tree-leaf');
+    }
     if (branch.isCurrent) {
       rowClasses.push('current-branch');
     }
@@ -259,7 +272,7 @@ export class BranchTree {
       ...(branch.isCurrent
         ? [el('span', { className: 'checked-out-badge', text: 'Checked Out', title: 'This branch is checked out (HEAD)' })]
         : []),
-      ...(tracking ? [el('span', { className: tracking.className, text: tracking.text, title: tracking.title })] : []),
+      ...(tracking ? [trackingElement(tracking)] : []),
       eye,
     ]);
     this.wireRefRow(row, target);
@@ -286,6 +299,9 @@ export class BranchTree {
     }
     if (pinned) {
       labelParts.push('isolated in history');
+    }
+    if (tracking) {
+      labelParts.push(tracking.label);
     }
     return el(
       'li',

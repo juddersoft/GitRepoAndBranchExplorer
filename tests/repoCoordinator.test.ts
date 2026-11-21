@@ -8,6 +8,10 @@ const mocks = vi.hoisted(() => ({
   getCommitDetails: vi.fn(),
   getGitHubRemoteUrl: vi.fn(),
   showWarningMessage: vi.fn(),
+  showErrorMessage: vi.fn(),
+  showInformationMessage: vi.fn(),
+  fetchTrackedBranches: vi.fn(),
+  pullCurrentBranch: vi.fn(),
 }));
 
 vi.mock('vscode', () => {
@@ -26,8 +30,8 @@ vi.mock('vscode', () => {
     extensions: { onDidChange: () => disposable },
     window: {
       showWarningMessage: mocks.showWarningMessage,
-      showErrorMessage: vi.fn(),
-      showInformationMessage: vi.fn(),
+      showErrorMessage: mocks.showErrorMessage,
+      showInformationMessage: mocks.showInformationMessage,
       withProgress: (_options: unknown, task: () => Promise<void>) => task(),
     },
     ProgressLocation: { Notification: 15 },
@@ -41,6 +45,8 @@ vi.mock('../src/git/gitService', () => ({
     checkoutBranch = mocks.checkoutBranch;
     getGitHubRemoteUrl = mocks.getGitHubRemoteUrl;
     getCommitDetails = mocks.getCommitDetails;
+    fetchTrackedBranches = mocks.fetchTrackedBranches;
+    pullCurrentBranch = mocks.pullCurrentBranch;
   },
   isValidCommitHash: (value: string): boolean => /^[0-9a-f]{40}$/i.test(value),
 }));
@@ -65,6 +71,7 @@ function branch(name: string, isCurrent: boolean): BranchInfo {
     upstream: null,
     ahead: 0,
     behind: 0,
+    upstreamGone: false,
   };
 }
 
@@ -279,6 +286,67 @@ describe('RepoCoordinator', () => {
     await vi.waitFor(() => expect(reopened.ofType('repoSnapshot')).toHaveLength(1));
     expect(mocks.getRepoSnapshot).toHaveBeenCalledTimes(2);
     expect(reopened.ofType('syncState')).toEqual([]);
+  });
+
+  describe('repository menu operations', () => {
+    const tracking = (name: string, isCurrent: boolean, patch: Partial<BranchInfo> = {}): BranchInfo => ({
+      ...branch(name, isCurrent),
+      ...patch,
+    });
+    const trackedSnapshot = (branches: BranchInfo[]): RepoSnapshot => ({
+      ...makeSnapshot(branches),
+      remoteGroups: [{ remoteName: 'origin', branches: [] }],
+    });
+    const loadWith = async (snap: RepoSnapshot): Promise<void> => {
+      mocks.getRepoSnapshot.mockImplementation(async () => snap);
+      await openBoth();
+    };
+
+    it('fetches tracked branches, reloads, and reports which branches were skipped', async () => {
+      const snap = trackedSnapshot([tracking('main', true, { upstream: 'origin/main' }), tracking('feature', false)]);
+      mocks.fetchTrackedBranches.mockResolvedValue({
+        remotes: ['origin'],
+        trackedBranches: ['main'],
+        skippedBranches: ['feature'],
+        fetchedRemotes: ['origin'],
+      });
+      await loadWith(snap);
+      coordinator.handleMessage('sidebar', { type: 'gitAction', payload: { action: 'fetchTracked' } });
+
+      await vi.waitFor(() => expect(editor.ofType('repoSnapshot')).toHaveLength(2));
+      expect(mocks.fetchTrackedBranches).toHaveBeenCalledWith('/repo', snap.localBranches, snap.remoteGroups);
+      expect(mocks.showInformationMessage).toHaveBeenCalledWith(
+        'Fetched origin for 1 tracked branch. Skipped 1 branch without an upstream: feature.',
+      );
+      const statuses = sidebar.ofType('actionStatus').map((m) => (m.type === 'actionStatus' ? m.payload.message : null));
+      expect(statuses[0]).toBe('Fetching tracked branches\u2026');
+    });
+
+    it('does not run Git when no branch tracks a remote, and says so', async () => {
+      await loadWith(trackedSnapshot([tracking('main', true), tracking('feature', false)]));
+      coordinator.handleMessage('sidebar', { type: 'gitAction', payload: { action: 'fetchTracked' } });
+
+      await vi.waitFor(() => expect(mocks.showInformationMessage).toHaveBeenCalledWith(expect.stringMatching(/nothing to fetch/i)));
+      expect(mocks.fetchTrackedBranches).not.toHaveBeenCalled();
+      expect(sidebar.ofType('actionStatus')).toEqual([]);
+    });
+
+    it('reports a failed fetch as an error without a success summary', async () => {
+      await loadWith(trackedSnapshot([tracking('main', true, { upstream: 'origin/main' })]));
+      mocks.fetchTrackedBranches.mockRejectedValue(new Error('origin: network down'));
+      coordinator.handleMessage('sidebar', { type: 'gitAction', payload: { action: 'fetchTracked' } });
+
+      await vi.waitFor(() => expect(mocks.showErrorMessage).toHaveBeenCalledWith(expect.stringContaining('origin: network down')));
+      expect(mocks.showInformationMessage).not.toHaveBeenCalled();
+    });
+
+    it('refuses to pull when the upstream of the checked-out branch is gone', async () => {
+      await loadWith(trackedSnapshot([tracking('main', true, { upstream: 'origin/main', upstreamGone: true })]));
+      coordinator.handleMessage('sidebar', { type: 'gitAction', payload: { action: 'pull' } });
+
+      await vi.waitFor(() => expect(mocks.showWarningMessage).toHaveBeenCalledWith(expect.stringMatching(/no longer exists/i)));
+      expect(mocks.pullCurrentBranch).not.toHaveBeenCalled();
+    });
   });
 
   it('keeps serving the sidebar after the editor tab closes', async () => {

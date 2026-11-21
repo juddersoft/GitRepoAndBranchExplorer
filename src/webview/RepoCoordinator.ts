@@ -4,6 +4,8 @@ import { openCommitFileDiff } from '../git/gitDiffProvider';
 import { GitExecutionError, validateGitRef } from '../git/gitExecutor';
 import { findGitGraphExtensionId, openInGitGraph } from '../git/gitGraphInterop';
 import { GitService, isValidCommitHash } from '../git/gitService';
+import type { TrackedFetchResult } from '../git/trackedFetch';
+import { describeTrackedFetch, NOTHING_TO_FETCH_MESSAGE, planTrackedFetch } from '../git/trackedFetch';
 import { GitHubService } from '../github/githubService';
 import type { BranchInfo, ExternalIntegrationsInfo, RepoSnapshot } from '../types/git';
 import type {
@@ -314,6 +316,9 @@ export class RepoCoordinator implements vscode.Disposable {
       case 'fetch':
         await this.runGitOperation('Fetching all remotes', (root) => this.gitService.fetchAll(root));
         break;
+      case 'fetchTracked':
+        await this.handleFetchTracked();
+        break;
       case 'pull':
         await this.handlePull();
         break;
@@ -383,7 +388,31 @@ export class RepoCoordinator implements vscode.Disposable {
       void vscode.window.showWarningMessage(`"${current.name}" has no upstream branch to pull from.`);
       return;
     }
+    if (current.upstreamGone) {
+      void vscode.window.showWarningMessage(`The upstream "${current.upstream}" of "${current.name}" no longer exists on the remote.`);
+      return;
+    }
     await this.runGitOperation('Pulling', (root) => this.gitService.pullCurrentBranch(root));
+  }
+
+  /** Fetches only remotes tracked by local branches; untracked branches are skipped, and the outcome is reported. */
+  private async handleFetchTracked(): Promise<void> {
+    const snapshot = this.lastSnapshot;
+    if (!snapshot) {
+      void vscode.window.showWarningMessage('No Git repository is loaded.');
+      return;
+    }
+    if (planTrackedFetch(snapshot.localBranches, snapshot.remoteGroups).remotes.length === 0) {
+      void vscode.window.showInformationMessage(NOTHING_TO_FETCH_MESSAGE);
+      return;
+    }
+    let result = null as TrackedFetchResult | null;
+    await this.runGitOperation('Fetching tracked branches', async (root) => {
+      result = await this.gitService.fetchTrackedBranches(root, snapshot.localBranches, snapshot.remoteGroups);
+    });
+    if (result !== null) {
+      void vscode.window.showInformationMessage(describeTrackedFetch(result));
+    }
   }
 
   private async handleMerge(refName: string | undefined): Promise<void> {

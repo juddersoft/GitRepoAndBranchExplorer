@@ -3,6 +3,8 @@ import type { BranchInfo, ChangedFileEntry, CommitDetails, CommitNode, RefBadge,
 import { isChangedFileStatus, isSafeRepoRelativePath } from '../types/messages';
 import type { ExecGitOptions } from './gitExecutor';
 import { execGit, GitExecutionError, validateGitRef } from './gitExecutor';
+import type { TrackedFetchResult } from './trackedFetch';
+import { planTrackedFetch } from './trackedFetch';
 
 const FIELD_SEP = '\x1f';
 const RECORD_SEP = '\x1e';
@@ -172,12 +174,17 @@ function compareStrings(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
-export function parseUpstreamTrack(track: string): { ahead: number; behind: number } {
+/** Parses `%(upstream:track)`; `[gone]` (upstream deleted) has no counts, so it is reported separately. */
+export function parseUpstreamTrack(track: string): { ahead: number; behind: number; upstreamGone: boolean } {
+  if (/\bgone\b/.test(track)) {
+    return { ahead: 0, behind: 0, upstreamGone: true };
+  }
   const ahead = /\bahead (\d+)/.exec(track);
   const behind = /\bbehind (\d+)/.exec(track);
   return {
     ahead: ahead ? Number.parseInt(ahead[1], 10) : 0,
     behind: behind ? Number.parseInt(behind[1], 10) : 0,
+    upstreamGone: false,
   };
 }
 
@@ -230,6 +237,7 @@ export function parseForEachRefOutput(rawOutput: string): ParsedRefs {
         upstream: null,
         ahead: 0,
         behind: 0,
+        upstreamGone: false,
       });
       remotesByName.set(remoteName, branches);
     } else if (refname.startsWith(TAG_PREFIX)) {
@@ -367,6 +375,34 @@ export class GitService {
 
   public async fetchAll(repoRoot: string): Promise<void> {
     await this.runGit(['fetch', '--all', '--prune'], repoRoot, { timeoutMs: NETWORK_GIT_TIMEOUT_MS });
+  }
+
+  /**
+   * Fetches (with prune) only the remotes that at least one local branch tracks. Branches without an upstream
+   * are skipped rather than failing the operation. A failing remote does not stop the others; the failures
+   * are reported together once every eligible remote has been tried.
+   */
+  public async fetchTrackedBranches(
+    repoRoot: string,
+    localBranches: readonly BranchInfo[],
+    remoteGroups: readonly RemoteGroup[],
+  ): Promise<TrackedFetchResult> {
+    const plan = planTrackedFetch(localBranches, remoteGroups);
+    const fetchedRemotes: string[] = [];
+    const failures: string[] = [];
+    for (const remote of plan.remotes) {
+      try {
+        const safeRemote = validateGitRef(remote);
+        await this.runGit(['fetch', '--prune', '--', safeRemote], repoRoot, { timeoutMs: NETWORK_GIT_TIMEOUT_MS });
+        fetchedRemotes.push(safeRemote);
+      } catch (err) {
+        failures.push(`${remote}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    if (failures.length > 0) {
+      throw new Error(failures.join('; '));
+    }
+    return { ...plan, fetchedRemotes };
   }
 
   public async pullCurrentBranch(repoRoot: string): Promise<void> {

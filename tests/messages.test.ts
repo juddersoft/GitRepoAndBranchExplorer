@@ -19,11 +19,11 @@ describe('gitAction validation', () => {
     expect(Object.keys(GIT_ACTION_TARGETS).sort()).toEqual(Object.keys(GIT_ACTION_LABELS).sort());
   });
 
-  it.each(['fetch', 'pull', 'push', 'createBranch'] as GitAction[])('accepts %s without a target', (action) => {
+  it.each(['fetch', 'fetchTracked', 'pull', 'push', 'createBranch'] as GitAction[])('accepts %s without a target', (action) => {
     expect(isWebviewToExtensionMessage(gitAction({ action }))).toBe(true);
   });
 
-  it.each(['fetch', 'pull', 'push', 'createBranch'] as GitAction[])('rejects %s carrying a target', (action) => {
+  it.each(['fetch', 'fetchTracked', 'pull', 'push', 'createBranch'] as GitAction[])('rejects %s carrying a target', (action) => {
     expect(isWebviewToExtensionMessage(gitAction({ action, target: 'main' }))).toBe(false);
   });
 

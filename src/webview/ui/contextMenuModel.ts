@@ -1,4 +1,5 @@
 import type { CommitNode, RepoSnapshot } from '../../types/git';
+import { planTrackedFetch } from '../../git/trackedFetch';
 import type { ExplorerUiState, RefTarget } from './state';
 import { getHeadHash, isAncestorOfHead } from './state';
 
@@ -10,6 +11,9 @@ export type MenuActionId =
   | 'pull'
   | 'push'
   | 'fetch'
+  | 'fetchTracked'
+  | 'newBranch'
+  | 'refresh'
   | 'createBranchHere'
   | 'isolate'
   | 'deleteBranch'
@@ -113,6 +117,32 @@ export function buildRefMenu(snapshot: RepoSnapshot, state: ExplorerUiState, tar
       'Delete Branch\u2026',
       firstReason(busy, isCheckedOut && 'Cannot delete the checked-out branch.', detached && DETACHED_REASON),
     ),
+  ];
+}
+
+/** Right-click menu for the repository header row in the branch tree. */
+export function buildRepoMenu(snapshot: RepoSnapshot, state: ExplorerUiState): MenuEntry[] {
+  const busy = state.isBusy && BUSY_REASON;
+  const current = snapshot.localBranches.find((branch) => branch.isCurrent);
+  const noBranch = !snapshot.isDetachedHead && current === undefined && 'No branch is checked out yet.';
+  const nothingToFetch = planTrackedFetch(snapshot.localBranches, snapshot.remoteGroups).remotes.length === 0;
+
+  const pull = firstReason(
+    busy,
+    noBranch,
+    pullPushDisabledReason('pull', snapshot.isDetachedHead, current?.upstream ?? null),
+    current?.upstreamGone === true && `Upstream ${current.upstream ?? ''} no longer exists on the remote.`,
+  );
+  const push = firstReason(busy, noBranch, pullPushDisabledReason('push', snapshot.isDetachedHead, current?.upstream ?? null));
+
+  return [
+    item('fetchTracked', 'Fetch', firstReason(busy, nothingToFetch && 'No local branch tracks a remote branch.')),
+    item('pull', 'Pull', pull),
+    item('push', current?.upstream ? 'Push' : 'Publish Branch', push),
+    SEPARATOR,
+    item('newBranch', 'New Branch\u2026', firstReason(busy)),
+    SEPARATOR,
+    item('refresh', 'Refresh'),
   ];
 }
 

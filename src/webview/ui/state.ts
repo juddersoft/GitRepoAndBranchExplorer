@@ -2,7 +2,6 @@ import type { SyncStatePayload } from '../../types/messages';
 import type { BranchInfo, CommitDetails, CommitNode, ExternalIntegrationsInfo, RefBadge, RepoSnapshot, TagInfo } from '../../types/git';
 
 export const NODE_BRANCHES = 'branches';
-export const NODE_REPO_ROOT = 'repoRoot';
 export const NODE_TAGS = 'tags';
 export const MAX_CACHED_COMMIT_DETAILS = 200;
 
@@ -36,6 +35,62 @@ export function branchRefTarget(branch: BranchInfo): RefTarget {
 
 export function tagRefTarget(tag: TagInfo): RefTarget {
   return { kind: 'tag', name: tag.name, fullName: tag.fullName, tipHash: tag.targetHash, branch: null };
+}
+
+export type TrackingKind = 'synced' | 'diverged' | 'noUpstream' | 'gone';
+
+/** How a local branch relates to its upstream, with the text the tree shows for it. */
+export interface TrackingSummary {
+  kind: TrackingKind;
+  /** Outgoing indicator: `↑<n>` (commits to push), or `↑–` when unknown. */
+  up: string;
+  /** Incoming indicator: `↓<n>` (commits to pull), or `↓–` when unknown. */
+  down: string;
+  /** Tooltip. */
+  title: string;
+  /** Short screen-reader phrase. */
+  label: string;
+}
+
+function commitCount(count: number): string {
+  return `${count} commit${count === 1 ? '' : 's'}`;
+}
+
+/** Up/down indicators for a local branch; `null` for remote branches, which have no upstream of their own. */
+export function trackingSummary(branch: BranchInfo): TrackingSummary | null {
+  if (branch.isRemote) {
+    return null;
+  }
+  if (!branch.upstream) {
+    return {
+      kind: 'noUpstream',
+      up: '\u2191\u2013',
+      down: '\u2193\u2013',
+      title: 'No upstream branch is configured, so there is nothing to compare against.',
+      label: 'no upstream branch',
+    };
+  }
+  if (branch.upstreamGone) {
+    return {
+      kind: 'gone',
+      up: '\u2191\u2013',
+      down: '\u2193\u2013',
+      title: `Upstream ${branch.upstream} no longer exists on the remote.`,
+      label: `upstream ${branch.upstream} is gone`,
+    };
+  }
+  const synced = branch.ahead === 0 && branch.behind === 0;
+  return {
+    kind: synced ? 'synced' : 'diverged',
+    up: `\u2191${branch.ahead}`,
+    down: `\u2193${branch.behind}`,
+    title: synced
+      ? `Up to date with ${branch.upstream}: nothing to push or pull.`
+      : `${commitCount(branch.ahead)} to push, ${commitCount(branch.behind)} to pull (${branch.upstream}).`,
+    label: synced
+      ? `up to date with ${branch.upstream}`
+      : `${commitCount(branch.ahead)} to push, ${commitCount(branch.behind)} to pull`,
+  };
 }
 
 export function listRefTargets(snapshot: RepoSnapshot): RefTarget[] {
@@ -118,7 +173,7 @@ export function createInitialState(): ExplorerUiState {
     showRemoteBranchBadges: true,
     showTagBadges: true,
     selectedCommitHash: null,
-    expandedNodes: new Set([NODE_BRANCHES, NODE_REPO_ROOT]),
+    expandedNodes: new Set([NODE_BRANCHES]),
     commitDetails: new Map(),
     integrations: { gitGraphAvailable: false, gitGraphExtensionId: null, githubRemoteUrl: null },
     isBusy: false,

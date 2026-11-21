@@ -3,7 +3,7 @@ import { isExtensionToWebviewMessage } from '../../types/messages';
 import { BranchTree } from './BranchTree';
 import { ContextMenu } from './ContextMenu';
 import type { MenuActionId } from './contextMenuModel';
-import { buildRefMenu } from './contextMenuModel';
+import { buildRefMenu, buildRepoMenu } from './contextMenuModel';
 import { el } from './dom';
 import type { ExplorerUiState, RefTarget } from './state';
 import {
@@ -77,6 +77,30 @@ function runRefMenuAction(id: MenuActionId, target: RefTarget): void {
   }
 }
 
+function runRepoMenuAction(id: MenuActionId): void {
+  switch (id) {
+    case 'fetchTracked':
+    case 'pull':
+    case 'push':
+      postGitAction(id);
+      break;
+    case 'newBranch':
+      postGitAction('createBranch');
+      break;
+    case 'refresh':
+      vscode.postMessage({ type: 'requestRefresh' });
+      break;
+    default:
+      break;
+  }
+}
+
+function showRepoContextMenu(x: number, y: number): void {
+  if (state.snapshot) {
+    contextMenu.show(x, y, buildRepoMenu(state.snapshot, state), runRepoMenuAction);
+  }
+}
+
 function showRefContextMenu(target: RefTarget, x: number, y: number): void {
   selectRef(target);
   if (state.snapshot) {
@@ -91,6 +115,7 @@ const branchTree = new BranchTree({
   onCheckout: (branch) => vscode.postMessage({ type: 'checkoutBranch', payload: { branchName: branch.name } }),
   onSelectRef: selectRef,
   onContextMenu: showRefContextMenu,
+  onRepoContextMenu: showRepoContextMenu,
   onOpenTimeline: () => vscode.postMessage({ type: 'openRepositoryPanel' }),
 });
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { BranchInfo, CommitNode, RepoSnapshot } from '../src/types/git';
-import { buildCommitMenu, buildRefMenu, clampMenuPosition, pullPushDisabledReason } from '../src/webview/ui/contextMenuModel';
+import { buildCommitMenu, buildRefMenu, buildRepoMenu, clampMenuPosition, pullPushDisabledReason } from '../src/webview/ui/contextMenuModel';
 import type { MenuActionId, MenuEntry } from '../src/webview/ui/contextMenuModel';
 import type { ExplorerUiState } from '../src/webview/ui/state';
 import { branchRefTarget, createInitialState, tagRefTarget } from '../src/webview/ui/state';
@@ -24,6 +24,7 @@ function branch(name: string, tipHash: string, patch: Partial<BranchInfo> = {}):
     upstream: null,
     ahead: 0,
     behind: 0,
+    upstreamGone: false,
     ...patch,
   };
 }
@@ -221,6 +222,65 @@ describe('buildCommitMenu', () => {
     expect(item(menu, 'copyHash').enabled).toBe(true);
     expect(item(menu, 'createBranchHere').enabled).toBe(false);
     expect(item(menu, 'revert').enabled).toBe(false);
+  });
+});
+
+describe('buildRepoMenu', () => {
+  const withBranches = (localBranches: BranchInfo[], patch: Partial<RepoSnapshot> = {}): RepoSnapshot => ({
+    ...snapshot,
+    localBranches,
+    ...patch,
+  });
+  const menuFor = (snap: RepoSnapshot, patch: Partial<ExplorerUiState> = {}): MenuEntry[] =>
+    buildRepoMenu(snap, state({ snapshot: snap, ...patch }));
+
+  it('offers Fetch, Pull, Push, New Branch and Refresh', () => {
+    const menu = menuFor(snapshot);
+    expect(ids(menu)).toEqual(['fetchTracked', 'pull', 'push', 'newBranch', 'refresh']);
+    expect(enabled(menu)).toEqual(ids(menu));
+    expect(item(menu, 'push').label).toBe('Push');
+  });
+
+  it('disables Fetch when no local branch tracks a remote, but keeps pull/push rules independent', () => {
+    const menu = menuFor(withBranches([{ ...main, upstream: null }, feature, release]));
+    expect(item(menu, 'fetchTracked')).toMatchObject({ enabled: false, reason: expect.stringMatching(/tracks a remote/i) });
+    expect(item(menu, 'pull')).toMatchObject({ enabled: false, reason: expect.stringMatching(/upstream/i) });
+    expect(item(menu, 'push')).toMatchObject({ enabled: true, label: 'Publish Branch' });
+  });
+
+  it('keeps Fetch enabled when only a non-checked-out branch tracks a remote', () => {
+    const menu = menuFor(withBranches([{ ...main, upstream: null }, branch('feature', D, { upstream: 'origin/feature' })]));
+    expect(item(menu, 'fetchTracked').enabled).toBe(true);
+  });
+
+  it('does not count a branch whose upstream remote is unknown as fetchable', () => {
+    const menu = menuFor(withBranches([{ ...main, upstream: 'gone-remote/main' }]));
+    expect(item(menu, 'fetchTracked').enabled).toBe(false);
+  });
+
+  it('disables Pull and Push on a detached HEAD', () => {
+    const menu = menuFor(withBranches([{ ...main, isCurrent: false }, feature], { isDetachedHead: true }));
+    expect(item(menu, 'pull')).toMatchObject({ enabled: false, reason: expect.stringMatching(/detached/i) });
+    expect(item(menu, 'push')).toMatchObject({ enabled: false, reason: expect.stringMatching(/detached/i) });
+    expect(item(menu, 'fetchTracked').enabled).toBe(true);
+  });
+
+  it('disables Pull and Push before the first commit exists', () => {
+    const menu = menuFor(withBranches([]));
+    expect(item(menu, 'pull')).toMatchObject({ enabled: false, reason: expect.stringMatching(/no branch/i) });
+    expect(item(menu, 'push').enabled).toBe(false);
+  });
+
+  it('disables Pull when the upstream of the checked-out branch is gone', () => {
+    const menu = menuFor(withBranches([{ ...main, upstreamGone: true }, feature]));
+    expect(item(menu, 'pull')).toMatchObject({ enabled: false, reason: expect.stringMatching(/no longer exists/i) });
+    expect(item(menu, 'push').enabled).toBe(true);
+  });
+
+  it('disables Fetch, Pull, Push and New Branch while busy, but still allows Refresh', () => {
+    const menu = menuFor(snapshot, { isBusy: true });
+    expect(enabled(menu)).toEqual(['refresh']);
+    expect(item(menu, 'fetchTracked').reason).toMatch(/running/i);
   });
 });
 

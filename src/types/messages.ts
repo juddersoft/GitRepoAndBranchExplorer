@@ -2,6 +2,7 @@ import type { ChangedFileStatus, CommitDetails, ExternalIntegrationsInfo, RepoSn
 
 export type GitAction =
   | 'fetch'
+  | 'fetchTracked'
   | 'pull'
   | 'push'
   | 'createBranch'
@@ -14,6 +15,7 @@ export type GitAction =
 
 export const GIT_ACTION_LABELS: Readonly<Record<GitAction, string>> = {
   fetch: 'Fetch',
+  fetchTracked: 'Fetch Tracked Branches',
   pull: 'Pull',
   push: 'Push',
   createBranch: 'New Branch',
@@ -30,6 +32,7 @@ export type GitActionTargetKind = 'none' | 'ref' | 'commit';
 
 export const GIT_ACTION_TARGETS: Readonly<Record<GitAction, GitActionTargetKind>> = {
   fetch: 'none',
+  fetchTracked: 'none',
   pull: 'none',
   push: 'none',
   createBranch: 'none',

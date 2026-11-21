@@ -262,10 +262,39 @@ button {
   display: flex;
   align-items: center;
   gap: 6px;
-  height: 32px;
+  height: 28px;
   padding: 0 4px 0 8px;
+}
+
+.sidebar-heading {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.85em;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.75;
+}
+
+.repo-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 8px;
   border-bottom: 1px solid var(--vscode-panel-border);
   font-weight: 600;
+  cursor: default;
+  user-select: none;
+}
+
+.repo-row:hover {
+  background-color: var(--vscode-list-hoverBackground);
+}
+
+.repo-row:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
 }
 
 .sidebar-title {
@@ -406,13 +435,37 @@ button {
 
 .tracking {
   flex: 0 0 auto;
+  display: inline-flex;
+  gap: 6px;
   font-size: 0.9em;
   font-variant-numeric: tabular-nums;
-  opacity: 0.8;
+  opacity: 0.9;
 }
 
-.tracking-synced {
-  opacity: 0.4;
+.tracking-up {
+  color: var(--vscode-gitDecoration-addedResourceForeground, var(--vscode-charts-green));
+}
+
+.tracking-down {
+  color: var(--vscode-gitDecoration-modifiedResourceForeground, var(--vscode-charts-blue));
+}
+
+/* Nothing to push/pull (`↑0 ↓0`) or no comparison possible (`↑– ↓–`): dimmed so real divergence stands out. */
+.tracking-synced,
+.tracking-noUpstream,
+.tracking-gone {
+  opacity: 0.55;
+}
+
+.tracking-noUpstream .tracking-up,
+.tracking-noUpstream .tracking-down,
+.tracking-gone .tracking-up,
+.tracking-gone .tracking-down {
+  color: inherit;
+}
+
+.tracking-gone {
+  color: var(--vscode-editorWarning-foreground, inherit);
 }
 
 .eye-toggle {

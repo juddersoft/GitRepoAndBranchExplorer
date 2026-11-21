@@ -10,8 +10,12 @@ export interface BranchInfo {
   remoteName: string | null;
   tipHash: string;
   upstream: string | null;
+  /** Commits on this branch that are not on its upstream (to push); 0 when there is no usable upstream. */
   ahead: number;
+  /** Commits on the upstream that are not on this branch (to pull); 0 when there is no usable upstream. */
   behind: number;
+  /** The configured upstream no longer exists (Git reports `[gone]`), so `ahead`/`behind` are unknown. */
+  upstreamGone: boolean;
 }
 
 export interface RemoteGroup {

@@ -7,14 +7,16 @@ A Visual Studio-style **Git Repository** window for VS Code: the branch, remote 
 ## Features
 
 ### Branch, remote and tag tree in the Activity Bar
-- Local branches, `remotes/<name>` groups and tags in one filterable tree, shown directly in the Primary Side Bar.
+- Local branches, `remotes/<name>` groups and tags in one filterable tree, shown directly in the Primary Side Bar. A **Repos:** heading sits above the repository row (`<repo> (<branch>)`), and local branches are listed directly under **Branches**.
 - Selecting a ref, isolating branches (eye button) and the busy status of Git operations are mirrored between the sidebar tree and the editor timeline.
-- The **checked-out** branch is unmistakable: green accent bar, check icon, bold name, a **Checked Out** badge and ahead/behind counts against its upstream.
+- The **checked-out** branch is unmistakable: green accent bar, check icon, bold name and a **Checked Out** badge.
+- Every local branch shows explicit **↑ (commits to push) / ↓ (commits to pull)** counts, `↑0 ↓0` when up to date. A branch with no upstream shows `↑– ↓–`, and a branch whose upstream was deleted on the remote shows `↑– ↓–` with a warning tooltip instead of claiming it is up to date.
 - **Single-click** any branch, remote branch or tag to *inspect* it: it is highlighted with the list-selection colours and the history table, breadcrumb and "Showing N of M commits" indicator focus on the commits reachable from it. **Clear filter** returns to the full history.
 - **Double-click** (or press <kbd>Enter</kbd> on) a non-current local branch to check it out. The eye button still isolates several branches at once.
 - **Right-click** a branch, remote branch, tag or commit for a context menu (<kbd>Shift</kbd>+<kbd>F10</kbd> / the Menu key work too). Inapplicable actions are disabled and say why.
 
 ### Context menus and Git operations
+- Repository (right-click the repository row, or focus it and press <kbd>Shift</kbd>+<kbd>F10</kbd> / <kbd>Enter</kbd>): **Fetch**, Pull, Push/Publish, New Branch…, Refresh. Fetch only contacts remotes that at least one local branch tracks (with prune); local branches without an upstream are skipped without failing, and a summary reports what was fetched and skipped.
 - Local branch: Check Out, Merge into current, Rebase current onto this, Pull, Push/Publish, Fetch, Create Branch from Here, Show Only This Branch, Delete Branch (with a force-delete prompt when Git says it is not fully merged).
 - Remote branch: Check Out as Local Tracking Branch, Merge, Rebase, Create Branch from Here.
 - Tag: Create Branch from Here, Merge, Rebase.

@@ -2,7 +2,7 @@
   "name": "git-repo-and-branch-explorer",
   "displayName": "Git Repo & Branch Explorer",
   "description": "Visual Studio-style Git Repository explorer: branch/remote/tag tree in the Activity Bar, multi-lane SVG commit graph and history timeline in the editor, file diff inspection, and GitHub/Git Graph integration.",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "publisher": "PeterJudd",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -49,7 +49,7 @@
       "gitRepoAndBranchExplorer-container": [
         {
           "id": "gitRepoAndBranchExplorer.launcher",
-          "name": "Repository Explorer",
+          "name": "Git Repo & Branch Explorer",
           "type": "webview"
         }
       ]

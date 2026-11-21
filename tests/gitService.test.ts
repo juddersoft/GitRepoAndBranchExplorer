@@ -20,7 +20,7 @@ import {
   validateRevSpec,
   WORKTREE_GIT_TIMEOUT_MS,
 } from '../src/git/gitService';
-import type { RefBadge } from '../src/types/git';
+import type { BranchInfo, RefBadge, RemoteGroup } from '../src/types/git';
 
 const FS = '\x1f';
 const RS = '\x1e';
@@ -71,11 +71,11 @@ describe('validateGitRef', () => {
 
 describe('parseUpstreamTrack', () => {
   it.each([
-    ['[ahead 1]', { ahead: 1, behind: 0 }],
-    ['[behind 4]', { ahead: 0, behind: 4 }],
-    ['[ahead 2, behind 5]', { ahead: 2, behind: 5 }],
-    ['[gone]', { ahead: 0, behind: 0 }],
-    ['', { ahead: 0, behind: 0 }],
+    ['[ahead 1]', { ahead: 1, behind: 0, upstreamGone: false }],
+    ['[behind 4]', { ahead: 0, behind: 4, upstreamGone: false }],
+    ['[ahead 2, behind 5]', { ahead: 2, behind: 5, upstreamGone: false }],
+    ['[gone]', { ahead: 0, behind: 0, upstreamGone: true }],
+    ['', { ahead: 0, behind: 0, upstreamGone: false }],
   ])('parses %j', (track, expected) => {
     expect(parseUpstreamTrack(track)).toEqual(expected);
   });
@@ -86,6 +86,7 @@ describe('parseForEachRefOutput', () => {
     [' ', 'refs/heads/main', 'main', sha('a'), 'origin/main', '[behind 2]'],
     ['*', 'refs/heads/featurebranch3', 'featurebranch3', sha('b'), 'origin/featurebranch3', '[ahead 1, behind 3]'],
     [' ', 'refs/heads/local-only', 'local-only', sha('c'), '', ''],
+    [' ', 'refs/heads/orphaned', 'orphaned', sha('c'), 'origin/deleted-upstream', '[gone]'],
     [' ', 'refs/remotes/upstream/main', 'upstream/main', sha('d'), '', ''],
     [' ', 'refs/remotes/origin/HEAD', 'origin', sha('a'), '', ''],
     [' ', 'refs/remotes/origin/main', 'origin/main', sha('a'), '', ''],
@@ -96,7 +97,7 @@ describe('parseForEachRefOutput', () => {
   const result = parseForEachRefOutput(raw);
 
   it('parses local branches with the current branch and tracking counts', () => {
-    expect(result.localBranches.map((b) => b.name)).toEqual(['main', 'featurebranch3', 'local-only']);
+    expect(result.localBranches.map((b) => b.name)).toEqual(['main', 'featurebranch3', 'local-only', 'orphaned']);
     expect(result.localBranches[1]).toEqual({
       name: 'featurebranch3',
       displayName: 'featurebranch3',
@@ -108,9 +109,14 @@ describe('parseForEachRefOutput', () => {
       upstream: 'origin/featurebranch3',
       ahead: 1,
       behind: 3,
+      upstreamGone: false,
     });
     expect(result.localBranches[0]).toMatchObject({ isCurrent: false, ahead: 0, behind: 2 });
-    expect(result.localBranches[2]).toMatchObject({ upstream: null, ahead: 0, behind: 0 });
+    expect(result.localBranches[2]).toMatchObject({ upstream: null, ahead: 0, behind: 0, upstreamGone: false });
+  });
+
+  it('flags a deleted upstream ([gone]) instead of reporting it as up to date', () => {
+    expect(result.localBranches[3]).toMatchObject({ upstream: 'origin/deleted-upstream', ahead: 0, behind: 0, upstreamGone: true });
   });
 
   it('groups remotes alphabetically and drops the symbolic origin/HEAD', () => {
@@ -128,6 +134,7 @@ describe('parseForEachRefOutput', () => {
       upstream: null,
       ahead: 0,
       behind: 0,
+      upstreamGone: false,
     });
   });
 
@@ -408,6 +415,26 @@ describe('GitService operations (fake runner)', () => {
     return { calls, service: new GitService(runner) };
   }
 
+  function trackedBranch(name: string, upstream: string | null): BranchInfo {
+    return {
+      name,
+      displayName: name,
+      fullName: `refs/heads/${name}`,
+      isCurrent: false,
+      isRemote: false,
+      remoteName: null,
+      tipHash: HASH,
+      upstream,
+      ahead: 0,
+      behind: 0,
+      upstreamGone: false,
+    };
+  }
+
+  function remoteGroup(remoteName: string): RemoteGroup {
+    return { remoteName, branches: [] };
+  }
+
   it('runs fetch, pull and push with network timeouts', async () => {
     const { calls, service } = recorder();
     await service.fetchAll(ROOT);
@@ -420,6 +447,57 @@ describe('GitService operations (fake runner)', () => {
       { args: ['push'], timeoutMs: NETWORK_GIT_TIMEOUT_MS },
       { args: ['push', '-u', 'origin', 'feature/new'], timeoutMs: NETWORK_GIT_TIMEOUT_MS },
     ]);
+  });
+
+  it('fetches only remotes tracked by local branches, skipping branches without an upstream', async () => {
+    const { calls, service } = recorder();
+    const result = await service.fetchTrackedBranches(
+      ROOT,
+      [
+        trackedBranch('main', 'origin/main'),
+        trackedBranch('feature/local-only', null),
+        trackedBranch('hotfix', 'upstream/hotfix'),
+        trackedBranch('dup', 'origin/dup'),
+      ],
+      [remoteGroup('origin'), remoteGroup('upstream'), remoteGroup('unused')],
+    );
+    expect(calls).toEqual([
+      { args: ['fetch', '--prune', '--', 'origin'], timeoutMs: NETWORK_GIT_TIMEOUT_MS },
+      { args: ['fetch', '--prune', '--', 'upstream'], timeoutMs: NETWORK_GIT_TIMEOUT_MS },
+    ]);
+    expect(result).toEqual({
+      remotes: ['origin', 'upstream'],
+      trackedBranches: ['main', 'hotfix', 'dup'],
+      skippedBranches: ['feature/local-only'],
+      fetchedRemotes: ['origin', 'upstream'],
+    });
+  });
+
+  it('runs no Git command when no branch tracks a remote', async () => {
+    const { calls, service } = recorder();
+    const result = await service.fetchTrackedBranches(ROOT, [trackedBranch('feature/x', null)], [remoteGroup('origin')]);
+    expect(calls).toEqual([]);
+    expect(result).toMatchObject({ fetchedRemotes: [], skippedBranches: ['feature/x'] });
+  });
+
+  it('keeps fetching other remotes when one fails, then reports every failure', async () => {
+    const { calls, service } = recorder((args) => (args.includes('origin') ? new Error('network down') : ''));
+    await expect(
+      service.fetchTrackedBranches(
+        ROOT,
+        [trackedBranch('main', 'origin/main'), trackedBranch('hotfix', 'upstream/hotfix')],
+        [remoteGroup('origin'), remoteGroup('upstream')],
+      ),
+    ).rejects.toThrow('origin: network down');
+    expect(calls.map((c) => c.args[3])).toEqual(['origin', 'upstream']);
+  });
+
+  it('refuses option-like remote names instead of passing them to git', async () => {
+    const { calls, service } = recorder();
+    await expect(
+      service.fetchTrackedBranches(ROOT, [trackedBranch('main', '--upload-pack=evil/main')], [remoteGroup('--upload-pack=evil')]),
+    ).rejects.toThrow(/start with "-"/);
+    expect(calls).toEqual([]);
   });
 
   it('runs merge, rebase, cherry-pick and revert as non-interactive argument arrays', async () => {
@@ -758,5 +836,33 @@ describe.skipIf(!isGitAvailable())('GitService against real repositories', () =>
     const snapshot = await service.getRepoSnapshot(dir);
     expect(snapshot.currentBranch).toBe('my-topic');
     expect(snapshot.localBranches.find((b) => b.name === 'my-topic')?.upstream).toBe('origin/topic');
+  });
+
+  it('fetches only tracked remotes and reports a deleted upstream as gone, not up to date', async () => {
+    const remote = makeTempDir();
+    await git(remote, 'init', '--bare', '-b', 'main');
+    const dir = makeTempDir();
+    await git(dir, 'init', '-b', 'main');
+    await git(dir, 'commit', '--allow-empty', '-m', 'one');
+    await git(dir, 'remote', 'add', 'origin', remote);
+    await git(dir, 'push', '-u', 'origin', 'main');
+    await git(dir, 'checkout', '-b', 'topic');
+    await git(dir, 'push', '-u', 'origin', 'topic');
+    await git(dir, 'checkout', '-b', 'scratch');
+    await git(dir, 'checkout', 'main');
+
+    // Delete the upstream branch behind the repository's back, then fetch like the repository menu does.
+    await execGit(['--git-dir', remote, 'branch', '-D', 'topic'], remote);
+    const before = await service.getRepoSnapshot(dir);
+    expect(before.localBranches.find((b) => b.name === 'topic')).toMatchObject({ upstream: 'origin/topic', upstreamGone: false });
+
+    const result = await service.fetchTrackedBranches(dir, before.localBranches, before.remoteGroups);
+    expect(result.fetchedRemotes).toEqual(['origin']);
+    expect(result.skippedBranches).toEqual(['scratch']);
+
+    const after = await service.getRepoSnapshot(dir);
+    expect(after.localBranches.find((b) => b.name === 'topic')).toMatchObject({ upstream: 'origin/topic', ahead: 0, behind: 0, upstreamGone: true });
+    expect(after.localBranches.find((b) => b.name === 'main')).toMatchObject({ upstreamGone: false });
+    expect(after.localBranches.find((b) => b.name === 'scratch')).toMatchObject({ upstream: null, upstreamGone: false });
   });
 }, 60_000);
