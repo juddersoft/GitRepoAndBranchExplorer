@@ -1,5 +1,5 @@
 /** Smallest scale at which the "Checked Out" pill is still legible; below it the pill is hidden. */
-export const MIN_READABLE_PILL_SCALE = 0.78;
+export const MIN_READABLE_PILL_SCALE = 0.52;
 
 export interface CheckedOutPillLayoutInput {
   /** Width of the branch row's content box. */
@@ -8,7 +8,7 @@ export interface CheckedOutPillLayoutInput {
   prefixWidth: number;
   /** Width the branch label needs to show its full text. */
   branchLabelNaturalWidth: number;
-  /** Width of the `↑n ↓n` counters plus their gap (0 when absent). */
+  /** Width of all fixed trailing content and flex gaps (0 when absent). */
   trackingWidth: number;
   /** Natural width of the pill at scale 1. */
   pillBaseWidth: number;
@@ -41,9 +41,13 @@ export function computeCheckedOutPillLayout(input: CheckedOutPillLayoutInput): C
   if (remainingForPill >= pillBaseWidth) {
     return { visible: true, scale: 1 };
   }
-  const scale = remainingForPill / pillBaseWidth;
-  if (!(scale >= minReadableScale)) {
+  const readablePillWidth = pillBaseWidth * minReadableScale;
+  const comparisonTolerance = Number.EPSILON * 16 * Math.max(1, pillBaseWidth, Math.abs(remainingForPill));
+  if (remainingForPill + comparisonTolerance < readablePillWidth) {
     return { visible: false, scale: 0 };
   }
-  return { visible: true, scale: Math.min(1, scale) };
+  return {
+    visible: true,
+    scale: Math.min(1, Math.max(minReadableScale, remainingForPill / pillBaseWidth)),
+  };
 }

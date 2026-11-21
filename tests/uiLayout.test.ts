@@ -80,6 +80,21 @@ describe('computeCheckedOutPillLayout', () => {
     expect(justBelow).toEqual({ visible: false, scale: 0 });
     expect(layout(1_000_000)).toEqual({ visible: true, scale: 1 });
   });
+
+  it('uses a 52% readability floor and keeps intermediate scales visible', () => {
+    expect(MIN_READABLE_PILL_SCALE).toBe(0.52);
+    for (const scale of [0.7, 0.6, 0.53]) {
+      const result = layout(190 + 60 * scale);
+      expect(result.visible).toBe(true);
+      expect(result.scale).toBeCloseTo(scale);
+    }
+    expect(layout(190 + 60 * 0.51)).toEqual({ visible: false, scale: 0 });
+  });
+
+  it('hides whenever fixed content consumes all available row width', () => {
+    expect(computeCheckedOutPillLayout({ ...base, rowAvailableWidth: 190 })).toEqual({ visible: false, scale: 0 });
+    expect(computeCheckedOutPillLayout({ ...base, rowAvailableWidth: 189 })).toEqual({ visible: false, scale: 0 });
+  });
 });
 
 describe('column resize math', () => {
@@ -129,3 +144,4 @@ describe('column resize math', () => {
     expect(sanitizeStoredColumnWidths([1, 2])).toEqual({});
   });
 });
+

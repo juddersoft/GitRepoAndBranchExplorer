@@ -3,6 +3,11 @@
 All notable changes to **Git Repo & Branch Explorer** are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [1.4.2] - 2026-11-21
+
+### Changed
+- The sidebar **CHECKED OUT** pill now scales proportionally down to 52% and uses an exact post-layout truncation guard that hides it rather than consuming any branch-name width.
+
 ## [1.4.1] - 2026-11-21
 
 ### Changed

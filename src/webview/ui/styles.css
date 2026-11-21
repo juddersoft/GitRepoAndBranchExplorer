@@ -404,6 +404,7 @@ button {
 }
 
 .checked-out-badge {
+  /* Scale 1 is the compact base; BranchTree.ts scales every visual metric proportionally. */
   flex: 0 0 auto;
   padding: 0 4px;
   border: 1px solid var(--checked-out-accent);

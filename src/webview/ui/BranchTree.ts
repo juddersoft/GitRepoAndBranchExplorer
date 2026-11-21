@@ -1,6 +1,6 @@
 import type { BranchInfo, RemoteGroup, RepoSnapshot, TagInfo } from '../../types/git';
 import { button, createSearchBox, el, icon, type IconName, rebuildPreservingFocus } from './dom';
-import { computeCheckedOutPillLayout } from './pillLayout';
+import { computeCheckedOutPillLayout, MIN_READABLE_PILL_SCALE } from './pillLayout';
 import type { ExplorerUiState, RefTarget, TrackingSummary } from './state';
 import {
   branchRefTarget,
@@ -41,18 +41,36 @@ function trackingElement(summary: TrackingSummary): HTMLElement {
 }
 
 /** Must match the base (scale 1) `.checked-out-badge` metrics in styles.css. */
-const BADGE_BASE = { fontSize: 9, lineHeight: 11, paddingX: 4, borderRadius: 5 } as const;
+const BADGE_BASE = { fontSize: 9, lineHeight: 11, paddingX: 4, borderRadius: 5, letterSpacing: 0.02 } as const;
 
 function pixels(value: string): number {
   const parsed = Number.parseFloat(value);
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-/** Width of the label's text itself; `scrollWidth` would only report the stretched flex box. */
+/** Width of the label's text itself, even while its flex box is ellipsized. */
 function naturalTextWidth(label: HTMLElement): number {
   const range = document.createRange();
   range.selectNodeContents(label);
-  return range.getBoundingClientRect().width;
+  return Math.max(range.getBoundingClientRect().width, label.scrollWidth);
+}
+
+function clearBadgeScale(badge: HTMLElement): void {
+  badge.style.fontSize = '';
+  badge.style.lineHeight = '';
+  badge.style.paddingLeft = '';
+  badge.style.paddingRight = '';
+  badge.style.borderRadius = '';
+  badge.style.letterSpacing = '';
+}
+
+function applyBadgeScale(badge: HTMLElement, scale: number): void {
+  badge.style.fontSize = `${(BADGE_BASE.fontSize * scale).toFixed(2)}px`;
+  badge.style.lineHeight = `${(BADGE_BASE.lineHeight * scale).toFixed(2)}px`;
+  badge.style.paddingLeft = `${(BADGE_BASE.paddingX * scale).toFixed(2)}px`;
+  badge.style.paddingRight = `${(BADGE_BASE.paddingX * scale).toFixed(2)}px`;
+  badge.style.borderRadius = `${(BADGE_BASE.borderRadius * scale).toFixed(2)}px`;
+  badge.style.letterSpacing = `${(BADGE_BASE.letterSpacing * scale).toFixed(3)}em`;
 }
 
 /** Activity Bar view: `Repos:` heading, repository row, branch filter and the Branches / remotes / tags tree. */
@@ -150,6 +168,7 @@ export class BranchTree {
       tabStop.tabIndex = 0;
     }
     this.layoutCheckedOutBadges();
+    requestAnimationFrame(() => this.layoutCheckedOutBadges());
   }
 
   /**
@@ -164,34 +183,48 @@ export class BranchTree {
         continue;
       }
       badge.classList.remove('checked-out-badge-hidden');
-      badge.style.fontSize = '';
-      badge.style.lineHeight = '';
-      badge.style.paddingLeft = '';
-      badge.style.paddingRight = '';
-      badge.style.borderRadius = '';
+      clearBadgeScale(badge);
 
       const rowStyle = getComputedStyle(row);
-      const gap = pixels(rowStyle.columnGap);
-      const rowRect = row.getBoundingClientRect();
-      const trailing = Array.from(row.children).filter(
-        (child) => child !== badge && (child.compareDocumentPosition(badge) & Node.DOCUMENT_POSITION_PRECEDING) !== 0,
+      const columnGap = rowStyle.columnGap === 'normal' ? rowStyle.gap : rowStyle.columnGap;
+      const gap = pixels(columnGap);
+      const visibleChildren = Array.from(row.children).filter(
+        (child): child is HTMLElement => child instanceof HTMLElement && getComputedStyle(child).display !== 'none',
       );
+      const labelIndex = visibleChildren.indexOf(label);
+      const badgeIndex = visibleChildren.indexOf(badge);
+      const prefixWidth = labelIndex > 0
+        ? visibleChildren.slice(0, labelIndex).reduce((sum, child) => sum + child.getBoundingClientRect().width, 0)
+        : 0;
+      const trailingWidth = badgeIndex >= 0
+        ? visibleChildren.slice(badgeIndex + 1).reduce((sum, child) => sum + child.getBoundingClientRect().width, 0)
+        : 0;
+      const gapWidth = gap * Math.max(0, visibleChildren.length - 1);
+      const naturalLabelWidth = Math.ceil(naturalTextWidth(label)) + 2;
+      const pillBaseWidth = badge.getBoundingClientRect().width;
       const layout = computeCheckedOutPillLayout({
         rowAvailableWidth: row.clientWidth - pixels(rowStyle.paddingLeft) - pixels(rowStyle.paddingRight),
-        prefixWidth: label.getBoundingClientRect().left - rowRect.left - pixels(rowStyle.paddingLeft),
-        branchLabelNaturalWidth: naturalTextWidth(label),
-        trackingWidth: trailing.reduce((sum, child) => sum + child.getBoundingClientRect().width + gap, 0),
-        pillBaseWidth: badge.getBoundingClientRect().width + gap,
+        prefixWidth,
+        branchLabelNaturalWidth: naturalLabelWidth,
+        trackingWidth: trailingWidth + gapWidth + 2,
+        pillBaseWidth,
       });
 
       badge.classList.toggle('checked-out-badge-hidden', !layout.visible);
-      if (layout.visible && layout.scale < 1) {
-        const { scale } = layout;
-        badge.style.fontSize = `${BADGE_BASE.fontSize * scale}px`;
-        badge.style.lineHeight = `${BADGE_BASE.lineHeight * scale}px`;
-        badge.style.paddingLeft = `${BADGE_BASE.paddingX * scale}px`;
-        badge.style.paddingRight = `${BADGE_BASE.paddingX * scale}px`;
-        badge.style.borderRadius = `${BADGE_BASE.borderRadius * scale}px`;
+      if (!layout.visible) {
+        continue;
+      }
+
+      let scale = layout.scale;
+      const isTruncated = () => label.scrollWidth > label.clientWidth + 0.5 || label.clientWidth + 0.5 < naturalLabelWidth;
+      applyBadgeScale(badge, scale);
+      while (isTruncated() && scale > MIN_READABLE_PILL_SCALE) {
+        scale = Math.max(MIN_READABLE_PILL_SCALE, scale - 0.04);
+        applyBadgeScale(badge, scale);
+      }
+      if (isTruncated()) {
+        badge.classList.add('checked-out-badge-hidden');
+        clearBadgeScale(badge);
       }
     }
   }
