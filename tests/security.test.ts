@@ -1,7 +1,9 @@
+import * as fs from 'fs';
+import * as path from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { validateGitRef } from '../src/git/gitExecutor';
-import { buildRefMap, isValidCommitHash, parseForEachRefOutput, parseGitLogOutput } from '../src/git/gitService';
-import { isExtensionToWebviewMessage, isValidWebviewMessage } from '../src/types/messages';
+import { buildGitHubCommitUrl, buildRefMap, isValidCommitHash, parseForEachRefOutput, parseGitLogOutput } from '../src/git/gitService';
+import { isExtensionToWebviewMessage, isValidWebviewMessage, isWebviewToExtensionMessage } from '../src/types/messages';
 import { buildCspHeader, getNonce } from '../src/webview/security';
 
 const FS = '\x1f';
@@ -90,12 +92,63 @@ describe('buildCspHeader', () => {
     expect(directives.get('img-src')).toEqual([cspSource, 'data:']);
   });
 
+  it("disables navigation, embedding, objects and connections", () => {
+    for (const directive of ['base-uri', 'form-action', 'frame-ancestors', 'object-src', 'connect-src']) {
+      expect(directives.get(directive)).toEqual(["'none'"]);
+    }
+  });
+
   it('generates a fresh 128-bit hex nonce for every render', () => {
     const nonces = new Set(Array.from({ length: 50 }, () => getNonce()));
     expect(nonces.size).toBe(50);
     for (const n of nonces) {
       expect(n).toMatch(/^[0-9a-f]{32}$/);
     }
+  });
+});
+
+describe('adversarial external navigation guards', () => {
+  const validHash = 'a'.repeat(40);
+
+  it.each([
+    'javascript:alert(1)',
+    'file:///etc/passwd',
+    'vscode://file/C:/Windows/System32/calc.exe',
+    'https://github.com@evil.com/owner/repo.git',
+    'https://evil.com/github.com/owner/repo.git',
+    'https://user:pass@github.com/owner/repo.git',
+  ])('rejects spoofed GitHub remote URL %s', (remoteUrl) => {
+    expect(buildGitHubCommitUrl(remoteUrl, validHash)).toBeNull();
+  });
+
+  it.each(['abc123', '../../issues', 'g'.repeat(40), 'a'.repeat(39), 'a'.repeat(41), 'a'.repeat(64).replace(/a/g, 'g')])(
+    'rejects invalid commit identifier %s',
+    (hash) => {
+      expect(buildGitHubCommitUrl('https://github.com/owner/repo', hash)).toBeNull();
+    },
+  );
+});
+
+describe('static webview sink and Git spawning audit', () => {
+  it('contains no dangerous DOM/execution sinks under src/webview/ui', () => {
+    const uiRoot = path.resolve('src/webview/ui');
+    const files = fs.readdirSync(uiRoot, { recursive: true })
+      .filter((entry): entry is string => typeof entry === 'string')
+      .filter((entry) => entry.endsWith('.ts'))
+      .map((entry) => path.join(uiRoot, entry));
+    for (const file of files) {
+      const source = fs.readFileSync(file, 'utf8');
+      expect(source, file).not.toMatch(/\.(innerHTML|outerHTML)\b/);
+      expect(source, file).not.toContain('insertAdjacentHTML');
+      expect(source, file).not.toContain('document.write');
+      expect(source, file).not.toMatch(/\beval\s*\(/);
+      expect(source, file).not.toContain('new Function');
+    }
+  });
+
+  it('prepends color and ext protocol hardening to every Git spawn argv', () => {
+    const source = fs.readFileSync(path.resolve('src/git/gitExecutor.ts'), 'utf8');
+    expect(source).toContain("['-c', 'color.ui=false', '-c', 'protocol.ext.allow=never', ...args]");
   });
 });
 
@@ -109,6 +162,14 @@ describe('isValidWebviewMessage rejects hostile payloads', () => {
     expect(isValidWebviewMessage(JSON.parse('{"type":"gitAction","payload":{"__proto__":{"action":"push"}}}'))).toBe(false);
     expect(isValidWebviewMessage(JSON.parse('{"type":"gitAction","payload":{"action":"push","constructor":{"prototype":{}}}}'))).toBe(false);
     expect(isValidWebviewMessage({ type: 'requestRefresh', prototype: {} })).toBe(false);
+  });
+
+  it('rejects prototype keys and option-injection refs in inbound messages', () => {
+    expect(isWebviewToExtensionMessage(JSON.parse('{"type":"checkoutBranch","payload":{"branchName":"main","__proto__":{"polluted":true}}}'))).toBe(false);
+    expect(isWebviewToExtensionMessage({ type: 'checkoutBranch', payload: { branchName: '--upload-pack=calc' } })).toBe(false);
+    expect(isWebviewToExtensionMessage({ type: 'checkoutBranch', payload: { branchName: '-c' } })).toBe(false);
+    expect(isWebviewToExtensionMessage({ type: 'gitAction', payload: { action: 'merge', target: '--exec=sh' } })).toBe(false);
+    expect(isWebviewToExtensionMessage({ type: 'gitAction', payload: { action: 'merge', target: 'main', constructor: true } })).toBe(false);
   });
 
   it('ignores inherited properties', () => {

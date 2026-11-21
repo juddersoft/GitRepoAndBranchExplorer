@@ -85,6 +85,9 @@ function runCommitMenuAction(id: MenuActionId, commit: CommitNode): void {
       break;
     case 'cherryPick':
     case 'revert':
+    case 'revertMerge':
+    case 'resetMixed':
+    case 'resetHard':
       postGitAction(id, commit.hash);
       break;
     case 'openGitGraph':

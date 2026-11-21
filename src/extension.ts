@@ -1,12 +1,13 @@
 import * as vscode from 'vscode';
-import { registerGitShowContentProvider } from './git/gitDiffProvider';
+import { GitShowContentProvider, registerGitShowContentProvider } from './git/gitDiffProvider';
 import { GitRepoPanel, OPEN_REPOSITORY_COMMAND, REFRESH_COMMAND } from './webview/GitRepoPanel';
 import { SidebarViewProvider } from './webview/SidebarViewProvider';
 
 export function activate(context: vscode.ExtensionContext): void {
-  const coordinator = GitRepoPanel.initialize(context);
+  const gitDiffProvider = new GitShowContentProvider();
+  const coordinator = GitRepoPanel.initialize(context, gitDiffProvider);
   context.subscriptions.push(
-    registerGitShowContentProvider(),
+    registerGitShowContentProvider(gitDiffProvider),
     vscode.commands.registerCommand(OPEN_REPOSITORY_COMMAND, () => GitRepoPanel.createOrShow(context.extensionUri)),
     vscode.commands.registerCommand(REFRESH_COMMAND, () => {
       GitRepoPanel.refresh();

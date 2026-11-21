@@ -27,6 +27,28 @@ const RS = '\x1e';
 
 const sha = (char: string): string => char.repeat(40);
 
+describe('execGit process hardening', () => {
+  it('disables the ext:: transport for every invocation', async () => {
+    await expect(execGit(['config', '--get', 'protocol.ext.allow'], process.cwd())).resolves.toBe('never\n');
+  });
+
+  it('terminates and rejects when stdout exceeds the configured cap', async () => {
+    const error = await execGit(['--version'], process.cwd(), { maxStdoutBytes: 1 }).catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(GitExecutionError);
+    expect(error).toMatchObject({ outputLimitExceeded: true });
+    expect((error as GitExecutionError).message).toContain('stdout output limit exceeded');
+  });
+
+  it('terminates and rejects when stderr exceeds the configured cap', async () => {
+    const error = await execGit(['show', '0000000000000000000000000000000000000000'], process.cwd(), {
+      maxStderrBytes: 1,
+    }).catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(GitExecutionError);
+    expect(error).toMatchObject({ outputLimitExceeded: true });
+    expect((error as GitExecutionError).message).toContain('stderr output limit exceeded');
+  });
+});
+
 /** Mirrors git's output: fields joined by 0x1f, each record ending with 0x1e plus git's trailing newline. */
 function records(...rows: string[][]): string {
   return rows.map((fields) => `${fields.join(FS)}${RS}\n`).join('');
@@ -403,12 +425,16 @@ describe('GitService operations (fake runner)', () => {
   const HASH = 'd'.repeat(40);
 
   function recorder(respond: (args: readonly string[]) => string | Error = () => ''): {
-    calls: Array<{ args: readonly string[]; timeoutMs?: number }>;
+    calls: Array<{ args: readonly string[]; timeoutMs?: number; maxStdoutBytes?: number }>;
     service: GitService;
   } {
-    const calls: Array<{ args: readonly string[]; timeoutMs?: number }> = [];
+    const calls: Array<{ args: readonly string[]; timeoutMs?: number; maxStdoutBytes?: number }> = [];
     const runner: GitRunner = (args, _cwd, options) => {
-      calls.push({ args, timeoutMs: options?.timeoutMs });
+      calls.push({
+        args,
+        ...(options?.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+        ...(options?.maxStdoutBytes === undefined ? {} : { maxStdoutBytes: options.maxStdoutBytes }),
+      });
       const result = respond(args);
       return result instanceof Error ? Promise.reject(result) : Promise.resolve(result);
     };
@@ -516,6 +542,26 @@ describe('GitService operations (fake runner)', () => {
     ]);
   });
 
+  it('resets to hashes or refs with exact mixed/hard arguments and no trailing --', async () => {
+    const { calls, service } = recorder();
+    await service.resetCurrentBranch(ROOT, HASH.toUpperCase(), 'mixed');
+    await service.resetCurrentBranch(ROOT, 'refs/heads/main', 'hard');
+    expect(calls).toEqual([
+      { args: ['reset', '--mixed', HASH], timeoutMs: WORKTREE_GIT_TIMEOUT_MS },
+      { args: ['reset', '--hard', 'refs/heads/main'], timeoutMs: WORKTREE_GIT_TIMEOUT_MS },
+    ]);
+  });
+
+  it('reverts merge commits with an explicit positive mainline parent', async () => {
+    const { calls, service } = recorder();
+    await service.revertMergeCommit(ROOT, HASH.toUpperCase());
+    await service.revertMergeCommit(ROOT, HASH, 2);
+    expect(calls).toEqual([
+      { args: ['revert', '--no-edit', '-m', '1', HASH], timeoutMs: WORKTREE_GIT_TIMEOUT_MS },
+      { args: ['revert', '--no-edit', '-m', '2', HASH], timeoutMs: WORKTREE_GIT_TIMEOUT_MS },
+    ]);
+  });
+
   it('deletes local branches with -d, or -D when forced', async () => {
     const { calls, service } = recorder();
     await service.deleteLocalBranch(ROOT, 'feature/old');
@@ -545,6 +591,11 @@ describe('GitService operations (fake runner)', () => {
     ['cherry-pick of a short hash', (s: GitService) => s.cherryPickCommit(ROOT, HASH.slice(0, 8))],
     ['cherry-pick option', (s: GitService) => s.cherryPickCommit(ROOT, '--abort')],
     ['revert of a ref', (s: GitService) => s.revertCommit(ROOT, 'HEAD~1')],
+    ['merge revert hash', (s: GitService) => s.revertMergeCommit(ROOT, 'HEAD')],
+    ['merge revert mainline', (s: GitService) => s.revertMergeCommit(ROOT, HASH, 0)],
+    ['merge revert fractional mainline', (s: GitService) => s.revertMergeCommit(ROOT, HASH, 1.5)],
+    ['mixed reset option injection', (s: GitService) => s.resetCurrentBranch(ROOT, '--hard', 'mixed')],
+    ['hard reset option injection', (s: GitService) => s.resetCurrentBranch(ROOT, '-c', 'hard')],
     ['delete', (s: GitService) => s.deleteLocalBranch(ROOT, '-D')],
     ['delete with revision syntax', (s: GitService) => s.deleteLocalBranch(ROOT, 'main^')],
     ['tracking checkout remote', (s: GitService) => s.checkoutRemoteBranch(ROOT, '--orphan', 'x')],
@@ -618,8 +669,9 @@ describe('GitService operations (fake runner)', () => {
 
   it('returns "" when the file or parent revision does not exist, but rethrows other failures', async () => {
     const missing = new GitExecutionError('fatal', 'COMMAND_FAILED', 128, `fatal: invalid object name '${HASH}^'.`);
-    const { service } = recorder(() => missing);
+    const { calls, service } = recorder(() => missing);
     await expect(service.getFileContentAtRevision(ROOT, `${HASH}^:a.txt`)).resolves.toBe('');
+    expect(calls).toEqual([{ args: ['show', `${HASH}^:a.txt`], maxStdoutBytes: 4 * 1024 * 1024 }]);
 
     const timeout = new GitExecutionError('timeout', 'TIMEOUT', null, '');
     await expect(recorder(() => timeout).service.getFileContentAtRevision(ROOT, `${HASH}:a.txt`)).rejects.toBe(timeout);
@@ -756,6 +808,89 @@ describe.skipIf(!isGitAvailable())('GitService against real repositories', () =>
     const snapshot = await service.getRepoSnapshot(dir);
     expect(snapshot.currentBranch).toBe('feature/from-head');
     expect(snapshot.localBranches.map((b) => b.name)).toEqual(['feature/from-first', 'feature/from-head', 'main']);
+  });
+
+  it('reset --mixed moves HEAD back and leaves the later file change unstaged', async () => {
+    const dir = makeTempDir();
+    await git(dir, 'init', '-b', 'main');
+    await git(dir, 'config', 'user.name', 'Test User');
+    await git(dir, 'config', 'user.email', 'test@example.com');
+    await git(dir, 'config', 'commit.gpgsign', 'false');
+
+    const file = path.join(dir, 'reset.txt');
+    fs.writeFileSync(file, 'first\n');
+    await git(dir, 'add', 'reset.txt');
+    await git(dir, 'commit', '-m', 'first');
+    const first = (await git(dir, 'rev-parse', 'HEAD')).trim();
+
+    fs.writeFileSync(file, 'second\n');
+    await git(dir, 'add', 'reset.txt');
+    await git(dir, 'commit', '-m', 'second');
+
+    await service.resetCurrentBranch(dir, first, 'mixed');
+
+    expect((await git(dir, 'rev-parse', 'HEAD')).trim()).toBe(first);
+    expect(fs.readFileSync(file, 'utf8')).toBe('second\n');
+    expect((await git(dir, 'status', '--porcelain')).trim()).toBe('M reset.txt');
+  });
+
+  it('reset --hard moves HEAD back and discards commits and uncommitted tracked changes', async () => {
+    const dir = makeTempDir();
+    await git(dir, 'init', '-b', 'main');
+    await git(dir, 'config', 'user.name', 'Test User');
+    await git(dir, 'config', 'user.email', 'test@example.com');
+    await git(dir, 'config', 'commit.gpgsign', 'false');
+
+    const file = path.join(dir, 'hard-reset.txt');
+    fs.writeFileSync(file, 'base\n');
+    await git(dir, 'add', 'hard-reset.txt');
+    await git(dir, 'commit', '-m', 'base');
+    const first = (await git(dir, 'rev-parse', 'HEAD')).trim();
+    await git(dir, 'tag', 'v0-base');
+
+    fs.writeFileSync(file, 'subsequent commit\n');
+    await git(dir, 'add', 'hard-reset.txt');
+    await git(dir, 'commit', '-m', 'subsequent');
+    fs.writeFileSync(file, 'uncommitted change\n');
+
+    await service.resetCurrentBranch(dir, 'refs/tags/v0-base', 'hard');
+
+    expect((await git(dir, 'rev-parse', 'HEAD')).trim()).toBe(first);
+    expect(fs.readFileSync(file, 'utf8').trim()).toBe('base');
+    expect((await git(dir, 'status', '--porcelain')).trim()).toBe('');
+  });
+
+  it('reverts a real merge commit with mainline 1 and preserves the first-parent change', async () => {
+    const dir = makeTempDir();
+    await git(dir, 'init', '-b', 'main');
+    await git(dir, 'config', 'user.name', 'Test User');
+    await git(dir, 'config', 'user.email', 'test@example.com');
+    await git(dir, 'config', 'commit.gpgsign', 'false');
+
+    fs.writeFileSync(path.join(dir, 'main.txt'), 'main-base\n');
+    await git(dir, 'add', 'main.txt');
+    await git(dir, 'commit', '-m', 'main base');
+
+    await git(dir, 'checkout', '-b', 'feature');
+    fs.writeFileSync(path.join(dir, 'feature.txt'), 'feature change\n');
+    await git(dir, 'add', 'feature.txt');
+    await git(dir, 'commit', '-m', 'feature change');
+
+    await git(dir, 'checkout', 'main');
+    fs.writeFileSync(path.join(dir, 'main.txt'), 'main change\n');
+    await git(dir, 'add', 'main.txt');
+    await git(dir, 'commit', '-m', 'main change');
+
+    await git(dir, 'merge', '--no-ff', '--no-edit', 'feature');
+    const mergeHash = (await git(dir, 'rev-parse', 'HEAD')).trim();
+    expect((await git(dir, 'rev-list', '--parents', '-n', '1', mergeHash)).trim().split(' ').length).toBe(3);
+
+    await service.revertMergeCommit(dir, mergeHash, 1);
+
+    expect(fs.existsSync(path.join(dir, 'feature.txt'))).toBe(false);
+    expect(fs.readFileSync(path.join(dir, 'main.txt'), 'utf8')).toBe('main change\n');
+    expect((await git(dir, 'rev-list', '--parents', '-n', '1', 'HEAD')).trim().split(' ').length).toBe(2);
+    expect((await git(dir, 'log', '-1', '--format=%s')).trim()).toMatch(/^Revert "Merge branch 'feature'"/);
   });
 
   it('merges, rebases, cherry-picks, reverts and deletes branches', async () => {

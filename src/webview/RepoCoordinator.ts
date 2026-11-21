@@ -1,5 +1,6 @@
 ﻿import * as path from 'path';
 import * as vscode from 'vscode';
+import type { GitShowContentProvider } from '../git/gitDiffProvider';
 import { openCommitFileDiff } from '../git/gitDiffProvider';
 import { GitExecutionError, validateGitRef } from '../git/gitExecutor';
 import { findGitGraphExtensionId, openInGitGraph } from '../git/gitGraphInterop';
@@ -24,6 +25,8 @@ import { isSameSelection, listRefTargets, normalizeSelection } from './ui/state'
 /** Git metadata whose changes mean branches, HEAD or remote refs moved outside this panel. */
 export const GIT_WATCH_GLOB = '.git/{HEAD,FETCH_HEAD,ORIG_HEAD,packed-refs,refs/**}';
 export const GIT_WATCH_DEBOUNCE_MS = 400;
+export const WORKSPACE_TRUST_ERROR_MESSAGE =
+  'Trust this workspace in VS Code before using Git Repo & Branch Explorer. Git commands are disabled in untrusted workspaces.';
 
 /** Prefers Git's own `fatal:`/`error:` line, since network commands print progress to stderr first. */
 function describeError(err: unknown): string {
@@ -115,11 +118,15 @@ export class RepoCoordinator implements vscode.Disposable {
   private watchedRepoRoot: string | null = null;
   private watchDebounceTimer: ReturnType<typeof setTimeout> | undefined;
 
-  constructor(private readonly host: RepoCoordinatorHost) {
+  constructor(
+    private readonly host: RepoCoordinatorHost,
+    private readonly gitDiffProvider?: GitShowContentProvider,
+  ) {
     vscode.workspace.onDidChangeWorkspaceFolders(() => this.refreshIfAttached(), null, this.disposables);
+    vscode.workspace.onDidGrantWorkspaceTrust(() => this.refreshIfAttached(), null, this.disposables);
     vscode.extensions.onDidChange(
       () => {
-        if (this.surfaces.size > 0) {
+        if (this.surfaces.size > 0 && vscode.workspace.isTrusted) {
           void this.publishIntegrations();
         }
       },
@@ -203,6 +210,9 @@ export class RepoCoordinator implements vscode.Disposable {
   /** Brings a freshly loaded webview up to date from the cached state, or loads the repository if there is none yet. */
   private sendInitialState(source: SurfaceId): void {
     const surface = this.surfaces.get(source);
+    if (!this.ensureTrustedWorkspace()) {
+      return;
+    }
     const snapshot = this.lastSnapshot;
     if (!surface) {
       return;
@@ -252,6 +262,7 @@ export class RepoCoordinator implements vscode.Disposable {
     this.loadSequence++;
     this.lastSnapshot = null;
     this.selection = EMPTY_SELECTION;
+    this.gitDiffProvider?.clearAllowedRepoRoots();
     this.disposeGitWatcher();
   }
 
@@ -260,6 +271,9 @@ export class RepoCoordinator implements vscode.Disposable {
     operation: (repoRoot: string) => Promise<void>,
     failureHint?: string,
   ): Promise<void> {
+    if (!this.ensureTrustedWorkspace()) {
+      return;
+    }
     const snapshot = this.lastSnapshot;
     if (!snapshot) {
       void vscode.window.showWarningMessage('No Git repository is loaded.');
@@ -312,6 +326,9 @@ export class RepoCoordinator implements vscode.Disposable {
   }
 
   private async handleGitAction(action: GitAction, target?: string): Promise<void> {
+    if (!this.ensureTrustedWorkspace()) {
+      return;
+    }
     switch (action) {
       case 'fetch':
         await this.runGitOperation('Fetching all remotes', (root) => this.gitService.fetchAll(root));
@@ -338,13 +355,130 @@ export class RepoCoordinator implements vscode.Disposable {
       case 'revert':
         await this.handleCommitOperation(action, target);
         break;
+      case 'revertMerge':
+        await this.handleRevertMerge(target);
+        break;
       case 'deleteBranch':
         await this.handleDeleteBranch(target);
         break;
       case 'checkoutRemoteBranch':
         await this.handleCheckoutRemoteBranch(target);
         break;
+      case 'resetMixed':
+        await this.handleReset(target, 'mixed');
+        break;
+      case 'resetHard':
+        await this.handleReset(target, 'hard');
+        break;
     }
+  }
+
+  private async handleReset(target: string | undefined, mode: 'mixed' | 'hard'): Promise<void> {
+    const snapshot = this.lastSnapshot;
+    if (!snapshot || snapshot.isDetachedHead || !snapshot.localBranches.some((branch) => branch.isCurrent)) {
+      void vscode.window.showWarningMessage('Check out a branch before resetting the current branch.');
+      return;
+    }
+    if (target === undefined) {
+      return;
+    }
+
+    const resolved = this.resolveResetTarget(snapshot, target);
+    if (!resolved) {
+      void vscode.window.showWarningMessage(`"${target}" is not an unambiguous commit or ref in this repository.`);
+      return;
+    }
+
+    const currentBranch = snapshot.currentBranch;
+    const confirmation =
+      mode === 'mixed'
+        ? `Reset "${currentBranch}" to ${resolved.label}? Commits after this target will be undone, while changes remain unstaged in the working tree.`
+        : `Reset "${currentBranch}" to ${resolved.label}? ALL uncommitted changes and commits after this target will be permanently discarded.`;
+    const button = mode === 'mixed' ? 'Reset (Keep Changes)' : 'Delete Changes (--hard)';
+    const choice = await vscode.window.showWarningMessage(confirmation, { modal: true }, button);
+    if (choice !== button) {
+      return;
+    }
+    await this.runGitOperation(
+      `${mode === 'mixed' ? 'Resetting and keeping changes in' : 'Hard-resetting'} ${resolved.label}`,
+      (root) => this.gitService.resetCurrentBranch(root, resolved.target, mode),
+      mode === 'hard' ? 'Review the repository state before continuing.' : undefined,
+    );
+  }
+
+  private resolveResetTarget(
+    snapshot: RepoSnapshot,
+    target: string,
+  ): { target: string; label: string } | null {
+    const normalizedHash = target.toLowerCase();
+    const matchingCommit = isValidCommitHash(target)
+      ? snapshot.commits.find((commit) => commit.hash === normalizedHash)
+      : undefined;
+
+    const refs = [
+      ...snapshot.localBranches.map((branch) => ({
+        target: branch.fullName,
+        names: [branch.name, branch.fullName],
+        label: branch.name,
+      })),
+      ...snapshot.remoteGroups.flatMap((group) =>
+        group.branches.map((branch) => ({
+          target: branch.fullName,
+          names: [branch.name, branch.fullName],
+          label: branch.name,
+        })),
+      ),
+      ...snapshot.tags.map((tag) => ({
+        target: tag.fullName,
+        names: [tag.name, tag.fullName],
+        label: tag.name,
+      })),
+    ].filter((ref) => ref.names.includes(target));
+
+    const resultCount = refs.length + (matchingCommit === undefined ? 0 : 1);
+    if (resultCount !== 1) {
+      return null;
+    }
+    if (matchingCommit) {
+      return { target: matchingCommit.hash, label: matchingCommit.shortHash };
+    }
+    return refs[0] ?? null;
+  }
+
+  private async handleRevertMerge(hash: string | undefined): Promise<void> {
+    const snapshot = this.lastSnapshot;
+    if (!snapshot || !hash || !isValidCommitHash(hash)) {
+      return;
+    }
+    if (snapshot.isDetachedHead || !snapshot.localBranches.some((branch) => branch.isCurrent)) {
+      void vscode.window.showWarningMessage('Check out a branch before reverting a merge commit.');
+      return;
+    }
+    const commit = snapshot.commits.find((candidate) => candidate.hash === hash.toLowerCase());
+    if (!commit || commit.parents.length <= 1) {
+      void vscode.window.showWarningMessage('Revert Merge requires a merge commit from the loaded repository history.');
+      return;
+    }
+
+    const firstParent = commit.parents[0]?.slice(0, 7);
+    if (!firstParent) {
+      return;
+    }
+    const button = 'Revert Merge';
+    const choice = await vscode.window.showWarningMessage(
+      `Revert merge commit ${commit.shortHash} using mainline parent 1 (${firstParent})? ` +
+        'This creates a new commit undoing the merged changes while preserving first-parent history.',
+      { modal: true },
+      button,
+    );
+    if (choice !== button) {
+      return;
+    }
+    await this.runGitOperation(
+      `Reverting merge commit ${commit.shortHash}`,
+      (root) => this.gitService.revertMergeCommit(root, commit.hash, 1),
+      conflictHint('revert'),
+    );
   }
 
   /** Resolves a webview-supplied name to a branch/tag of the loaded snapshot, warning when it is not one. */
@@ -642,6 +776,9 @@ export class RepoCoordinator implements vscode.Disposable {
   }
 
   private async sendCommitDetails(source: SurfaceId, hash: string): Promise<void> {
+    if (!this.ensureTrustedWorkspace()) {
+      return;
+    }
     const snapshot = this.lastSnapshot;
     if (!snapshot || !isValidCommitHash(hash)) {
       return;
@@ -655,6 +792,9 @@ export class RepoCoordinator implements vscode.Disposable {
   }
 
   private async openFileDiff(payload: OpenFileDiffPayload): Promise<void> {
+    if (!this.ensureTrustedWorkspace()) {
+      return;
+    }
     const snapshot = this.lastSnapshot;
     if (!snapshot || !isValidCommitHash(payload.hash) || !isChangedFileStatus(payload.status)) {
       return;
@@ -681,6 +821,10 @@ export class RepoCoordinator implements vscode.Disposable {
   }
 
   private async publishIntegrations(): Promise<void> {
+    if (!vscode.workspace.isTrusted) {
+      this.reportUntrustedWorkspace();
+      return;
+    }
     const repoRoot = this.lastSnapshot?.repoRoot;
     let githubRemoteUrl: string | null = null;
     if (repoRoot) {
@@ -710,6 +854,11 @@ export class RepoCoordinator implements vscode.Disposable {
     const sequence = ++this.loadSequence;
     const initState = getInitState(this.host.getTabPinned());
     this.broadcast({ type: 'initState', payload: initState });
+    this.gitDiffProvider?.clearAllowedRepoRoots();
+
+    if (!this.ensureTrustedWorkspace()) {
+      return;
+    }
 
     if (initState.workspacePath === null) {
       this.lastSnapshot = null;
@@ -729,6 +878,7 @@ export class RepoCoordinator implements vscode.Disposable {
         return;
       }
       this.lastSnapshot = snapshot;
+      this.gitDiffProvider?.setAllowedRepoRoots([snapshot.repoRoot]);
       // Each webview reconciles its own selection with the snapshot identically, so no extra sync message is needed.
       this.selection = normalizeSelection(snapshot, this.selection);
       this.updateGitWatcher(snapshot.repoRoot);
@@ -740,6 +890,7 @@ export class RepoCoordinator implements vscode.Disposable {
         return;
       }
       this.lastSnapshot = null;
+      this.gitDiffProvider?.clearAllowedRepoRoots();
       this.updateGitWatcher(null);
       this.host.onCurrentBranchChange(null);
       this.broadcast({ type: 'repoError', payload: toRepoErrorPayload(err) });
@@ -784,6 +935,27 @@ export class RepoCoordinator implements vscode.Disposable {
     }
   }
 
+  private ensureTrustedWorkspace(): boolean {
+    if (vscode.workspace.isTrusted) {
+      return true;
+    }
+    this.reportUntrustedWorkspace();
+    return false;
+  }
+
+  private reportUntrustedWorkspace(): void {
+    this.loadSequence++;
+    this.lastSnapshot = null;
+    this.selection = EMPTY_SELECTION;
+    this.gitDiffProvider?.clearAllowedRepoRoots();
+    this.updateGitWatcher(null);
+    this.host.onCurrentBranchChange(null);
+    this.broadcast({
+      type: 'repoError',
+      payload: { code: 'UNTRUSTED_WORKSPACE', message: WORKSPACE_TRUST_ERROR_MESSAGE },
+    });
+  }
+
   private disposeGitWatcher(): void {
     this.clearWatchDebounce();
     for (const subscription of this.gitWatcherSubscriptions) {
@@ -807,6 +979,7 @@ export class RepoCoordinator implements vscode.Disposable {
     }
     this.disposed = true;
     this.surfaces.clear();
+    this.gitDiffProvider?.clearAllowedRepoRoots();
     this.disposeGitWatcher();
     while (this.disposables.length) {
       this.disposables.pop()?.dispose();

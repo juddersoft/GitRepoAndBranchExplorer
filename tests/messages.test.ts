@@ -38,12 +38,24 @@ describe('gitAction validation', () => {
     expect(isWebviewToExtensionMessage(gitAction({ action, target: 42 }))).toBe(false);
   });
 
-  it.each(['cherryPick', 'revert'] as GitAction[])('requires a full commit hash for %s', (action) => {
+  it.each(['cherryPick', 'revert', 'revertMerge'] as GitAction[])('requires a full commit hash for %s', (action) => {
     expect(isWebviewToExtensionMessage(gitAction({ action, target: HASH }))).toBe(true);
     expect(isWebviewToExtensionMessage(gitAction({ action, target: SHA256 }))).toBe(true);
     expect(isWebviewToExtensionMessage(gitAction({ action, target: 'HEAD' }))).toBe(false);
     expect(isWebviewToExtensionMessage(gitAction({ action, target: HASH.slice(0, 8) }))).toBe(false);
     expect(isWebviewToExtensionMessage(gitAction({ action }))).toBe(false);
+  });
+
+  it.each(['resetMixed', 'resetHard'] as GitAction[])('requires a safe ref or full commit hash for %s', (action) => {
+    expect(isWebviewToExtensionMessage(gitAction({ action, target: HASH }))).toBe(true);
+    expect(isWebviewToExtensionMessage(gitAction({ action, target: SHA256 }))).toBe(true);
+    expect(isWebviewToExtensionMessage(gitAction({ action, target: 'refs/heads/main' }))).toBe(true);
+    expect(isWebviewToExtensionMessage(gitAction({ action, target: 'origin/main' }))).toBe(true);
+    expect(isWebviewToExtensionMessage(gitAction({ action }))).toBe(false);
+    expect(isWebviewToExtensionMessage(gitAction({ action, target: '--hard' }))).toBe(false);
+    expect(isWebviewToExtensionMessage(gitAction({ action, target: '-c' }))).toBe(false);
+    expect(isWebviewToExtensionMessage(gitAction({ action, target: 'HEAD~1' }))).toBe(true);
+    expect(isWebviewToExtensionMessage(gitAction({ action, target: HASH.slice(0, 8) }))).toBe(true);
   });
 
   it('rejects unknown, inherited and non-string actions', () => {

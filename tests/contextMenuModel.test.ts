@@ -90,13 +90,17 @@ const enabled = (entries: MenuEntry[]): string[] => entries.flatMap((e) => (e.ki
 describe('buildRefMenu: local branches', () => {
   it('offers the full branch menu', () => {
     expect(ids(buildRefMenu(snapshot, state(), branchRefTarget(feature)))).toEqual([
-      'checkout', 'merge', 'rebase', 'pull', 'push', 'fetch', 'createBranchHere', 'isolate', 'deleteBranch',
+      'checkout', 'merge', 'rebase', 'resetMixed', 'resetHard',
+      'pull', 'push', 'fetch', 'createBranchHere', 'isolate', 'deleteBranch',
     ]);
   });
 
   it('enables checkout, merge, rebase and delete for another branch, but not pull/push', () => {
     const menu = buildRefMenu(snapshot, state(), branchRefTarget(feature));
-    expect(enabled(menu)).toEqual(['checkout', 'merge', 'rebase', 'fetch', 'createBranchHere', 'isolate', 'deleteBranch']);
+    expect(enabled(menu)).toEqual([
+      'checkout', 'merge', 'rebase', 'resetMixed', 'resetHard',
+      'fetch', 'createBranchHere', 'isolate', 'deleteBranch',
+    ]);
     expect(item(menu, 'pull').reason).toMatch(/check out/i);
     expect(item(menu, 'merge').reason).toBeUndefined();
     expect(item(menu, 'merge').label).toBe('Merge into main');
@@ -107,7 +111,7 @@ describe('buildRefMenu: local branches', () => {
     for (const id of ['checkout', 'merge', 'rebase', 'deleteBranch'] as const) {
       expect(item(menu, id).enabled, id).toBe(false);
     }
-    expect(enabled(menu)).toEqual(['pull', 'push', 'fetch', 'createBranchHere', 'isolate']);
+    expect(enabled(menu)).toEqual(['resetMixed', 'resetHard', 'pull', 'push', 'fetch', 'createBranchHere', 'isolate']);
   });
 
   it('disables pull when the checked-out branch has no upstream, and labels push as Publish', () => {
@@ -124,6 +128,8 @@ describe('buildRefMenu: local branches', () => {
       expect(item(menu, id), id).toMatchObject({ enabled: false, reason: expect.stringMatching(/detached/i) });
     }
     expect(item(menu, 'checkout').enabled).toBe(true);
+    expect(item(menu, 'resetMixed')).toMatchObject({ enabled: false, reason: expect.stringMatching(/detached/i) });
+    expect(item(menu, 'resetHard')).toMatchObject({ enabled: false, reason: expect.stringMatching(/detached/i) });
   });
 
   it('disables merge for a branch that is already an ancestor of HEAD, but still allows rebase', () => {
@@ -148,7 +154,9 @@ describe('buildRefMenu: local branches', () => {
 describe('buildRefMenu: remote branches and tags', () => {
   it('offers a tracking checkout, merge and rebase for a remote branch, and never delete/pull/push', () => {
     const menu = buildRefMenu(snapshot, state(), branchRefTarget(originFeature));
-    expect(ids(menu)).toEqual(['checkoutRemote', 'merge', 'rebase', 'createBranchHere', 'isolate', 'fetch']);
+    expect(ids(menu)).toEqual([
+      'checkoutRemote', 'merge', 'rebase', 'resetMixed', 'resetHard', 'createBranchHere', 'isolate', 'fetch',
+    ]);
     expect(enabled(menu)).toEqual(ids(menu));
   });
 
@@ -158,14 +166,18 @@ describe('buildRefMenu: remote branches and tags', () => {
     expect(item(menu, 'merge').enabled).toBe(false);
     expect(item(menu, 'rebase').enabled).toBe(false);
     expect(item(menu, 'checkoutRemote').enabled).toBe(true);
+    expect(item(menu, 'resetMixed').enabled).toBe(false);
+    expect(item(menu, 'resetHard').enabled).toBe(false);
   });
 
   it('offers branch creation, merge and rebase for a tag', () => {
     const menu = buildRefMenu(snapshot, state(), tagRefTarget(snapshot.tags[0]));
-    expect(ids(menu)).toEqual(['createBranchHere', 'merge', 'rebase']);
+    expect(ids(menu)).toEqual(['createBranchHere', 'merge', 'rebase', 'resetMixed', 'resetHard']);
     // The tag sits on HEAD's ancestry, so merging it would be a no-op.
     expect(item(menu, 'merge')).toMatchObject({ enabled: false, reason: expect.stringMatching(/already/i) });
     expect(item(menu, 'rebase').enabled).toBe(true);
+    expect(item(menu, 'resetMixed').enabled).toBe(true);
+    expect(item(menu, 'resetHard').enabled).toBe(true);
   });
 });
 
@@ -191,10 +203,11 @@ describe('buildCommitMenu', () => {
     }
   });
 
-  it('disables cherry-pick and revert for merge commits', () => {
+  it('offers enabled mainline-1 merge revert for merge commits', () => {
     const menu = buildCommitMenu(snapshot, state(), find(G));
     expect(item(menu, 'cherryPick')).toMatchObject({ enabled: false, reason: expect.stringMatching(/merge/i) });
-    expect(item(menu, 'revert')).toMatchObject({ enabled: false, reason: expect.stringMatching(/merge/i) });
+    expect(item(menu, 'revertMerge')).toMatchObject({ enabled: true, label: 'Revert Merge Commit (Mainline 1)…' });
+    expect(ids(menu)).not.toContain('revert');
   });
 
   it('disables cherry-pick and revert before the first commit exists', () => {
@@ -202,6 +215,19 @@ describe('buildCommitMenu', () => {
     const menu = buildCommitMenu(unborn, state({ snapshot: unborn }), unborn.commits[0]);
     expect(item(menu, 'cherryPick').enabled).toBe(false);
     expect(item(menu, 'revert').enabled).toBe(false);
+    expect(item(menu, 'resetMixed').enabled).toBe(false);
+    expect(item(menu, 'resetHard').enabled).toBe(false);
+  });
+
+  it('offers both reset modes with branch labels and blocks them on detached HEAD', () => {
+    const menu = buildCommitMenu(snapshot, state(), find(C));
+    expect(item(menu, 'resetMixed')).toMatchObject({ enabled: true, label: 'Reset main Here — Keep Changes (--mixed)…' });
+    expect(item(menu, 'resetHard')).toMatchObject({ enabled: true, label: 'Reset main Here — Delete Changes (--hard)…' });
+
+    const detached: RepoSnapshot = { ...snapshot, isDetachedHead: true };
+    const detachedMenu = buildCommitMenu(detached, state({ snapshot: detached }), find(C));
+    expect(item(detachedMenu, 'resetMixed').enabled).toBe(false);
+    expect(item(detachedMenu, 'resetHard').enabled).toBe(false);
   });
 
   it('gates the integrations on what is available', () => {

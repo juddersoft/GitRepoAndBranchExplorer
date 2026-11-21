@@ -10,8 +10,11 @@ export type GitAction =
   | 'rebase'
   | 'cherryPick'
   | 'revert'
+  | 'revertMerge'
   | 'deleteBranch'
-  | 'checkoutRemoteBranch';
+  | 'checkoutRemoteBranch'
+  | 'resetMixed'
+  | 'resetHard';
 
 export const GIT_ACTION_LABELS: Readonly<Record<GitAction, string>> = {
   fetch: 'Fetch',
@@ -23,12 +26,15 @@ export const GIT_ACTION_LABELS: Readonly<Record<GitAction, string>> = {
   rebase: 'Rebase',
   cherryPick: 'Cherry-Pick',
   revert: 'Revert',
+  revertMerge: 'Revert Merge Commit',
   deleteBranch: 'Delete Branch',
   checkoutRemoteBranch: 'Check Out as Local Branch',
+  resetMixed: 'Reset (Keep Changes)',
+  resetHard: 'Reset (Delete Changes)',
 };
 
 /** What a `gitAction` must carry in `target`: nothing, a ref name (branch/tag), or a full commit hash. */
-export type GitActionTargetKind = 'none' | 'ref' | 'commit';
+export type GitActionTargetKind = 'none' | 'ref' | 'commit' | 'refOrCommit';
 
 export const GIT_ACTION_TARGETS: Readonly<Record<GitAction, GitActionTargetKind>> = {
   fetch: 'none',
@@ -40,8 +46,11 @@ export const GIT_ACTION_TARGETS: Readonly<Record<GitAction, GitActionTargetKind>
   rebase: 'ref',
   cherryPick: 'commit',
   revert: 'commit',
+  revertMerge: 'commit',
   deleteBranch: 'ref',
   checkoutRemoteBranch: 'ref',
+  resetMixed: 'refOrCommit',
+  resetHard: 'refOrCommit',
 };
 
 export interface GitActionPayload {
@@ -210,6 +219,8 @@ function isValidGitActionPayload(payload: Record<string, unknown> | null): boole
       return isSafeRefArgument(target);
     case 'commit':
       return isCommitHash(target);
+    case 'refOrCommit':
+      return isCommitHash(target) || isSafeRefArgument(target);
   }
 }
 
@@ -230,7 +241,7 @@ export function isWebviewToExtensionMessage(value: unknown): value is WebviewToE
       return true;
     case 'checkoutBranch': {
       const branchName = payload === null ? undefined : ownField(payload, 'branchName');
-      return typeof branchName === 'string' && branchName.length > 0 && branchName.length <= MAX_BRANCH_NAME_LENGTH;
+      return isSafeRefArgument(branchName);
     }
     case 'syncState':
       return isSyncStatePayload(payload);

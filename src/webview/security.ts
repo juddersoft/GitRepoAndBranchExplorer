@@ -11,6 +11,11 @@ export function getNonce(): string {
 export function buildContentSecurityPolicy(cspSource: string, nonce: string): string {
   return [
     "default-src 'none'",
+    "base-uri 'none'",
+    "form-action 'none'",
+    "frame-ancestors 'none'",
+    "object-src 'none'",
+    "connect-src 'none'",
     `style-src ${cspSource}`,
     `img-src ${cspSource} data:`,
     `font-src ${cspSource}`,

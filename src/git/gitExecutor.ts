@@ -9,6 +9,7 @@ export class GitExecutionError extends Error {
     public readonly code: GitErrorCode,
     public readonly exitCode: number | null,
     public readonly stderr: string,
+    public readonly outputLimitExceeded = false,
   ) {
     super(message);
     this.name = 'GitExecutionError';
@@ -17,9 +18,13 @@ export class GitExecutionError extends Error {
 
 export interface ExecGitOptions {
   timeoutMs?: number;
+  maxStdoutBytes?: number;
+  maxStderrBytes?: number;
 }
 
 export const DEFAULT_GIT_TIMEOUT_MS = 15_000;
+export const DEFAULT_MAX_STDOUT_BYTES = 16 * 1024 * 1024;
+export const DEFAULT_MAX_STDERR_BYTES = 1 * 1024 * 1024;
 
 const UNSAFE_REF_SEQUENCES: readonly string[] = ['..', '@{', '~', '^', ':', '?', '*', '[', '\\'];
 
@@ -91,13 +96,17 @@ function classifySpawnError(err: NodeJS.ErrnoException, cwd: string): GitExecuti
 /** Runs git with an argument vector (no shell) and resolves with UTF-8 stdout. */
 export function execGit(args: readonly string[], cwd: string, options: ExecGitOptions = {}): Promise<string> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS;
+  const maxStdoutBytes = options.maxStdoutBytes ?? DEFAULT_MAX_STDOUT_BYTES;
+  const maxStderrBytes = options.maxStderrBytes ?? DEFAULT_MAX_STDERR_BYTES;
 
   return new Promise<string>((resolve, reject) => {
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
     let settled = false;
 
-    const child = spawn('git', ['-c', 'color.ui=false', ...args], {
+    const child = spawn('git', ['-c', 'color.ui=false', '-c', 'protocol.ext.allow=never', ...args], {
       cwd,
       windowsHide: true,
       shell: false,
@@ -134,8 +143,41 @@ export function execGit(args: readonly string[], cwd: string, options: ExecGitOp
       action();
     }
 
-    child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
-    child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
+    function rejectForOutputLimit(stream: 'stdout' | 'stderr', limit: number): void {
+      settle(() => {
+        child.kill();
+        reject(
+          new GitExecutionError(
+            `git ${args[0] ?? ''} ${stream} output limit exceeded (${limit} bytes).`,
+            'COMMAND_FAILED',
+            null,
+            decode(stderr),
+            true,
+          ),
+        );
+      });
+    }
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      if (settled) {
+        return;
+      }
+      stdout.push(chunk);
+      stdoutBytes += chunk.length;
+      if (stdoutBytes > maxStdoutBytes) {
+        rejectForOutputLimit('stdout', maxStdoutBytes);
+      }
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      if (settled) {
+        return;
+      }
+      stderr.push(chunk);
+      stderrBytes += chunk.length;
+      if (stderrBytes > maxStderrBytes) {
+        rejectForOutputLimit('stderr', maxStderrBytes);
+      }
+    });
     child.on('error', (err: NodeJS.ErrnoException) => settle(() => reject(classifySpawnError(err, cwd))));
     child.on('close', (exitCode: number | null) =>
       settle(() => {

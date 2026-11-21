@@ -360,7 +360,7 @@ export class GitService {
   public async getFileContentAtRevision(repoRoot: string, revSpec: string): Promise<string> {
     const spec = validateRevSpec(revSpec);
     try {
-      return await this.runGit(['show', spec], repoRoot);
+      return await this.runGit(['show', spec], repoRoot, { maxStdoutBytes: 4 * 1024 * 1024 });
     } catch (err) {
       if (
         err instanceof GitExecutionError &&
@@ -448,6 +448,27 @@ export class GitService {
 
   public async revertCommit(repoRoot: string, hash: string): Promise<void> {
     await this.runGit(['revert', '--no-edit', assertCommitHash(hash)], repoRoot, { timeoutMs: WORKTREE_GIT_TIMEOUT_MS });
+  }
+
+  public async revertMergeCommit(repoRoot: string, hash: string, mainline = 1): Promise<void> {
+    const normalizedHash = assertCommitHash(hash);
+    if (!Number.isInteger(mainline) || mainline < 1) {
+      throw new Error('Merge mainline parent must be a positive integer.');
+    }
+    await this.runGit(
+      ['revert', '--no-edit', '-m', String(mainline), normalizedHash],
+      repoRoot,
+      { timeoutMs: WORKTREE_GIT_TIMEOUT_MS },
+    );
+  }
+
+  public async resetCurrentBranch(repoRoot: string, target: string, mode: 'mixed' | 'hard'): Promise<void> {
+    const validatedTarget = isValidCommitHash(target) ? target.toLowerCase() : validateGitRef(target);
+    await this.runGit(
+      ['reset', mode === 'hard' ? '--hard' : '--mixed', validatedTarget],
+      repoRoot,
+      { timeoutMs: WORKTREE_GIT_TIMEOUT_MS },
+    );
   }
 
   /** `-d` refuses unmerged branches; `-D` (force) deletes regardless. */

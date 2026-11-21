@@ -3,6 +3,19 @@
 All notable changes to **Git Repo & Branch Explorer** are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [1.4.0] - 2026-11-21
+
+### Added
+- Visual Studio-style Reset from branch, remote, tag and commit context menus, with safe `--mixed` Keep Changes and explicitly confirmed `--hard` Delete Changes modes.
+- Merge-commit revert through `git revert -m 1`, with modal confirmation preserving first-parent history.
+
+## [1.3.1] - 2026-11-21
+
+### Security
+- Disable extension operation in untrusted workspaces and restrict read-only Git diff content to an allowlist of loaded repository roots.
+- Disable Git's `ext::` transport, enforce stdout/stderr size limits, cap revision file reads, and harden the webview Content Security Policy.
+- Add an isolated Extension Development Host launch profile that disables other extensions.
+
 ## [1.3.0] - 2026-11-21
 
 ### Added

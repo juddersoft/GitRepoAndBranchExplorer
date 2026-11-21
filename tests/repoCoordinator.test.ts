@@ -12,6 +12,20 @@ const mocks = vi.hoisted(() => ({
   showInformationMessage: vi.fn(),
   fetchTrackedBranches: vi.fn(),
   pullCurrentBranch: vi.fn(),
+  fetchAll: vi.fn(),
+  pushCurrentBranch: vi.fn(),
+  createBranch: vi.fn(),
+  mergeBranch: vi.fn(),
+  rebaseOnto: vi.fn(),
+  cherryPickCommit: vi.fn(),
+  revertCommit: vi.fn(),
+  deleteLocalBranch: vi.fn(),
+  checkoutRemoteBranch: vi.fn(),
+  resetCurrentBranch: vi.fn(),
+  revertMergeCommit: vi.fn(),
+  openCommitFileDiff: vi.fn(),
+  isTrusted: true,
+  trustGrantedListeners: [] as Array<() => void>,
 }));
 
 vi.mock('vscode', () => {
@@ -19,7 +33,14 @@ vi.mock('vscode', () => {
   return {
     workspace: {
       workspaceFolders: [{ name: 'repo', uri: { fsPath: '/repo' } }],
+      get isTrusted(): boolean {
+        return mocks.isTrusted;
+      },
       onDidChangeWorkspaceFolders: () => disposable,
+      onDidGrantWorkspaceTrust: (listener: () => void) => {
+        mocks.trustGrantedListeners.push(listener);
+        return disposable;
+      },
       createFileSystemWatcher: () => ({
         onDidCreate: () => disposable,
         onDidChange: () => disposable,
@@ -47,11 +68,22 @@ vi.mock('../src/git/gitService', () => ({
     getCommitDetails = mocks.getCommitDetails;
     fetchTrackedBranches = mocks.fetchTrackedBranches;
     pullCurrentBranch = mocks.pullCurrentBranch;
+    fetchAll = mocks.fetchAll;
+    pushCurrentBranch = mocks.pushCurrentBranch;
+    createBranch = mocks.createBranch;
+    mergeBranch = mocks.mergeBranch;
+    rebaseOnto = mocks.rebaseOnto;
+    cherryPickCommit = mocks.cherryPickCommit;
+    revertCommit = mocks.revertCommit;
+    deleteLocalBranch = mocks.deleteLocalBranch;
+    checkoutRemoteBranch = mocks.checkoutRemoteBranch;
+    resetCurrentBranch = mocks.resetCurrentBranch;
+    revertMergeCommit = mocks.revertMergeCommit;
   },
   isValidCommitHash: (value: string): boolean => /^[0-9a-f]{40}$/i.test(value),
 }));
 vi.mock('../src/github/githubService', () => ({ GitHubService: class {} }));
-vi.mock('../src/git/gitDiffProvider', () => ({ openCommitFileDiff: vi.fn() }));
+vi.mock('../src/git/gitDiffProvider', () => ({ openCommitFileDiff: mocks.openCommitFileDiff }));
 vi.mock('../src/git/gitGraphInterop', () => ({ findGitGraphExtensionId: () => null, openInGitGraph: vi.fn() }));
 
 import type { RepoCoordinatorHost, SurfaceId, WebviewSurface } from '../src/webview/RepoCoordinator';
@@ -88,6 +120,20 @@ function makeSnapshot(branches: BranchInfo[]): RepoSnapshot {
   };
 }
 
+function commitNode(hash: string): RepoSnapshot['commits'][number] {
+  return {
+    hash,
+    shortHash: hash.slice(0, 8),
+    parents: [],
+    subject: 'commit',
+    authorName: 'Ada',
+    authorEmail: 'ada@example.com',
+    authorDateIso: '2023-11-14T22:13:20+00:00',
+    authorTimestamp: 1700000000,
+    refs: [],
+  };
+}
+
 const MAIN_AND_FEATURE = (): RepoSnapshot => makeSnapshot([branch('main', true), branch('feature', false)]);
 
 interface FakeSurface extends WebviewSurface {
@@ -119,6 +165,8 @@ describe('RepoCoordinator', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.isTrusted = true;
+    mocks.trustGrantedListeners.length = 0;
     mocks.getRepoSnapshot.mockImplementation(async () => MAIN_AND_FEATURE());
     mocks.getGitHubRemoteUrl.mockResolvedValue(null);
     mocks.checkoutBranch.mockResolvedValue(undefined);
@@ -148,6 +196,194 @@ describe('RepoCoordinator', () => {
     }
     expect(sidebar.ofType('repoSnapshot')[0]).toEqual(editor.ofType('repoSnapshot')[0]);
     expect(host.onCurrentBranchChange).toHaveBeenCalledWith('main');
+  });
+
+  it('does not load or run Git commands in an untrusted workspace, then retries after trust', async () => {
+    mocks.isTrusted = false;
+    coordinator.attach(sidebar);
+    coordinator.handleMessage('sidebar', { type: 'webviewReady' });
+
+    expect(mocks.getRepoSnapshot).not.toHaveBeenCalled();
+    expect(sidebar.ofType('repoError')).toContainEqual({
+      type: 'repoError',
+      payload: { code: 'UNTRUSTED_WORKSPACE', message: expect.stringContaining('Trust this workspace') },
+    });
+
+    mocks.isTrusted = true;
+    for (const listener of mocks.trustGrantedListeners) {
+      listener();
+    }
+    await vi.waitFor(() => expect(mocks.getRepoSnapshot).toHaveBeenCalledTimes(1));
+  });
+
+  it('blocks every refresh, mutation, detail and diff request while untrusted and clears diff authorization', async () => {
+    mocks.isTrusted = false;
+    const diffProvider = {
+      setAllowedRepoRoots: vi.fn(),
+      clearAllowedRepoRoots: vi.fn(),
+    };
+    coordinator = new RepoCoordinator(host, diffProvider as never);
+    coordinator.attach(sidebar);
+
+    coordinator.handleMessage('sidebar', { type: 'requestRefresh' });
+    coordinator.handleMessage('sidebar', { type: 'checkoutBranch', payload: { branchName: 'main' } });
+    for (const action of [
+      'fetch',
+      'fetchTracked',
+      'pull',
+      'push',
+      'createBranch',
+      'merge',
+      'rebase',
+      'cherryPick',
+      'revert',
+      'revertMerge',
+      'deleteBranch',
+      'checkoutRemoteBranch',
+      'resetMixed',
+      'resetHard',
+    ]) {
+      coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload:
+          action === 'merge' || action === 'rebase' || action === 'deleteBranch' || action === 'checkoutRemoteBranch'
+            ? { action, target: 'main' }
+            : action === 'cherryPick' || action === 'revert'
+              ? { action, target: sha('a') }
+              : action === 'revertMerge' || action === 'resetMixed' || action === 'resetHard'
+                ? { action, target: sha('a') }
+              : { action },
+      });
+    }
+    coordinator.handleMessage('sidebar', { type: 'requestCommitDetails', payload: { hash: sha('a') } });
+    coordinator.handleMessage('sidebar', {
+      type: 'openFileDiff',
+      payload: { hash: sha('a'), filePath: 'src/a.ts', status: 'M' },
+    });
+
+    expect(mocks.getRepoSnapshot).not.toHaveBeenCalled();
+    for (const method of [
+      mocks.checkoutBranch,
+      mocks.fetchAll,
+      mocks.fetchTrackedBranches,
+      mocks.pullCurrentBranch,
+      mocks.pushCurrentBranch,
+      mocks.createBranch,
+      mocks.mergeBranch,
+      mocks.rebaseOnto,
+      mocks.cherryPickCommit,
+      mocks.revertCommit,
+      mocks.deleteLocalBranch,
+      mocks.checkoutRemoteBranch,
+      mocks.resetCurrentBranch,
+      mocks.revertMergeCommit,
+      mocks.getCommitDetails,
+      mocks.openCommitFileDiff,
+    ]) {
+      expect(method).not.toHaveBeenCalled();
+    }
+    expect(diffProvider.clearAllowedRepoRoots).toHaveBeenCalled();
+    expect(sidebar.ofType('repoError')).not.toHaveLength(0);
+  });
+
+  it('aborts reset when the modal is cancelled', async () => {
+    await openBoth();
+    mocks.showWarningMessage.mockResolvedValueOnce(undefined);
+
+    coordinator.handleMessage('sidebar', {
+      type: 'gitAction',
+      payload: { action: 'resetHard', target: 'refs/heads/feature' },
+    });
+    await vi.waitFor(() => expect(mocks.showWarningMessage).toHaveBeenCalledWith(
+      expect.stringContaining('permanently discarded'),
+      { modal: true },
+      'Delete Changes (--hard)',
+    ));
+    expect(mocks.resetCurrentBranch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['resetMixed', 'mixed', 'Reset (Keep Changes)'],
+    ['resetHard', 'hard', 'Delete Changes (--hard)'],
+  ] as const)('confirms %s and resolves the canonical ref before Git', async (action, mode, button) => {
+    await openBoth();
+    mocks.showWarningMessage.mockResolvedValueOnce(button);
+
+    coordinator.handleMessage('sidebar', {
+      type: 'gitAction',
+      payload: { action, target: 'refs/heads/feature' },
+    });
+    await vi.waitFor(() => expect(mocks.resetCurrentBranch).toHaveBeenCalledWith('/repo', 'refs/heads/feature', mode));
+  });
+
+  it('blocks reset on detached HEAD', async () => {
+    const detached = { ...MAIN_AND_FEATURE(), isDetachedHead: true };
+    mocks.getRepoSnapshot.mockImplementation(async () => detached);
+    await openBoth();
+
+    coordinator.handleMessage('sidebar', {
+      type: 'gitAction',
+      payload: { action: 'resetMixed', target: 'refs/heads/feature' },
+    });
+    await vi.waitFor(() => expect(mocks.showWarningMessage).toHaveBeenCalledWith(
+      'Check out a branch before resetting the current branch.',
+    ));
+    expect(mocks.resetCurrentBranch).not.toHaveBeenCalled();
+  });
+
+  it('rejects revertMerge for a non-merge commit', async () => {
+    const snap = {
+      ...MAIN_AND_FEATURE(),
+      commits: [{ ...commitNode(sha('c')), parents: [sha('a')] }],
+    };
+    mocks.getRepoSnapshot.mockImplementation(async () => snap);
+    await openBoth();
+
+    coordinator.handleMessage('editor', {
+      type: 'gitAction',
+      payload: { action: 'revertMerge', target: sha('c') },
+    });
+    await vi.waitFor(() => expect(mocks.showWarningMessage).toHaveBeenCalledWith(
+      'Revert Merge requires a merge commit from the loaded repository history.',
+    ));
+    expect(mocks.revertMergeCommit).not.toHaveBeenCalled();
+  });
+
+  it('confirms and executes merge revert with mainline 1', async () => {
+    const snap = {
+      ...MAIN_AND_FEATURE(),
+      commits: [{ ...commitNode(sha('c')), parents: [sha('a'), sha('b')] }],
+    };
+    mocks.getRepoSnapshot.mockImplementation(async () => snap);
+    await openBoth();
+    mocks.showWarningMessage.mockResolvedValueOnce('Revert Merge');
+
+    coordinator.handleMessage('editor', {
+      type: 'gitAction',
+      payload: { action: 'revertMerge', target: sha('c') },
+    });
+    await vi.waitFor(() => expect(mocks.revertMergeCommit).toHaveBeenCalledWith('/repo', sha('c'), 1));
+  });
+
+  it('aborts merge revert when confirmation is cancelled', async () => {
+    const snap = {
+      ...MAIN_AND_FEATURE(),
+      commits: [{ ...commitNode(sha('c')), parents: [sha('a'), sha('b')] }],
+    };
+    mocks.getRepoSnapshot.mockImplementation(async () => snap);
+    await openBoth();
+    mocks.showWarningMessage.mockResolvedValueOnce(undefined);
+
+    coordinator.handleMessage('editor', {
+      type: 'gitAction',
+      payload: { action: 'revertMerge', target: sha('c') },
+    });
+    await vi.waitFor(() => expect(mocks.showWarningMessage).toHaveBeenCalledWith(
+      expect.stringContaining('mainline parent 1'),
+      { modal: true },
+      'Revert Merge',
+    ));
+    expect(mocks.revertMergeCommit).not.toHaveBeenCalled();
   });
 
   it('forwards a selection to the other view only, never echoing it to the sender', async () => {

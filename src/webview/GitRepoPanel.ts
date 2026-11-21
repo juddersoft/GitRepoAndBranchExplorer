@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import type { GitShowContentProvider } from '../git/gitDiffProvider';
 import { AUTO_CLOSE_DELAY_MS, decideAutoClose } from './panelLifecycle';
 import type { WebviewSurface } from './RepoCoordinator';
 import { RepoCoordinator } from './RepoCoordinator';
@@ -37,15 +38,18 @@ export class GitRepoPanel {
    * Restores the persisted pin, creates the coordinator shared with the sidebar view and watches window
    * focus so a deferred auto-close can still happen.
    */
-  public static initialize(context: vscode.ExtensionContext): RepoCoordinator {
+  public static initialize(context: vscode.ExtensionContext, gitDiffProvider: GitShowContentProvider): RepoCoordinator {
     GitRepoPanel.pinStore = context.globalState;
     GitRepoPanel.tabPinned = context.globalState.get<boolean>(TAB_PINNED_KEY, false);
-    const coordinator = new RepoCoordinator({
-      getTabPinned: () => GitRepoPanel.tabPinned,
-      setTabPinned: (pinned) => GitRepoPanel.setTabPinned(pinned),
-      openPanel: () => void GitRepoPanel.createOrShow(context.extensionUri),
-      onCurrentBranchChange: (currentBranch) => GitRepoPanel.currentPanel?.setBranchTitle(currentBranch),
-    });
+    const coordinator = new RepoCoordinator(
+      {
+        getTabPinned: () => GitRepoPanel.tabPinned,
+        setTabPinned: (pinned) => GitRepoPanel.setTabPinned(pinned),
+        openPanel: () => void GitRepoPanel.createOrShow(context.extensionUri),
+        onCurrentBranchChange: (currentBranch) => GitRepoPanel.currentPanel?.setBranchTitle(currentBranch),
+      },
+      gitDiffProvider,
+    );
     GitRepoPanel.coordinator = coordinator;
     context.subscriptions.push(
       coordinator,

@@ -19,6 +19,9 @@ export type MenuActionId =
   | 'deleteBranch'
   | 'cherryPick'
   | 'revert'
+  | 'revertMerge'
+  | 'resetMixed'
+  | 'resetHard'
   | 'copyHash'
   | 'openGitGraph'
   | 'openGitHub';
@@ -59,6 +62,7 @@ export function buildRefMenu(snapshot: RepoSnapshot, state: ExplorerUiState, tar
   const busy = state.isBusy && BUSY_REASON;
   const detached = snapshot.isDetachedHead;
   const isCheckedOut = target.kind === 'local' && target.branch?.isCurrent === true;
+  const hasCurrentBranch = !detached && snapshot.localBranches.some((branch) => branch.isCurrent);
   const currentName = detached ? 'Current Branch' : snapshot.currentBranch;
 
   const integrateReason = (alreadyMergedCheck: boolean): string | undefined =>
@@ -72,9 +76,18 @@ export function buildRefMenu(snapshot: RepoSnapshot, state: ExplorerUiState, tar
   const merge = item('merge', `Merge into ${currentName}`, integrateReason(true));
   const rebase = item('rebase', `Rebase ${currentName} onto This`, integrateReason(false));
   const createBranch = item('createBranchHere', 'Create Branch from Here\u2026', firstReason(busy));
+  const resetReason = firstReason(
+    busy,
+    detached && DETACHED_REASON,
+    !hasCurrentBranch && 'No branch is checked out.',
+  );
+  const resetEntries = [
+    item('resetMixed', `Reset ${currentName} to Here — Keep Changes (--mixed)…`, resetReason),
+    item('resetHard', `Reset ${currentName} to Here — Delete Changes (--hard)…`, resetReason),
+  ];
 
   if (target.kind === 'tag') {
-    return [createBranch, SEPARATOR, merge, rebase];
+    return [createBranch, SEPARATOR, merge, rebase, SEPARATOR, ...resetEntries];
   }
 
   const isolate = item(
@@ -88,6 +101,8 @@ export function buildRefMenu(snapshot: RepoSnapshot, state: ExplorerUiState, tar
       SEPARATOR,
       merge,
       rebase,
+      SEPARATOR,
+      ...resetEntries,
       SEPARATOR,
       createBranch,
       isolate,
@@ -104,6 +119,8 @@ export function buildRefMenu(snapshot: RepoSnapshot, state: ExplorerUiState, tar
     SEPARATOR,
     merge,
     rebase,
+    SEPARATOR,
+    ...resetEntries,
     SEPARATOR,
     item('pull', 'Pull', firstReason(busy, notCurrent, !hasUpstream && 'No upstream branch is configured.')),
     item('push', hasUpstream ? 'Push' : 'Publish Branch', firstReason(busy, notCurrent)),
@@ -151,6 +168,13 @@ export function buildCommitMenu(snapshot: RepoSnapshot, state: ExplorerUiState, 
   const busy = state.isBusy && BUSY_REASON;
   const noHead = getHeadHash(snapshot) === null && 'No commit is checked out yet.';
   const isMerge = commit.parents.length > 1;
+  const hasCurrentBranch = !snapshot.isDetachedHead && snapshot.localBranches.some((branch) => branch.isCurrent);
+  const currentLabel = snapshot.isDetachedHead ? 'Current Branch' : snapshot.currentBranch;
+  const resetReason = firstReason(
+    busy,
+    snapshot.isDetachedHead && DETACHED_REASON,
+    !hasCurrentBranch && 'No branch is checked out.',
+  );
 
   return [
     item('copyHash', 'Copy Commit Hash'),
@@ -166,7 +190,12 @@ export function buildCommitMenu(snapshot: RepoSnapshot, state: ExplorerUiState, 
         !noHead && isAncestorOfHead(snapshot, commit.hash) && 'Already part of the current branch history.',
       ),
     ),
-    item('revert', 'Revert', firstReason(busy, noHead, isMerge && 'Merge commits cannot be reverted here.')),
+    isMerge
+      ? item('revertMerge', 'Revert Merge Commit (Mainline 1)…', firstReason(busy, noHead))
+      : item('revert', 'Revert', firstReason(busy, noHead)),
+    SEPARATOR,
+    item('resetMixed', `Reset ${currentLabel} Here — Keep Changes (--mixed)…`, resetReason),
+    item('resetHard', `Reset ${currentLabel} Here — Delete Changes (--hard)…`, resetReason),
     SEPARATOR,
     item('openGitGraph', 'Open in Git Graph', state.integrations.gitGraphAvailable ? undefined : 'The Git Graph extension is not installed.'),
     item('openGitHub', 'Open on GitHub', state.integrations.githubRemoteUrl !== null ? undefined : 'This repository has no GitHub remote.'),

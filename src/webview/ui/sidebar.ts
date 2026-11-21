@@ -61,6 +61,10 @@ function runRefMenuAction(id: MenuActionId, target: RefTarget): void {
     case 'deleteBranch':
       postGitAction(id === 'checkoutRemote' ? 'checkoutRemoteBranch' : id, target.name);
       break;
+    case 'resetMixed':
+    case 'resetHard':
+      postGitAction(id, target.fullName);
+      break;
     case 'pull':
     case 'push':
     case 'fetch':
