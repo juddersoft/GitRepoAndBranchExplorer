@@ -3,6 +3,12 @@
 All notable changes to **Git Repo & Branch Explorer** are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [1.4.4] - 2026-11-24
+
+### Changed
+- Polished the `README.md` presentation with Marketplace/Open VSX-ready screenshots and a concise feature walkthrough.
+- Excluded `media/screenshots/**` from the `.vsix` package through `.vscodeignore`, keeping extension packages lightweight.
+
 ## [1.4.3] - 2026-11-21
 
 ### Changed

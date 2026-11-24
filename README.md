@@ -1,8 +1,47 @@
 # Git Repo & Branch Explorer
 
-A Visual Studio-style **Git Repository** window for VS Code: the branch, remote and tag tree lives in the Activity Bar sidebar, while a multi-lane commit graph, history table and commit details with one-click file diffs open in an editor tab next to it. Both stay in sync.
+A Visual Studio-unified **Git Repository** window, natively for VS Code, Cursor, Windsurf, and VSCodium.
 
-![Git Repo & Branch Explorer icon](media/icon.png)
+![Git Repo & Branch Explorer overview](https://raw.githubusercontent.com/juddersoft/GitRepoAndBranchExplorer/main/media/screenshots/hero-overview.png)
+
+## Key Highlights
+
+- Native Activity Bar sidebar plus a far-left, synchronized editor timeline.
+- Multi-lane SVG commit graph with draggable, persisted column widths.
+- Responsive **CHECKED OUT** pill that never obscures branch names.
+- Customizable VS Code `↓ ↑` / Visual Studio `↑ ↓` tracking counters.
+- Safe Reset `--mixed` / `--hard` modes and Merge-Commit Revert `-m 1`.
+- Read-only commit inspection and trust-gated side-by-side `vscode.diff` views.
+- Git Graph and GitHub integration.
+
+## Feature Walkthrough
+
+### Context menus
+
+![Contextual Git actions](https://raw.githubusercontent.com/juddersoft/GitRepoAndBranchExplorer/main/media/screenshots/context-menus.png)
+
+Contextual Git actions include Merge-Commit Revert `-m 1` and guarded Reset `--mixed` / `--hard`.
+
+### Commit details and diffs
+
+![Commit details and changed files](https://raw.githubusercontent.com/juddersoft/GitRepoAndBranchExplorer/main/media/screenshots/commit-details-diff.png)
+
+Commit Details and the Changed Files drawer support trust-gated side-by-side `vscode.diff` inspection.
+
+### Repository menu options
+
+![Repository menu customization](https://raw.githubusercontent.com/juddersoft/GitRepoAndBranchExplorer/main/media/screenshots/repo-menu-options.png)
+
+Customize the **CHECKED OUT** pill and switch counters between VS Code `↓ ↑` or Visual Studio `↑ ↓`.
+
+## Quick Install
+
+- **VS Code Marketplace:** [Install Git Repo & Branch Explorer](https://marketplace.visualstudio.com/items?itemName=juddersoft.git-repo-and-branch-explorer)
+- **Open VSX:** [Install Git Repo & Branch Explorer](https://open-vsx.org/extension/juddersoft/git-repo-and-branch-explorer)
+
+## Security & Workspace Trust
+
+Extension Git actions run only in trusted workspaces, with `protocol.ext.allow=never`. Git uses argument arrays with zero shell interpolation, and the extension collects zero telemetry.
 
 ## Features
 

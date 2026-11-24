@@ -17,6 +17,7 @@ esbuild.js
 **/*.ts
 **/*.map
 **/*.vsix
+media/screenshots/**
 
 # The webview stylesheet is loaded at runtime from src/webview/ui (see webviewResources.ts localResourceRoots).
 !src/webview/ui/styles.css
