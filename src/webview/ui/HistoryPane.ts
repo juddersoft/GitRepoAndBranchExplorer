@@ -232,6 +232,7 @@ export class HistoryPane {
   private visibleCommits: CommitNode[] = [];
   private isDetailsCollapsed = false;
   private lastState: ExplorerUiState | null = null;
+  private pendingRevealHash: string | null = null;
   private storedColumnWidths: StoredColumnWidths;
   /** Width the graph column needs for the lanes currently shown; it can never be dragged below this. */
   private activeGraphWidth = MIN_GRAPH_COLUMN_WIDTH;
@@ -425,9 +426,16 @@ export class HistoryPane {
     this.renderBreadcrumb(state);
     this.renderRows(state);
     this.renderDetails(state);
-    if (state.selectedCommitHash !== null && state.selectedCommitHash !== previousSelection) {
+    if (state.selectedCommitHash !== null && state.selectedCommitHash === this.pendingRevealHash) {
+      this.tbody.querySelector('tr.selected')?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      this.pendingRevealHash = null;
+    } else if (state.selectedCommitHash !== null && state.selectedCommitHash !== previousSelection) {
       this.tbody.querySelector('tr.selected')?.scrollIntoView({ block: 'nearest' });
     }
+  }
+
+  public revealCommit(hash: string): void {
+    this.pendingRevealHash = hash;
   }
 
   private renderBreadcrumb(state: ExplorerUiState): void {

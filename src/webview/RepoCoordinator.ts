@@ -115,7 +115,9 @@ const EMPTY_SELECTION: SyncStatePayload = { selectedBranchFullName: null, select
  */
 export class RepoCoordinator implements vscode.Disposable {
   private readonly surfaces = new Map<SurfaceId, WebviewSurface>();
+  private readonly readySurfaces = new Set<SurfaceId>();
   private readonly disposables: vscode.Disposable[] = [];
+  private readonly repositoryChangeListeners = new Set<(repoRoot: string | null) => void>();
   private readonly gitService = new GitService();
   private readonly githubService = new GitHubService();
   private loadSequence = 0;
@@ -133,6 +135,7 @@ export class RepoCoordinator implements vscode.Disposable {
   private gitWatcherSubscriptions: vscode.Disposable[] = [];
   private watchedRepoRoot: string | null = null;
   private watchDebounceTimer: ReturnType<typeof setTimeout> | undefined;
+  private pendingRevealCommitHash: string | null = null;
 
   constructor(
     private readonly host: RepoCoordinatorHost,
@@ -153,6 +156,7 @@ export class RepoCoordinator implements vscode.Disposable {
 
   /** Registers a view; a newer surface with the same id replaces the old one. */
   public attach(surface: WebviewSurface): void {
+    this.readySurfaces.delete(surface.id);
     this.surfaces.set(surface.id, surface);
   }
 
@@ -161,6 +165,7 @@ export class RepoCoordinator implements vscode.Disposable {
       return;
     }
     this.surfaces.delete(surface.id);
+    this.readySurfaces.delete(surface.id);
     if (this.surfaces.size === 0) {
       this.release();
     }
@@ -170,6 +175,27 @@ export class RepoCoordinator implements vscode.Disposable {
     void this.loadRepository();
   }
 
+  public onDidRepositoryChange(listener: (repoRoot: string | null) => void): vscode.Disposable {
+    this.repositoryChangeListeners.add(listener);
+    return new vscode.Disposable(() => this.repositoryChangeListeners.delete(listener));
+  }
+
+  public getActiveRepoRoot(): string | null {
+    return this.lastSnapshot?.repoRoot ?? null;
+  }
+
+  public getGithubRemoteUrl(): string | undefined {
+    return this.integrations.githubRemoteUrl ?? undefined;
+  }
+
+  public revealCommit(hash: string): void {
+    if (!isValidCommitHash(hash)) {
+      return;
+    }
+    this.pendingRevealCommitHash = hash.toLowerCase();
+    this.flushPendingRevealCommit();
+  }
+
   /** Handles an untrusted message from `source`; anything that is not a valid webview message is dropped. */
   public handleMessage(source: SurfaceId, message: unknown): void {
     if (!isWebviewToExtensionMessage(message)) {
@@ -177,7 +203,11 @@ export class RepoCoordinator implements vscode.Disposable {
     }
     switch (message.type) {
       case 'webviewReady':
+        this.readySurfaces.add(source);
         this.sendInitialState(source);
+        if (source === 'editor') {
+          this.flushPendingRevealCommit();
+        }
         break;
       case 'requestRefresh':
         void this.loadRepository();
@@ -294,9 +324,7 @@ export class RepoCoordinator implements vscode.Disposable {
   }
 
   private refreshIfAttached(): void {
-    if (this.surfaces.size > 0) {
-      void this.loadRepository();
-    }
+    void this.loadRepository();
   }
 
   /** No view is showing the repository any more: stop watching it and forget the transient state. */
@@ -306,6 +334,7 @@ export class RepoCoordinator implements vscode.Disposable {
     this.selection = EMPTY_SELECTION;
     this.gitDiffProvider?.clearAllowedRepoRoots();
     this.disposeGitWatcher();
+    this.notifyRepositoryChange(null);
   }
 
   private async runGitOperation(
@@ -848,9 +877,17 @@ export class RepoCoordinator implements vscode.Disposable {
     }
   }
 
-  private async openCommitOnGitHub(hash: string): Promise<void> {
+  public async openCommitOnGitHubByHash(hash: string): Promise<boolean> {
+    const normalizedHash = hash.toLowerCase();
+    if (!isValidCommitHash(normalizedHash) || !vscode.workspace.isTrusted) {
+      return false;
+    }
     const url = this.integrations.githubRemoteUrl;
-    if (url === null || !(await this.githubService.openCommit(url, hash))) {
+    return url !== null && this.githubService.openCommit(url, normalizedHash);
+  }
+
+  private async openCommitOnGitHub(hash: string): Promise<void> {
+    if (!(await this.openCommitOnGitHubByHash(hash))) {
       void vscode.window.showWarningMessage('This repository has no GitHub remote to open the commit on.');
     }
   }
@@ -890,7 +927,7 @@ export class RepoCoordinator implements vscode.Disposable {
   }
 
   private async loadRepository(): Promise<void> {
-    if (this.disposed || this.surfaces.size === 0) {
+    if (this.disposed) {
       return;
     }
     const sequence = ++this.loadSequence;
@@ -910,12 +947,13 @@ export class RepoCoordinator implements vscode.Disposable {
         type: 'repoError',
         payload: { code: 'NO_WORKSPACE', message: 'Open a folder that contains a Git repository.' },
       });
+      this.notifyRepositoryChange(null);
       return;
     }
 
     try {
       const snapshot = await this.gitService.getRepoSnapshot(initState.workspacePath);
-      // Drop results superseded by a newer refresh or arriving after every view closed.
+      // Drop results superseded by a newer refresh or disposed by extension shutdown.
       if (sequence !== this.loadSequence || this.disposed) {
         return;
       }
@@ -926,7 +964,12 @@ export class RepoCoordinator implements vscode.Disposable {
       this.updateGitWatcher(snapshot.repoRoot);
       this.host.onCurrentBranchChange(snapshot.currentBranch);
       this.broadcast({ type: 'repoSnapshot', payload: snapshot });
-      void this.publishIntegrations();
+      this.flushPendingRevealCommit();
+      await this.publishIntegrations();
+      if (sequence !== this.loadSequence || this.disposed) {
+        return;
+      }
+      this.notifyRepositoryChange(snapshot.repoRoot);
     } catch (err) {
       if (sequence !== this.loadSequence || this.disposed) {
         return;
@@ -936,6 +979,7 @@ export class RepoCoordinator implements vscode.Disposable {
       this.updateGitWatcher(null);
       this.host.onCurrentBranchChange(null);
       this.broadcast({ type: 'repoError', payload: toRepoErrorPayload(err) });
+      this.notifyRepositoryChange(null);
     }
   }
 
@@ -996,6 +1040,28 @@ export class RepoCoordinator implements vscode.Disposable {
       type: 'repoError',
       payload: { code: 'UNTRUSTED_WORKSPACE', message: WORKSPACE_TRUST_ERROR_MESSAGE },
     });
+    this.notifyRepositoryChange(null);
+  }
+
+  private flushPendingRevealCommit(): void {
+    const hash = this.pendingRevealCommitHash;
+    const panel = this.surfaces.get('editor');
+    if (
+      hash === null ||
+      panel === undefined ||
+      this.lastSnapshot === null ||
+      !this.readySurfaces.has('editor')
+    ) {
+      return;
+    }
+    panel.post({ type: 'revealCommit', payload: { hash } });
+    this.pendingRevealCommitHash = null;
+  }
+
+  private notifyRepositoryChange(repoRoot: string | null): void {
+    for (const listener of this.repositoryChangeListeners) {
+      listener(repoRoot);
+    }
   }
 
   private disposeGitWatcher(): void {
@@ -1020,7 +1086,9 @@ export class RepoCoordinator implements vscode.Disposable {
       return;
     }
     this.disposed = true;
+    this.repositoryChangeListeners.clear();
     this.surfaces.clear();
+    this.readySurfaces.clear();
     this.gitDiffProvider?.clearAllowedRepoRoots();
     this.disposeGitWatcher();
     while (this.disposables.length) {

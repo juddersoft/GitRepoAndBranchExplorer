@@ -8,6 +8,7 @@ import type { MenuActionId } from './contextMenuModel';
 import { buildCommitMenu } from './contextMenuModel';
 import { el } from './dom';
 import { HistoryPane } from './HistoryPane';
+import { computeVisibleCommits } from './state';
 import type { BadgeKindToggle, ExplorerUiState } from './state';
 import {
   cacheCommitDetails,
@@ -56,6 +57,7 @@ function readPersistedColumnWidths(raw: unknown): StoredColumnWidths {
 let state: ExplorerUiState = { ...createInitialState(), ...readPersistedState(vscode.getState()) };
 let columnWidths: StoredColumnWidths = readPersistedColumnWidths(vscode.getState());
 const knownRemoteNames = new Set<string>();
+let pendingRevealCommitHash: string | null = null;
 
 function persist(): void {
   const data: PersistedState = {
@@ -177,6 +179,37 @@ function requestRefresh(): void {
   vscode.postMessage({ type: 'requestRefresh' });
 }
 
+function applyRevealCommit(hash: string): void {
+  if (state.snapshot === null) {
+    pendingRevealCommitHash = hash;
+    return;
+  }
+  const commitExists = state.snapshot.commits.some((commit) => commit.hash === hash);
+  if (!commitExists) {
+    return;
+  }
+  const isVisible = computeVisibleCommits(state.snapshot, state)
+    .some((commit) => commit.hash === hash);
+  if (!isVisible) {
+    const selectionChanged =
+      state.selectedBranchFullName !== null ||
+      state.selectedBranchRef !== null ||
+      state.pinnedBranchFullNames.size > 0;
+    state = {
+      ...state,
+      selectedBranchFullName: null,
+      selectedBranchRef: null,
+      pinnedBranchFullNames: new Set(),
+      historyFilterText: '',
+    };
+    if (selectionChanged) {
+      vscode.postMessage({ type: 'syncState', payload: selectionFromState(state) });
+    }
+  }
+  historyPane.revealCommit(hash);
+  selectCommit(hash);
+}
+
 function handleMessage(message: ExtensionToWebviewMessage): void {
   switch (message.type) {
     case 'initState':
@@ -194,6 +227,11 @@ function handleMessage(message: ExtensionToWebviewMessage): void {
       render();
       pendingDetailRequests.clear();
       requestCommitDetailsIfNeeded(state.selectedCommitHash);
+      if (pendingRevealCommitHash !== null) {
+        const hash = pendingRevealCommitHash;
+        pendingRevealCommitHash = null;
+        applyRevealCommit(hash);
+      }
       break;
     case 'repoError':
       setState({ snapshot: null, errorMessage: message.payload.message, isLoading: false, selectedCommitHash: null });
@@ -212,6 +250,10 @@ function handleMessage(message: ExtensionToWebviewMessage): void {
       // Selection or isolation changed in the Activity Bar tree: focus the history on it.
       setState(selectionPatch(normalizeSelection(state.snapshot, message.payload)));
       break;
+    case 'revealCommit': {
+      applyRevealCommit(message.payload.hash);
+      break;
+    }
   }
 }
 

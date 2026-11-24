@@ -3,6 +3,16 @@
 All notable changes to **Git Repo & Branch Explorer** are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [1.5.0] - 2026-11-24
+
+### Added
+- Subtle, zero-bloat inline active-line Git blame, an optional Status Bar summary, and the **Toggle Inline Git Blame** command with `blame.enabled`, `blame.ignoreWhitespace`, and `blame.showStatusBar` settings.
+- Security-hardened Markdown blame hover cards with closed-loop **Reveal in Commit Timeline**, **Open File Diff**, **Copy Commit Hash**, and **Open on GitHub** actions.
+- Visual Studio-style **Toggle File Blame Gutter (Annotate)** command and editor right-click action, including hunk compression and six-level commit-age heat indicators.
+
+### Security
+- Bounded per-file LRU and single-flight blame caching stays synchronized with the `.git` watcher and remains gated by VS Code Workspace Trust.
+
 ## [1.4.4] - 2026-11-24
 
 ### Changed

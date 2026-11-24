@@ -13,6 +13,7 @@ A Visual Studio-unified **Git Repository** window, natively for VS Code, Cursor,
 - Safe Reset `--mixed` / `--hard` modes and Merge-Commit Revert `-m 1`.
 - Read-only commit inspection and trust-gated side-by-side `vscode.diff` views.
 - Git Graph and GitHub integration.
+- Subtle inline Git blame and status-bar summaries, with an on-demand blame gutter and bounded, trust-gated caching.
 
 ## Feature Walkthrough
 
@@ -27,6 +28,14 @@ Contextual Git actions include Merge-Commit Revert `-m 1` and guarded Reset `--m
 ![Commit details and changed files](https://raw.githubusercontent.com/juddersoft/GitRepoAndBranchExplorer/main/media/screenshots/commit-details-diff.png)
 
 Commit Details and the Changed Files drawer support trust-gated side-by-side `vscode.diff` inspection.
+
+### Git Blame & Visual Studio Annotate
+
+![Inline Git blame and hover](https://raw.githubusercontent.com/juddersoft/GitRepoAndBranchExplorer/main/media/screenshots/blame-inline-hover.png)
+
+![File blame gutter (annotate)](https://raw.githubusercontent.com/juddersoft/GitRepoAndBranchExplorer/main/media/screenshots/blame-annotate-gutter.png)
+
+Subtle active-line inline Git blame and a Status Bar summary can be toggled with **Toggle Inline Git Blame** and configured in Settings. The blame hover card provides **Reveal in Commit Timeline**, **Open File Diff**, **Copy Commit Hash**, and **Open on GitHub** (when a GitHub remote is available). Enable an on-demand **Toggle File Blame Gutter (Annotate)** from the Command Palette or editor right-click menu. This stays free of per-function CodeLens bloat, uses a bounded per-file LRU cache, and is gated by Workspace Trust.
 
 ### Repository menu options
 

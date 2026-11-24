@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => ({
   resetCurrentBranch: vi.fn(),
   revertMergeCommit: vi.fn(),
   openCommitFileDiff: vi.fn(),
+  openGitHubCommit: vi.fn(),
   isTrusted: true,
   trustGrantedListeners: [] as Array<() => void>,
 }));
@@ -31,6 +32,12 @@ const mocks = vi.hoisted(() => ({
 vi.mock('vscode', () => {
   const disposable = { dispose: (): void => undefined };
   return {
+    Disposable: class {
+      constructor(private readonly callback: () => void) {}
+      dispose(): void {
+        this.callback();
+      }
+    },
     workspace: {
       workspaceFolders: [{ name: 'repo', uri: { fsPath: '/repo' } }],
       get isTrusted(): boolean {
@@ -80,9 +87,13 @@ vi.mock('../src/git/gitService', () => ({
     resetCurrentBranch = mocks.resetCurrentBranch;
     revertMergeCommit = mocks.revertMergeCommit;
   },
-  isValidCommitHash: (value: string): boolean => /^[0-9a-f]{40}$/i.test(value),
+  isValidCommitHash: (value: string): boolean => /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value),
 }));
-vi.mock('../src/github/githubService', () => ({ GitHubService: class {} }));
+vi.mock('../src/github/githubService', () => ({
+  GitHubService: class {
+    openCommit = mocks.openGitHubCommit;
+  },
+}));
 vi.mock('../src/git/gitDiffProvider', () => ({ openCommitFileDiff: mocks.openCommitFileDiff }));
 vi.mock('../src/git/gitGraphInterop', () => ({ findGitGraphExtensionId: () => null, openInGitGraph: vi.fn() }));
 
@@ -177,6 +188,7 @@ describe('RepoCoordinator', () => {
     mocks.getRepoSnapshot.mockImplementation(async () => MAIN_AND_FEATURE());
     mocks.getGitHubRemoteUrl.mockResolvedValue(null);
     mocks.checkoutBranch.mockResolvedValue(undefined);
+    mocks.openGitHubCommit.mockResolvedValue(true);
     showCheckedOutBadge = true;
     trackingOrder = 'vscode';
     host = {
@@ -198,10 +210,96 @@ describe('RepoCoordinator', () => {
 
   async function openBoth(): Promise<void> {
     coordinator.attach(sidebar);
-    coordinator.attach(editor);
     coordinator.handleMessage('sidebar', { type: 'webviewReady' });
-    await vi.waitFor(() => expect(editor.ofType('repoSnapshot')).toHaveLength(1));
+    await vi.waitFor(() => expect(sidebar.ofType('repoSnapshot')).toHaveLength(1));
+    coordinator.attach(editor);
+    coordinator.handleMessage('editor', { type: 'webviewReady' });
   }
+
+  it('reveals a valid commit immediately and normalizes uppercase hashes', async () => {
+    await openBoth();
+    coordinator.revealCommit('A'.repeat(40));
+    expect(editor.ofType('revealCommit')).toEqual([
+      { type: 'revealCommit', payload: { hash: 'a'.repeat(40) } },
+    ]);
+  });
+
+  it('rejects invalid revealCommit hashes without dispatching', async () => {
+    await openBoth();
+    for (const hash of ['abc123', '--all', 'g'.repeat(40), 'a'.repeat(39), 'a'.repeat(41), 'a'.repeat(63), 'a'.repeat(65)]) {
+      coordinator.revealCommit(hash);
+    }
+    expect(editor.ofType('revealCommit')).toEqual([]);
+  });
+
+  it('queues a reveal during cold start and flushes after the editor snapshot loads', async () => {
+    const uppercaseSha256 = 'A'.repeat(64);
+    coordinator.revealCommit(uppercaseSha256);
+    expect(editor.ofType('revealCommit')).toEqual([]);
+
+    coordinator.attach(editor);
+    coordinator.handleMessage('editor', { type: 'webviewReady' });
+    await vi.waitFor(() => expect(editor.ofType('revealCommit')).toEqual([
+      { type: 'revealCommit', payload: { hash: 'a'.repeat(64) } },
+    ]));
+  });
+
+  it('waits for editor readiness before revealing into a cached snapshot', async () => {
+    const hash = 'b'.repeat(40);
+    coordinator.attach(sidebar);
+    coordinator.handleMessage('sidebar', { type: 'webviewReady' });
+    await vi.waitFor(() => expect(sidebar.ofType('repoSnapshot')).toHaveLength(1));
+
+    coordinator.attach(editor);
+    coordinator.revealCommit(hash);
+    expect(editor.ofType('revealCommit')).toEqual([]);
+
+    coordinator.handleMessage('editor', { type: 'webviewReady' });
+    const messageTypes = editor.messages.map((message) => message.type);
+    const snapshotIndex = messageTypes.indexOf('repoSnapshot');
+    const revealIndex = messageTypes.indexOf('revealCommit');
+    expect(snapshotIndex).toBeGreaterThanOrEqual(0);
+    expect(revealIndex).toBeGreaterThan(snapshotIndex);
+    expect(editor.ofType('revealCommit')).toEqual([
+      { type: 'revealCommit', payload: { hash } },
+    ]);
+
+    coordinator.handleMessage('editor', { type: 'webviewReady' });
+    expect(editor.ofType('revealCommit')).toHaveLength(1);
+  });
+
+  it('notifies repository-change listeners until their disposable is invoked', async () => {
+    const listener = vi.fn();
+    const registration = coordinator.onDidRepositoryChange(listener);
+    await openBoth();
+    await vi.waitFor(() => expect(listener).toHaveBeenCalledWith('/repo'));
+
+    registration.dispose();
+    await vi.waitFor(() => expect(coordinator.getActiveRepoRoot()).toBe('/repo'));
+    mocks.getRepoSnapshot.mockImplementation(async () => makeSnapshot([branch('main', false), branch('feature', true)]));
+    coordinator.handleMessage('editor', { type: 'requestRefresh' });
+    await vi.waitFor(() => expect(editor.ofType('repoSnapshot')).toHaveLength(2));
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects invalid GitHub commit hashes and blocks opening in untrusted workspaces', async () => {
+    await expect(coordinator.openCommitOnGitHubByHash('not-a-hash')).resolves.toBe(false);
+    expect(mocks.openGitHubCommit).not.toHaveBeenCalled();
+
+    mocks.isTrusted = false;
+    await expect(coordinator.openCommitOnGitHubByHash('A'.repeat(40))).resolves.toBe(false);
+    expect(mocks.openGitHubCommit).not.toHaveBeenCalled();
+  });
+
+  it('opens a valid commit on GitHub only with a loaded GitHub remote', async () => {
+    mocks.getGitHubRemoteUrl.mockResolvedValue('https://github.com/owner/repo');
+    await openBoth();
+    await expect(coordinator.openCommitOnGitHubByHash('A'.repeat(40))).resolves.toBe(true);
+    expect(mocks.openGitHubCommit).toHaveBeenCalledWith(
+      'https://github.com/owner/repo',
+      'a'.repeat(40),
+    );
+  });
 
   it('loads once and gives the sidebar tree and the editor timeline the same snapshot', async () => {
     await openBoth();
@@ -406,13 +504,16 @@ describe('RepoCoordinator', () => {
     const picked = selection('refs/heads/feature', 'feature', ['refs/heads/main']);
     coordinator.handleMessage('sidebar', { type: 'syncState', payload: picked });
 
-    expect(editor.ofType('syncState')).toEqual([{ type: 'syncState', payload: picked }]);
+    expect(editor.ofType('syncState')).toEqual([
+      { type: 'syncState', payload: selection(null, null) },
+      { type: 'syncState', payload: picked },
+    ]);
     expect(sidebar.ofType('syncState')).toEqual([]);
 
     const cleared = selection(null, null);
     coordinator.handleMessage('editor', { type: 'syncState', payload: cleared });
     expect(sidebar.ofType('syncState')).toEqual([{ type: 'syncState', payload: cleared }]);
-    expect(editor.ofType('syncState')).toHaveLength(1);
+    expect(editor.ofType('syncState')).toHaveLength(2);
   });
 
   it('does not rebroadcast a selection that is already current', async () => {
@@ -420,7 +521,7 @@ describe('RepoCoordinator', () => {
     const picked = selection('refs/tags/v1', 'v1');
     coordinator.handleMessage('sidebar', { type: 'syncState', payload: picked });
     coordinator.handleMessage('sidebar', { type: 'syncState', payload: picked });
-    expect(editor.ofType('syncState')).toHaveLength(1);
+    expect(editor.ofType('syncState')).toHaveLength(2);
   });
 
   it('corrects a selection that names refs the repository does not have', async () => {
@@ -431,7 +532,10 @@ describe('RepoCoordinator', () => {
     });
     const corrected = selection(null, null, ['refs/heads/feature']);
     expect(sidebar.ofType('syncState')).toEqual([{ type: 'syncState', payload: corrected }]);
-    expect(editor.ofType('syncState')).toEqual([{ type: 'syncState', payload: corrected }]);
+    expect(editor.ofType('syncState')).toEqual([
+      { type: 'syncState', payload: selection(null, null) },
+      { type: 'syncState', payload: corrected },
+    ]);
   });
 
   it('drops malformed or forged messages without touching state or Git', async () => {
@@ -440,7 +544,9 @@ describe('RepoCoordinator', () => {
     coordinator.handleMessage('sidebar', { type: 'gitAction', payload: { action: 'merge', target: '--upload-pack=x' } });
     coordinator.handleMessage('sidebar', { type: 'nope' });
     coordinator.handleMessage('sidebar', 'not an object');
-    expect(editor.ofType('syncState')).toEqual([]);
+    expect(editor.ofType('syncState')).toEqual([
+      { type: 'syncState', payload: selection(null, null) },
+    ]);
     expect(mocks.showWarningMessage).not.toHaveBeenCalled();
   });
 

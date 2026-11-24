@@ -109,6 +109,11 @@ export class GitRepoPanel {
     }
   }
 
+  public static async revealCommit(extensionUri: vscode.Uri, hash: string): Promise<void> {
+    await GitRepoPanel.createOrShow(extensionUri);
+    GitRepoPanel.coordinator?.revealCommit(hash);
+  }
+
   /** Called by the sidebar view whenever it becomes visible or hidden. */
   public static setSidebarVisible(visible: boolean): void {
     GitRepoPanel.sidebarVisible = visible;

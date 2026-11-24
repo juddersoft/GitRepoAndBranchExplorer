@@ -129,6 +129,24 @@ describe('adversarial external navigation guards', () => {
   );
 });
 
+describe('static hover trust regression guard', () => {
+  it('uses a scoped enabledCommands allowlist instead of blanket-trusting Markdown', () => {
+    const source = fs.readFileSync(path.resolve('src/blame/BlameController.ts'), 'utf8');
+    expect(source).not.toMatch(/\.isTrusted\s*=\s*true\b/);
+    expect(source).toMatch(/hover\.isTrusted\s*=\s*\{\s*enabledCommands:\s*\[\s*\.\.\.BLAME_HOVER_ALLOWED_COMMANDS\s*\]\s*\}/);
+  });
+
+  it('keeps blame hover rendering independent of vscode', () => {
+    const source = fs.readFileSync(path.resolve('src/blame/blameHover.ts'), 'utf8');
+    expect(source).not.toMatch(/(?:from\s+['"]vscode['"]|require\s*\(\s*['"]vscode['"]\s*\)|import\s*\*\s+as\s+vscode\b)/);
+  });
+
+  it('keeps blame gutter rendering independent of vscode', () => {
+    const source = fs.readFileSync(path.resolve('src/blame/blameGutter.ts'), 'utf8');
+    expect(source).not.toMatch(/(?:from\s+['"]vscode['"]|require\s*\(\s*['"]vscode['"]\s*\)|import\s*\*\s+as\s+vscode\b)/);
+  });
+});
+
 describe('static webview sink and Git spawning audit', () => {
   it('contains no dangerous DOM/execution sinks under src/webview/ui', () => {
     const uiRoot = path.resolve('src/webview/ui');

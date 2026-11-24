@@ -149,7 +149,8 @@ export type ExtensionToWebviewMessage =
   | { type: 'commitDetails'; payload: CommitDetails }
   | { type: 'integrationsInfo'; payload: ExternalIntegrationsInfo }
   | { type: 'actionStatus'; payload: ActionStatusPayload }
-  | { type: 'syncState'; payload: SyncStatePayload };
+  | { type: 'syncState'; payload: SyncStatePayload }
+  | { type: 'revealCommit'; payload: { hash: string } };
 
 export interface ActionStatusPayload {
   busy: boolean;
@@ -354,6 +355,8 @@ export function isExtensionToWebviewMessage(value: unknown): value is ExtensionT
       );
     case 'syncState':
       return isSyncStatePayload(payload);
+    case 'revealCommit':
+      return isCommitHash(payload.hash);
     default:
       return false;
   }

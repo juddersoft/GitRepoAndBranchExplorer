@@ -2,7 +2,7 @@
   "name": "git-repo-and-branch-explorer",
   "displayName": "Git Repo & Branch Explorer",
   "description": "Visual Studio-style Git Repository explorer: branch/remote/tag tree in the Activity Bar, multi-lane SVG commit graph and history timeline in the editor, file diff inspection, and GitHub/Git Graph integration.",
-  "version": "1.4.4",
+  "version": "1.5.0",
   "publisher": "juddersoft",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -28,7 +28,10 @@
     "graph",
     "history",
     "visual studio",
-    "github"
+    "github",
+    "git blame",
+    "annotate",
+    "gitlens alternative"
   ],
   "main": "./dist/extension.js",
   "capabilities": {
@@ -67,8 +70,47 @@
         "command": "gitRepoAndBranchExplorer.refresh",
         "title": "Git Repo & Branch Explorer: Refresh",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "gitRepoAndBranchExplorer.toggleInlineBlame",
+        "title": "Git Repo & Branch Explorer: Toggle Inline Git Blame",
+        "icon": "$(git-commit)"
+      },
+      {
+        "command": "gitRepoAndBranchExplorer.toggleFileAnnotate",
+        "title": "Git Repo & Branch Explorer: Toggle File Blame Gutter (Annotate)",
+        "icon": "$(list-flat)"
       }
-    ]
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "gitRepoAndBranchExplorer.toggleFileAnnotate",
+          "when": "resourceScheme == file",
+          "group": "gitRepoAndBranchExplorer@1"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Git Repo & Branch Explorer",
+      "properties": {
+        "gitRepoAndBranchExplorer.blame.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show subtle inline Git blame annotation on the active editor line."
+        },
+        "gitRepoAndBranchExplorer.blame.ignoreWhitespace": {
+          "type": "boolean",
+          "default": false,
+          "description": "Ignore whitespace changes when running git blame (-w)."
+        },
+        "gitRepoAndBranchExplorer.blame.showStatusBar": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show active-line Git blame summary in the status bar."
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
