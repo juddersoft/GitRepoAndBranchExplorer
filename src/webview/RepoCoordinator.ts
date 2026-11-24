@@ -1,7 +1,8 @@
-﻿import * as path from 'path';
+﻿import * as fs from 'fs';
+import * as path from 'path';
 import * as vscode from 'vscode';
 import type { GitShowContentProvider } from '../git/gitDiffProvider';
-import { openCommitFileDiff } from '../git/gitDiffProvider';
+import { buildShowUri, openCommitFileDiff } from '../git/gitDiffProvider';
 import { GitExecutionError, validateGitRef } from '../git/gitExecutor';
 import { findGitGraphExtensionId, openInGitGraph } from '../git/gitGraphInterop';
 import { GitService, isValidCommitHash } from '../git/gitService';
@@ -19,7 +20,12 @@ import type {
   SyncStatePayload,
   TrackingIndicatorOrder,
 } from '../types/messages';
-import { isChangedFileStatus, isWebviewToExtensionMessage, MAX_ACTION_STATUS_LENGTH } from '../types/messages';
+import {
+  isChangedFileStatus,
+  isSafeRepoRelativePath,
+  isWebviewToExtensionMessage,
+  MAX_ACTION_STATUS_LENGTH,
+} from '../types/messages';
 import type { RefTarget } from './ui/state';
 import { isSameSelection, listRefTargets, normalizeSelection } from './ui/state';
 
@@ -58,11 +64,19 @@ function toRepoErrorPayload(err: unknown): RepoErrorPayload {
 function getInitState(
   tabPinned: boolean,
   showCheckedOutBadge: boolean,
+  showFolderCounts: boolean,
   trackingOrder: TrackingIndicatorOrder,
 ): InitStatePayload {
   const folder = vscode.workspace.workspaceFolders?.[0];
   if (!folder) {
-    return { repoName: 'No folder open', workspacePath: null, tabPinned, showCheckedOutBadge, trackingOrder };
+    return {
+      repoName: 'No folder open',
+      workspacePath: null,
+      tabPinned,
+      showCheckedOutBadge,
+      showFolderCounts,
+      trackingOrder,
+    };
   }
   const fsPath = folder.uri.fsPath;
   return {
@@ -70,6 +84,7 @@ function getInitState(
     workspacePath: fsPath,
     tabPinned,
     showCheckedOutBadge,
+    showFolderCounts,
     trackingOrder,
   };
 }
@@ -98,6 +113,8 @@ export interface RepoCoordinatorHost {
   getShowCheckedOutBadge(): boolean;
   /** Stores the preference and tells every connected view (see {@link RepoCoordinator.publishInitState}). */
   setShowCheckedOutBadge(show: boolean): void;
+  getShowFolderCounts(): boolean;
+  setShowFolderCounts(show: boolean): void;
   getTrackingOrder(): TrackingIndicatorOrder;
   setTrackingOrder(order: TrackingIndicatorOrder): void;
   /** Opens or reveals the editor tab. */
@@ -107,6 +124,7 @@ export interface RepoCoordinatorHost {
 }
 
 const EMPTY_SELECTION: SyncStatePayload = { selectedBranchFullName: null, selectedBranchRef: null, pinnedBranchFullNames: [] };
+const MAX_REVEAL_SEARCH_PAGES = 10;
 
 /**
  * Single owner of the repository snapshot, Git operations, `.git` watcher and the shared ref selection.
@@ -136,6 +154,9 @@ export class RepoCoordinator implements vscode.Disposable {
   private watchedRepoRoot: string | null = null;
   private watchDebounceTimer: ReturnType<typeof setTimeout> | undefined;
   private pendingRevealCommitHash: string | null = null;
+  private isLoadingMoreCommits = false;
+  private loadingMoreCommits: Promise<boolean> | null = null;
+  private isSearchingForRevealCommit = false;
 
   constructor(
     private readonly host: RepoCoordinatorHost,
@@ -212,6 +233,18 @@ export class RepoCoordinator implements vscode.Disposable {
       case 'requestRefresh':
         void this.loadRepository();
         break;
+      case 'loadMoreCommits':
+        void this.loadNextCommitPage().catch((err: unknown) => {
+          const snapshot = this.lastSnapshot;
+          void vscode.window.showWarningMessage(`Could not load older commits: ${describeError(err)}`);
+          if (snapshot) {
+            this.broadcast({
+              type: 'commitsAppended',
+              payload: { commits: [], hasMoreCommits: snapshot.hasMoreCommits },
+            });
+          }
+        });
+        break;
       case 'openRepositoryPanel':
         this.host.openPanel();
         break;
@@ -233,6 +266,10 @@ export class RepoCoordinator implements vscode.Disposable {
       case 'setShowCheckedOutBadge':
         this.host.setShowCheckedOutBadge(message.payload.show);
         break;
+      case 'setShowFolderCounts':
+        this.host.setShowFolderCounts(message.payload.show);
+        this.publishInitState();
+        break;
       case 'setTrackingOrder':
         this.host.setTrackingOrder(message.payload.order);
         this.publishInitState();
@@ -245,6 +282,9 @@ export class RepoCoordinator implements vscode.Disposable {
         break;
       case 'openFileDiff':
         void this.openFileDiff(message.payload);
+        break;
+      case 'openFile':
+        void this.openFile(message.payload);
         break;
       case 'openInGitGraph':
         if (this.lastSnapshot) {
@@ -264,6 +304,7 @@ export class RepoCoordinator implements vscode.Disposable {
     return getInitState(
       this.host.getTabPinned(),
       this.host.getShowCheckedOutBadge(),
+      this.host.getShowFolderCounts(),
       this.host.getTrackingOrder(),
     );
   }
@@ -877,6 +918,57 @@ export class RepoCoordinator implements vscode.Disposable {
     }
   }
 
+  private async openFile(payload: { hash: string; filePath: string; status: string }): Promise<void> {
+    if (!this.ensureTrustedWorkspace()) {
+      return;
+    }
+    const snapshot = this.lastSnapshot;
+    if (
+      !snapshot ||
+      !isValidCommitHash(payload.hash) ||
+      !isSafeRepoRelativePath(payload.filePath) ||
+      !isChangedFileStatus(payload.status)
+    ) {
+      return;
+    }
+
+    const resolvedPath = path.resolve(snapshot.repoRoot, payload.filePath);
+    const windowsPaths =
+      process.platform === 'win32' ||
+      /^[a-zA-Z]:[\\/]/.test(snapshot.repoRoot) ||
+      snapshot.repoRoot.startsWith('\\\\');
+    const pathApi = windowsPaths ? path.win32 : path.posix;
+    const relativePath = pathApi.relative(pathApi.resolve(snapshot.repoRoot), pathApi.resolve(resolvedPath));
+    if (
+      relativePath.length === 0 ||
+      pathApi.isAbsolute(relativePath) ||
+      relativePath === '..' ||
+      relativePath.startsWith(`..${pathApi.sep}`)
+    ) {
+      return;
+    }
+
+    try {
+      if (payload.status !== 'D') {
+        try {
+          const stats = await fs.promises.stat(resolvedPath);
+          if (stats.isFile()) {
+            await vscode.window.showTextDocument(vscode.Uri.file(resolvedPath));
+            return;
+          }
+        } catch {
+          // Missing or unreadable working-tree files are opened from the commit revision below.
+        }
+      }
+      const revision = payload.status === 'D' ? `${payload.hash}~1` : payload.hash;
+      await vscode.window.showTextDocument(
+        buildShowUri(snapshot.repoRoot, `${revision}:${payload.filePath}`, payload.filePath),
+      );
+    } catch (err) {
+      void vscode.window.showErrorMessage(`Could not open file: ${describeError(err)}`);
+    }
+  }
+
   public async openCommitOnGitHubByHash(hash: string): Promise<boolean> {
     const normalizedHash = hash.toLowerCase();
     if (!isValidCommitHash(normalizedHash) || !vscode.workspace.isTrusted) {
@@ -1043,19 +1135,98 @@ export class RepoCoordinator implements vscode.Disposable {
     this.notifyRepositoryChange(null);
   }
 
-  private flushPendingRevealCommit(): void {
+  private async loadNextCommitPage(): Promise<boolean> {
+    const snapshot = this.lastSnapshot;
+    if (!snapshot || !snapshot.hasMoreCommits) {
+      return false;
+    }
+    if (this.isLoadingMoreCommits) {
+      return this.loadingMoreCommits ?? false;
+    }
+    this.isLoadingMoreCommits = true;
+    const loading = (async (): Promise<boolean> => {
+      const page = await this.gitService.getCommitPage(snapshot.repoRoot, snapshot.commits.length);
+      if (snapshot !== this.lastSnapshot || snapshot.repoRoot !== this.lastSnapshot?.repoRoot) {
+        return false;
+      }
+      const knownHashes = new Set(snapshot.commits.map((commit) => commit.hash));
+      const appended = page.commits.filter((commit) => {
+        if (knownHashes.has(commit.hash)) {
+          return false;
+        }
+        knownHashes.add(commit.hash);
+        return true;
+      });
+      snapshot.commits.push(...appended);
+      snapshot.hasMoreCommits = page.hasMoreCommits;
+      this.broadcast({
+        type: 'commitsAppended',
+        payload: { commits: appended, hasMoreCommits: snapshot.hasMoreCommits },
+      });
+      return appended.length > 0;
+    })();
+    this.loadingMoreCommits = loading;
+    try {
+      return await loading;
+    } finally {
+      this.isLoadingMoreCommits = false;
+      this.loadingMoreCommits = null;
+    }
+  }
+
+  private async flushPendingRevealCommit(): Promise<void> {
     const hash = this.pendingRevealCommitHash;
     const panel = this.surfaces.get('editor');
     if (
       hash === null ||
       panel === undefined ||
       this.lastSnapshot === null ||
-      !this.readySurfaces.has('editor')
+      !this.readySurfaces.has('editor') ||
+      this.isSearchingForRevealCommit
     ) {
       return;
     }
-    panel.post({ type: 'revealCommit', payload: { hash } });
-    this.pendingRevealCommitHash = null;
+    this.isSearchingForRevealCommit = true;
+    try {
+      if (this.lastSnapshot.commits.some((commit) => commit.hash === hash)) {
+        panel.post({ type: 'revealCommit', payload: { hash } });
+        return;
+      }
+
+      for (let page = 0; page < MAX_REVEAL_SEARCH_PAGES && this.lastSnapshot.hasMoreCommits; page++) {
+        this.postActionStatus(true, `Searching older commits for ${hash.slice(0, 8)}...`);
+        try {
+          await this.loadNextCommitPage();
+        } catch {
+          break;
+        }
+        if (this.lastSnapshot.commits.some((commit) => commit.hash === hash)) {
+          this.postActionStatus(false);
+          panel.post({ type: 'revealCommit', payload: { hash } });
+          return;
+        }
+      }
+
+      try {
+        const details = await this.gitService.getCommitDetails(this.lastSnapshot.repoRoot, hash);
+        panel.post({ type: 'commitDetails', payload: details });
+        this.postActionStatus(false);
+        panel.post({ type: 'revealCommit', payload: { hash, outsideGraph: true } });
+      } catch (err) {
+        this.postActionStatus(false);
+        void vscode.window.showWarningMessage(
+          `Could not find commit ${hash.slice(0, 8)} in this repository: ${describeError(err)}`,
+        );
+      }
+    } finally {
+      this.isSearchingForRevealCommit = false;
+      if (this.pendingRevealCommitHash === hash) {
+        this.pendingRevealCommitHash = null;
+      }
+      if (this.pendingRevealCommitHash !== null) {
+        void this.flushPendingRevealCommit();
+      }
+    }
   }
 
   private notifyRepositoryChange(repoRoot: string | null): void {

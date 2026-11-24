@@ -336,6 +336,7 @@ button {
   align-items: center;
   gap: 4px;
   height: var(--row-height);
+  padding-left: calc(4px + var(--tree-depth, 0) * 16px);
   padding-right: 4px;
   cursor: pointer;
   white-space: nowrap;
@@ -347,25 +348,11 @@ button {
 }
 
 .tree-row.depth-0 {
-  padding-left: 4px;
   font-weight: 600;
-}
-
-.tree-row.depth-1 {
-  padding-left: 16px;
-}
-
-.tree-row.depth-2 {
-  padding-left: 32px;
 }
 
 .tree-row.placeholder {
   cursor: default;
-  padding-left: 52px;
-}
-
-.tree-row.depth-0.placeholder {
-  padding-left: 12px;
 }
 
 .twisty {
@@ -385,8 +372,37 @@ button {
   text-overflow: ellipsis;
 }
 
-.tree-row.depth-1.tree-leaf {
-  padding-left: 34px;
+.tree-group {
+  margin-left: calc(11px + var(--tree-depth, 0) * 16px);
+  border-left: 1px solid var(--vscode-tree-indentGuidesStroke, rgba(128, 128, 128, 0.25));
+}
+
+.tree-group > .tree-node {
+  margin-left: calc(-11px - var(--tree-depth, 0) * 16px);
+}
+
+.tree-folder-row {
+  color: var(--vscode-sideBar-foreground, var(--vscode-foreground));
+}
+
+.tree-folder-icon {
+  color: var(--vscode-icon-foreground, var(--vscode-descriptionForeground, currentColor));
+  opacity: 0.85;
+}
+
+.tree-folder-count {
+  flex: 0 0 auto;
+  min-width: 16px;
+  margin-left: 2px;
+  padding: 0 4px;
+  border-radius: 8px;
+  color: var(--vscode-descriptionForeground, currentColor);
+  background-color: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+  font-size: 0.8em;
+  font-variant-numeric: tabular-nums;
+  line-height: 16px;
+  text-align: center;
+  opacity: 0.75;
 }
 
 .current-branch .tree-label {
@@ -743,6 +759,30 @@ col.col-id {
   vertical-align: top;
 }
 
+.history-table .virtual-spacer-row,
+.history-table .virtual-spacer-cell {
+  padding: 0;
+  border: none;
+  pointer-events: none;
+}
+
+.load-more-footer {
+  position: sticky;
+  left: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+  padding: 4px 8px;
+  color: var(--vscode-descriptionForeground);
+  border-top: 1px solid var(--vscode-panel-border);
+  background: var(--vscode-editor-background);
+}
+
+.load-more-button {
+  color: var(--vscode-textLink-foreground);
+}
+
 .commit-row {
   cursor: pointer;
 }
@@ -952,6 +992,14 @@ col.col-id {
   min-width: 0;
 }
 
+.details-outside-graph-note {
+  margin: 0 0 8px;
+  padding: 6px 8px;
+  color: var(--vscode-descriptionForeground);
+  background: var(--vscode-textBlockQuote-background, var(--vscode-editorWidget-background));
+  border-left: 2px solid var(--vscode-textLink-foreground);
+}
+
 .full-hash {
   user-select: all;
   word-break: break-all;
@@ -986,7 +1034,7 @@ col.col-id {
 .changed-file {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
   width: 100%;
   height: var(--row-height);
   padding: 0 6px;
@@ -1008,7 +1056,27 @@ col.col-id {
   outline-offset: -1px;
 }
 
+.changed-file-open {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  opacity: 0;
+}
+
+.changed-file:hover .changed-file-open,
+.changed-file:focus-within .changed-file-open,
+.changed-file-open:focus-visible {
+  opacity: 1;
+}
+
+.changed-file-open:hover,
+.changed-file-open:focus-visible {
+  color: var(--vscode-list-hoverForeground, var(--vscode-foreground));
+  background-color: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+}
+
 .file-path {
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;

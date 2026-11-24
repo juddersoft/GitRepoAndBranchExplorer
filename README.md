@@ -7,11 +7,13 @@ A Visual Studio-unified **Git Repository** window, natively for VS Code, Cursor,
 ## Key Highlights
 
 - Native Activity Bar sidebar plus a far-left, synchronized editor timeline.
-- Multi-lane SVG commit graph with draggable, persisted column widths.
+- Hierarchical local and remote branch folders with optional, persisted folder branch counts.
+- Multi-lane SVG commit graph with draggable, persisted column widths and virtualized 500-commit background pagination.
 - Responsive **CHECKED OUT** pill that never obscures branch names.
 - Customizable VS Code `↓ ↑` / Visual Studio `↑ ↓` tracking counters.
 - Safe Reset `--mixed` / `--hard` modes and Merge-Commit Revert `-m 1`.
 - Read-only commit inspection and trust-gated side-by-side `vscode.diff` views.
+- One-click **Open File** beside each changed file, while retaining the row's side-by-side diff action.
 - Git Graph and GitHub integration.
 - Subtle inline Git blame and status-bar summaries, with an on-demand blame gutter and bounded, trust-gated caching.
 
@@ -27,7 +29,7 @@ Contextual Git actions include Merge-Commit Revert `-m 1` and guarded Reset `--m
 
 ![Commit details and changed files](https://raw.githubusercontent.com/juddersoft/GitRepoAndBranchExplorer/main/media/screenshots/commit-details-diff.png)
 
-Commit Details and the Changed Files drawer support trust-gated side-by-side `vscode.diff` inspection.
+Commit Details and the Changed Files drawer support one-click **Open File** access to the working-tree file (with a read-only revision fallback) alongside trust-gated side-by-side `vscode.diff` inspection.
 
 ### Git Blame & Visual Studio Annotate
 
@@ -41,7 +43,7 @@ Subtle active-line inline Git blame and a Status Bar summary can be toggled with
 
 ![Repository menu customization](https://raw.githubusercontent.com/juddersoft/GitRepoAndBranchExplorer/main/media/screenshots/repo-menu-options.png)
 
-Customize the **CHECKED OUT** pill and switch counters between VS Code `↓ ↑` or Visual Studio `↑ ↓`.
+Customize the **CHECKED OUT** pill, show or hide folder branch counts, and switch counters between VS Code `↓ ↑` or Visual Studio `↑ ↓`.
 
 ## Quick Install
 
@@ -56,6 +58,7 @@ Extension Git actions run only in trusted workspaces, with `protocol.ext.allow=n
 
 ### Branch, remote and tag tree in the Activity Bar
 - Local branches, `remotes/<name>` groups and tags in one filterable tree, shown directly in the Primary Side Bar. A **Repos:** heading sits above the repository row (`<repo> (<branch>)`), and local branches are listed directly under **Branches**.
+- Local and remote branches containing `/` are organized into collapsible, alphabetically sorted folder trees with indent guides. Manual expansion is persisted, checked-out branch ancestors expand automatically, and the repository context menu can persistently show or hide folder branch counts.
 - Selecting a ref, isolating branches (eye button) and the busy status of Git operations are mirrored between the sidebar tree and the editor timeline.
 - The **checked-out** branch is unmistakable: green accent bar, check icon, bold name and a compact **Checked Out** badge. The badge shrinks as the sidebar narrows, disappears when it would be unreadable, and can be turned off from the repository row's right-click menu (**Hide "Checked Out" Badge**).
 - Every local branch shows explicit **↓ (commits to pull) / ↑ (commits to push)** counts in VS Code's default order, `↓0 ↑0` when up to date. The repository row's right-click menu can persistently switch to Visual Studio's `↑ ↓` order. A branch with no upstream shows dashes, and a deleted upstream retains the warning tooltip instead of claiming it is up to date.
@@ -77,6 +80,7 @@ Extension Git actions run only in trusted workspaces, with `protocol.ext.allow=n
 - Branches, merges and octopus merges are drawn as coloured lanes that stay readable on light and dark themes.
 - Lanes are recycled after merges, and lanes that lead to commits outside the visible list end cleanly.
 - Filter the history by message, author, hash or ref name.
+- History is loaded in append-only 500-commit chunks and virtualized at a fixed `26px` row height, so repositories are no longer limited to the first 500 commits and scrolling keeps the SVG graph responsive.
 - The **Local Branches**, **Remote Branches** and **Tags** toggles control which ref labels appear in the Branch / Tag column. Active toggles are filled with the button colour and show how many refs of that kind exist; a status line explains what is hidden or missing ("Hiding tags (3)", "No tags in this repository"). Toggles hide labels only, never commits.
 
 ### Live Git actions
@@ -87,7 +91,7 @@ Extension Git actions run only in trusted workspaces, with `protocol.ext.allow=n
 
 ### Commit details and file diffs
 - Select a commit to see its full message and the list of changed files with **A** (added), **M** (modified), **D** (deleted) and **R** (renamed) badges.
-- Click a file to open VS Code's native read-only diff of the parent revision against the commit.
+- Click a file row to open VS Code's native read-only diff of the parent revision against the commit, or use the inline **Open File** button directly beside the name to open the working-tree file. Deleted or missing files open from the appropriate read-only commit revision.
 
 ### Git Graph and GitHub integration
 - **Open in Git Graph** appears when the [Git Graph](https://marketplace.visualstudio.com/items?itemName=mhutchie.git-graph) extension is installed.
@@ -147,7 +151,7 @@ Press <kbd>F5</kbd> with the **Run Extension** launch configuration to debug in 
 
 ## Known limitations
 
-- The history shows the most recent 500 commits.
+- Older history is fetched in 500-commit background chunks as needed, so very large repositories may take longer to reach their oldest commits.
 - Linked worktrees and submodules, where `.git` is a file rather than a folder, are not auto-refreshed by the watcher; use **Refresh**.
 
 ## License

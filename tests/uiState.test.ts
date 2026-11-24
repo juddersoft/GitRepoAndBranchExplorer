@@ -160,6 +160,7 @@ const snapshot: RepoSnapshot = {
     commit(A, [], 'Initial commit', [{ kind: 'tag', label: 'v1.0.0' }]),
     commit(X, [], 'Orphan root', [{ kind: 'localBranch', label: 'orphan' }]),
   ],
+  hasMoreCommits: false,
 };
 
 function stateWith(patch: Partial<ExplorerUiState>): ExplorerUiState {
@@ -306,6 +307,51 @@ describe('reconcileStateWithSnapshot', () => {
 
   it('preserves the tab pin across snapshots', () => {
     expect(reconcileStateWithSnapshot(stateWith({ tabPinned: true }), snapshot, new Set()).tabPinned).toBe(true);
+  });
+
+  it('reveals the checked-out branch folders on the initial unsaved snapshot', () => {
+    const checkedOut = { ...feature, name: 'feature/pdj/current', displayName: 'feature/pdj/current', fullName: 'refs/heads/feature/pdj/current', isCurrent: true };
+    const nested: RepoSnapshot = { ...snapshot, localBranches: [checkedOut] };
+    const next = reconcileStateWithSnapshot(stateWith({ snapshot: null }), nested, new Set());
+
+    expect(next.expandedNodes).toEqual(
+      new Set([
+        'branches',
+        remoteNodeKey('origin'),
+        'folder:local:feature',
+        'folder:local:feature/pdj',
+      ]),
+    );
+  });
+
+  it('preserves restored or manually collapsed checked-out folders on the same branch', () => {
+    const checkedOut = { ...feature, name: 'feature/pdj/current', displayName: 'feature/pdj/current', fullName: 'refs/heads/feature/pdj/current', isCurrent: true };
+    const nested: RepoSnapshot = { ...snapshot, localBranches: [checkedOut] };
+    const restored = stateWith({ snapshot: null, expandedNodes: new Set(['branches']) });
+    const initial = reconcileStateWithSnapshot(restored, nested, new Set(['origin']), true);
+    const collapsedAgain = reconcileStateWithSnapshot(
+      { ...initial, expandedNodes: new Set(['branches']) },
+      { ...nested, commits: [...nested.commits] },
+      new Set(['origin']),
+      true,
+    );
+
+    expect(initial.expandedNodes.has('folder:local:feature')).toBe(false);
+    expect(collapsedAgain.expandedNodes.has('folder:local:feature')).toBe(false);
+  });
+
+  it('reveals ancestor folders when checkout moves to a newly discovered branch', () => {
+    const previousCurrent = { ...main, isCurrent: true };
+    const nextCurrent = { ...feature, isCurrent: true, name: 'feature/pdj/new', displayName: 'feature/pdj/new', fullName: 'refs/heads/feature/pdj/new' };
+    const previousSnapshot: RepoSnapshot = { ...snapshot, localBranches: [previousCurrent, { ...nextCurrent, isCurrent: false }] };
+    const nextSnapshot: RepoSnapshot = { ...snapshot, localBranches: [{ ...previousCurrent, isCurrent: false }, nextCurrent] };
+    const previous = stateWith({ snapshot: previousSnapshot, expandedNodes: new Set(['branches']) });
+
+    const next = reconcileStateWithSnapshot(previous, nextSnapshot, new Set(['origin']), true);
+
+    expect(next.expandedNodes).toEqual(
+      new Set(['branches', 'folder:local:feature', 'folder:local:feature/pdj']),
+    );
   });
 });
 

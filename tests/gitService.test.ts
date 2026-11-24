@@ -461,6 +461,69 @@ describe('GitService operations (fake runner)', () => {
     return { remoteName, branches: [] };
   }
 
+  it('reads date-ordered commit pages with N+1 overfetch and skip', async () => {
+    const hashes = ['1', '2', '3'].map((char) => sha(char));
+    const { calls, service } = recorder((args) => {
+      if (args[0] === 'for-each-ref') {
+        return records(['*', 'refs/heads/main', 'main', hashes[0], '', '']);
+      }
+      if (args[0] === 'symbolic-ref') {
+        return 'refs/heads/main\n';
+      }
+      if (args[0] === 'rev-parse') {
+        return `${hashes[0]}\n`;
+      }
+      if (args[0] === 'log') {
+        return records(...hashes.map((hash, index) => logRecord(hash, [], `commit ${index}`)));
+      }
+      return '';
+    });
+
+    await expect(service.getCommitPage(ROOT, 7, 2)).resolves.toMatchObject({
+      commits: [
+        { hash: hashes[0], refs: [{ kind: 'head', label: 'HEAD' }, { kind: 'localBranch', label: 'main' }] },
+        { hash: hashes[1], refs: [] },
+      ],
+      hasMoreCommits: true,
+    });
+    const logArgs = calls.find((call) => call.args[0] === 'log')?.args;
+    expect(logArgs).toContain('--date-order');
+    expect(logArgs).toContain('--max-count=3');
+    expect(logArgs).toContain('--skip=7');
+    expect(logArgs).not.toContain('--topo-order');
+  });
+
+  it('reports no more commits when the page fits within the limit', async () => {
+    const hashes = ['a', 'b'].map((char) => sha(char));
+    const { service } = recorder((args) => {
+      if (args[0] === 'log') {
+        return records(...hashes.map((hash) => logRecord(hash, [], 'commit')));
+      }
+      return '';
+    });
+    await expect(service.getCommitPage(ROOT, 0, 2)).resolves.toMatchObject({
+      commits: [{ hash: hashes[0] }, { hash: hashes[1] }],
+      hasMoreCommits: false,
+    });
+  });
+
+  it('populates hasMoreCommits for the initial 500-commit snapshot page', async () => {
+    const hashes = Array.from({ length: 501 }, (_, index) =>
+      index.toString(16).padStart(40, '0'),
+    );
+    const { calls, service } = recorder((args) =>
+      args[0] === 'log'
+        ? records(...hashes.map((hash) => logRecord(hash, [], 'commit')))
+        : args[0] === 'rev-parse' && args[1] === '--show-toplevel'
+          ? `${ROOT}\n`
+          : '',
+    );
+    const snapshot = await service.getRepoSnapshot(ROOT);
+    expect(snapshot.commits).toHaveLength(500);
+    expect(snapshot.hasMoreCommits).toBe(true);
+    expect(calls.find((call) => call.args[0] === 'log')?.args).toContain('--max-count=501');
+  });
+
   it('runs fetch, pull and push with network timeouts', async () => {
     const { calls, service } = recorder();
     await service.fetchAll(ROOT);

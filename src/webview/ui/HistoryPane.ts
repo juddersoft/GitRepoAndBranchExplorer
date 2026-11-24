@@ -18,6 +18,11 @@ import {
   hasHistoryFocus,
   summarizeRefToggles,
 } from './state';
+import {
+  computeRevealScrollTop,
+  computeVirtualWindow,
+  shouldPrefetchMoreCommits,
+} from './virtualScroll';
 
 export interface HistoryPaneCallbacks {
   onGitAction(action: GitAction): void;
@@ -31,9 +36,11 @@ export interface HistoryPaneCallbacks {
   onCommitContextMenu(commit: CommitNode, x: number, y: number): void;
   onCopyHash(hash: string): void;
   onOpenFileDiff(hash: string, file: ChangedFileEntry): void;
+  onOpenFile?(file: { hash: string; filePath: string; status: string }): void;
   onOpenInGitGraph(): void;
   onOpenCommitOnGitHub(hash: string): void;
   onSignInGitHub(): void;
+  onLoadMoreCommits(): void;
   /** The user resized (or reset) a column; `widths` holds only the columns that differ from their defaults. */
   onColumnWidthsChange(widths: StoredColumnWidths): void;
 }
@@ -228,11 +235,17 @@ export class HistoryPane {
   private readonly detailsTitle: HTMLElement;
   private readonly detailsToggle: HTMLButtonElement;
   private readonly detailsBody: HTMLElement;
+  private readonly loadMoreFooter: HTMLElement;
+  private readonly loadMoreButton: HTMLButtonElement;
 
   private visibleCommits: CommitNode[] = [];
+  private graphLayout: GraphRowLayout[] = [];
+  private visibleCommitKey = '';
   private isDetailsCollapsed = false;
   private lastState: ExplorerUiState | null = null;
   private pendingRevealHash: string | null = null;
+  private scrollFrame: number | null = null;
+  private loadRequested = false;
   private storedColumnWidths: StoredColumnWidths;
   /** Width the graph column needs for the lanes currently shown; it can never be dragged below this. */
   private activeGraphWidth = MIN_GRAPH_COLUMN_WIDTH;
@@ -348,8 +361,40 @@ export class HistoryPane {
     ]);
     this.applyColumnWidths();
 
-    this.tableScroll = el('div', { className: 'table-scroll', attrs: { tabindex: '0', 'aria-label': 'Commit history, use arrow keys to select' } }, [this.table]);
+    this.loadMoreButton = button({
+      className: 'link-button load-more-button',
+      label: 'Load 500 more commits',
+      showLabel: true,
+    });
+    this.loadMoreButton.addEventListener('click', () => this.requestMoreCommits());
+    this.loadMoreFooter = el('div', { className: 'load-more-footer', attrs: { role: 'status' } }, [this.loadMoreButton]);
+    this.loadMoreFooter.hidden = true;
+    this.tableScroll = el('div', {
+      className: 'table-scroll',
+      attrs: { tabindex: '0', 'aria-label': 'Commit history, use arrow keys to select' },
+    }, [this.table, this.loadMoreFooter]);
     this.tableScroll.addEventListener('keydown', (event) => this.handleTableKeydown(event));
+    this.tableScroll.addEventListener('scroll', () => {
+      if (this.scrollFrame !== null) {
+        return;
+      }
+      this.scrollFrame = requestAnimationFrame(() => {
+        this.scrollFrame = null;
+        this.renderVirtualRows();
+        if (
+          this.lastState?.snapshot?.hasMoreCommits &&
+          !this.lastState.isLoadingMore &&
+          shouldPrefetchMoreCommits(
+            this.tableScroll.scrollTop,
+            this.tableScroll.clientHeight,
+            this.tableScroll.scrollHeight,
+            ROW_HEIGHT,
+          )
+        ) {
+          this.requestMoreCommits();
+        }
+      });
+    });
 
     this.detailsTitle = el('span', { className: 'details-title' });
     this.detailsToggle = button({ className: 'icon-button', label: 'Collapse commit details', icon: 'chevronDown' });
@@ -373,6 +418,7 @@ export class HistoryPane {
 
   public update(state: ExplorerUiState): void {
     const previousSelection = this.lastState?.selectedCommitHash ?? null;
+    const previousScrollTop = this.tableScroll.scrollTop;
     this.lastState = state;
     const { snapshot } = state;
 
@@ -425,17 +471,37 @@ export class HistoryPane {
 
     this.renderBreadcrumb(state);
     this.renderRows(state);
+    this.renderLoadMoreFooter(state);
     this.renderDetails(state);
     if (state.selectedCommitHash !== null && state.selectedCommitHash === this.pendingRevealHash) {
-      this.tbody.querySelector('tr.selected')?.scrollIntoView({ block: 'center', behavior: 'smooth' });
       this.pendingRevealHash = null;
     } else if (state.selectedCommitHash !== null && state.selectedCommitHash !== previousSelection) {
-      this.tbody.querySelector('tr.selected')?.scrollIntoView({ block: 'nearest' });
+      const rowIndex = this.visibleCommits.findIndex((commit) => commit.hash === state.selectedCommitHash);
+      if (rowIndex >= 0) {
+        const rowTop = rowIndex * ROW_HEIGHT;
+        const rowBottom = rowTop + ROW_HEIGHT;
+        if (rowTop < this.tableScroll.scrollTop || rowBottom > this.tableScroll.scrollTop + this.tableScroll.clientHeight) {
+          this.tableScroll.scrollTop = computeRevealScrollTop(rowIndex, ROW_HEIGHT, this.tableScroll.clientHeight);
+          this.renderVirtualRows();
+        }
+      }
+    }
+    if (!state.isLoadingMore) {
+      this.loadRequested = false;
+    }
+    if (state.selectedCommitHash === previousSelection) {
+      this.tableScroll.scrollTop = previousScrollTop;
     }
   }
 
   public revealCommit(hash: string): void {
     this.pendingRevealHash = hash;
+    const rowIndex = this.visibleCommits.findIndex((commit) => commit.hash === hash);
+    if (rowIndex < 0) {
+      return;
+    }
+    this.tableScroll.scrollTop = computeRevealScrollTop(rowIndex, ROW_HEIGHT, this.tableScroll.clientHeight);
+    this.renderVirtualRows();
   }
 
   private renderBreadcrumb(state: ExplorerUiState): void {
@@ -459,11 +525,23 @@ export class HistoryPane {
     const { snapshot } = state;
     if (!snapshot) {
       this.visibleCommits = [];
+      this.graphLayout = [];
+      this.visibleCommitKey = '';
       this.commitCountStatus.hidden = true;
       this.tbody.replaceChildren(this.placeholderRow(state.errorMessage ? 'No history available.' : 'Loading\u2026'));
       return;
     }
-    this.visibleCommits = computeVisibleCommits(snapshot, state);
+    const nextVisibleCommits = computeVisibleCommits(snapshot, state);
+    const nextKey = nextVisibleCommits.map((commit) => commit.hash).join(',');
+    if (nextKey !== this.visibleCommitKey) {
+      this.visibleCommits = nextVisibleCommits;
+      this.visibleCommitKey = nextKey;
+      this.graphLayout = computeGraphLayout(this.visibleCommits);
+      this.activeGraphWidth = Math.max(MIN_GRAPH_COLUMN_WIDTH, graphWidth(this.graphLayout[0]?.maxLanesInWindow ?? 1));
+      this.applyColumnWidths();
+    } else {
+      this.visibleCommits = nextVisibleCommits;
+    }
     const countText = describeCommitCount(snapshot, this.visibleCommits.length);
     this.commitCountStatus.hidden = countText === null;
     this.commitCountStatus.textContent = countText ?? '';
@@ -471,10 +549,61 @@ export class HistoryPane {
       this.tbody.replaceChildren(this.placeholderRow(describeEmptyHistory(snapshot, state)));
       return;
     }
-    const layout = computeGraphLayout(this.visibleCommits);
-    this.activeGraphWidth = Math.max(MIN_GRAPH_COLUMN_WIDTH, graphWidth(layout[0]?.maxLanesInWindow ?? 1));
-    this.applyColumnWidths();
-    this.tbody.replaceChildren(...this.visibleCommits.map((commit, i) => this.renderRow(commit, layout[i], snapshot, state)));
+    this.renderVirtualRows();
+  }
+
+  private renderVirtualRows(): void {
+    const state = this.lastState;
+    const snapshot = state?.snapshot;
+    if (!state || !snapshot || this.visibleCommits.length === 0) {
+      return;
+    }
+    const window = computeVirtualWindow(
+      this.visibleCommits.length,
+      ROW_HEIGHT,
+      this.tableScroll.scrollTop,
+      this.tableScroll.clientHeight,
+    );
+    const rows: HTMLTableRowElement[] = [];
+    if (window.topSpacerHeight > 0) {
+      rows.push(this.spacerRow(window.topSpacerHeight));
+    }
+    for (let index = window.startIndex; index < window.endIndex; index++) {
+      rows.push(this.renderRow(this.visibleCommits[index], this.graphLayout[index], snapshot, state));
+    }
+    if (window.bottomSpacerHeight > 0) {
+      rows.push(this.spacerRow(window.bottomSpacerHeight));
+    }
+    this.tbody.replaceChildren(...rows);
+  }
+
+  private spacerRow(height: number): HTMLTableRowElement {
+    const cell = el('td', { className: 'virtual-spacer-cell', attrs: { colspan: String(COLUMNS.length) } });
+    cell.style.height = `${height}px`;
+    return el('tr', { className: 'virtual-spacer-row', attrs: { 'aria-hidden': 'true' } }, [cell]);
+  }
+
+  private renderLoadMoreFooter(state: ExplorerUiState): void {
+    const visible = state.snapshot?.hasMoreCommits === true || state.isLoadingMore;
+    this.loadMoreFooter.hidden = !visible;
+    this.loadMoreButton.hidden = state.isLoadingMore;
+    this.loadMoreButton.disabled = state.isLoadingMore;
+    this.loadMoreFooter.textContent = state.isLoadingMore ? 'Loading older commits\u2026' : '';
+    if (!state.isLoadingMore && visible) {
+      this.loadMoreFooter.replaceChildren(this.loadMoreButton);
+    }
+  }
+
+  private requestMoreCommits(): void {
+    if (
+      this.loadRequested ||
+      this.lastState?.isLoadingMore ||
+      !this.lastState?.snapshot?.hasMoreCommits
+    ) {
+      return;
+    }
+    this.loadRequested = true;
+    this.callbacks.onLoadMoreCommits();
   }
 
   private renderHeaderCell(key: ColumnKey, label: string): HTMLTableCellElement {
@@ -561,7 +690,7 @@ export class HistoryPane {
   }
 
   private renderRow(commit: CommitNode, graph: GraphRowLayout, snapshot: RepoSnapshot, state: ExplorerUiState): HTMLTableRowElement {
-    const selected = commit.hash === state.selectedCommitHash;
+    const selected = commit.hash === state.selectedCommitHash || commit.hash === this.pendingRevealHash;
 
     return el(
       'tr',
@@ -594,13 +723,15 @@ export class HistoryPane {
   private renderDetails(state: ExplorerUiState): void {
     const { snapshot } = state;
     const commit = snapshot?.commits.find((c) => c.hash === state.selectedCommitHash);
-    if (!snapshot || !commit) {
+    const selectedHash = state.selectedCommitHash;
+    const outsideDetails = selectedHash === null ? undefined : state.commitDetails.get(selectedHash);
+    if (!snapshot || selectedHash === null || (!commit && !outsideDetails)) {
       this.details.hidden = true;
       this.detailsBody.replaceChildren();
       return;
     }
     this.details.hidden = false;
-    this.detailsTitle.textContent = `Commit ${commit.shortHash}`;
+    this.detailsTitle.textContent = `Commit ${(commit?.hash ?? selectedHash).slice(0, 8)}`;
     this.detailsToggle.replaceChildren(icon(this.isDetailsCollapsed ? 'chevronRight' : 'chevronDown'));
     const toggleLabel = this.isDetailsCollapsed ? 'Expand commit details' : 'Collapse commit details';
     this.detailsToggle.setAttribute('aria-label', toggleLabel);
@@ -609,7 +740,30 @@ export class HistoryPane {
     this.detailsBody.hidden = this.isDetailsCollapsed;
 
     const copy = button({ className: 'toolbar-button', label: 'Copy Hash', title: 'Copy the full commit hash', icon: 'copy', showLabel: true });
-    copy.addEventListener('click', () => this.callbacks.onCopyHash(commit.hash));
+    copy.addEventListener('click', () => this.callbacks.onCopyHash(selectedHash));
+
+    const field = (label: string, value: Node[]): HTMLElement[] => [
+      el('dt', { text: label }),
+      el('dd', {}, value),
+    ];
+    const details = state.commitDetails.get(selectedHash);
+    if (!commit) {
+      this.detailsBody.replaceChildren(
+        el('div', {
+          className: 'details-outside-graph-note',
+          text: 'Commit is outside the currently loaded history window (showing details directly).',
+        }),
+        el('dl', { className: 'details-grid' }, [
+          ...field('Commit', [el('code', { className: 'hash full-hash', text: selectedHash }), copy]),
+          ...field('Message', [
+            el('pre', { className: 'details-message details-body-text', text: outsideDetails?.body ?? '' }),
+          ]),
+        ]),
+        this.renderChangedFiles(selectedHash, outsideDetails),
+        this.renderDetailsActions(selectedHash, state),
+      );
+      return;
+    }
 
     const knownHashes = new Set(snapshot.commits.map((c) => c.hash));
     const parents =
@@ -624,12 +778,6 @@ export class HistoryPane {
             return link;
           });
 
-    const field = (label: string, value: Node[]): HTMLElement[] => [
-      el('dt', { text: label }),
-      el('dd', {}, value),
-    ];
-
-    const details = state.commitDetails.get(commit.hash);
     const message = details
       ? el('pre', { className: 'details-message details-body-text', text: details.body || commit.subject })
       : el('span', { className: 'details-message', text: commit.subject });
@@ -643,12 +791,12 @@ export class HistoryPane {
         ...(commit.refs.length > 0 ? field('Refs', commit.refs.map((ref) => pill(ref, snapshot))) : []),
         ...field('Message', [message]),
       ]),
-      this.renderChangedFiles(commit, details),
-      this.renderDetailsActions(commit, state),
+      this.renderChangedFiles(commit.hash, details),
+      this.renderDetailsActions(commit.hash, state),
     );
   }
 
-  private renderChangedFiles(commit: CommitNode, details: CommitDetails | undefined): HTMLElement {
+  private renderChangedFiles(commitHash: string, details: CommitDetails | undefined): HTMLElement {
     const heading = el('div', {
       className: 'changed-files-heading',
       text: details ? `Changed files (${details.files.length})` : 'Changed files',
@@ -662,31 +810,50 @@ export class HistoryPane {
     const items = details.files.map((file) => {
       const statusLabel = FILE_STATUS_LABELS[file.status];
       const pathText = file.oldPath ? `${file.oldPath} \u2192 ${file.path}` : file.path;
-      const fileButton = el('button', {
-        className: 'changed-file',
-        title: `${statusLabel}: ${pathText}\nClick to compare with the parent commit`,
-        attrs: { type: 'button' },
-      }, [
+      const rowChildren = [
         el('span', { className: `file-status file-status-${file.status}`, text: file.status, attrs: { 'aria-label': statusLabel } }),
         el('span', { className: 'file-path', text: pathText }),
-      ]);
-      fileButton.addEventListener('click', () => this.callbacks.onOpenFileDiff(commit.hash, file));
+      ];
+      const fileButton = el('div', {
+        className: 'changed-file',
+        title: `${statusLabel}: ${pathText}\nClick to compare with the parent commit`,
+        attrs: { role: 'button', tabindex: '0' },
+      }, rowChildren);
+      const openFile = button({
+        className: 'icon-button changed-file-open',
+        label: 'Open File',
+        icon: 'openFile',
+      });
+      openFile.title = 'Open File';
+      openFile.addEventListener('click', (event) => {
+        event.stopPropagation();
+        this.callbacks.onOpenFile?.({ hash: commitHash, filePath: file.path, status: file.status });
+      });
+      openFile.addEventListener('keydown', (event) => event.stopPropagation());
+      fileButton.append(openFile);
+      fileButton.addEventListener('click', () => this.callbacks.onOpenFileDiff(commitHash, file));
+      fileButton.addEventListener('keydown', (event) => {
+        if (event.target === fileButton && (event.key === 'Enter' || event.key === ' ')) {
+          event.preventDefault();
+          this.callbacks.onOpenFileDiff(commitHash, file);
+        }
+      });
       return el('li', {}, [fileButton]);
     });
     return el('div', { className: 'changed-files' }, [heading, el('ul', { className: 'changed-file-list' }, items)]);
   }
 
-  private renderDetailsActions(commit: CommitNode, state: ExplorerUiState): HTMLElement {
+  private renderDetailsActions(commitHash: string, state: ExplorerUiState): HTMLElement {
     const actions: HTMLElement[] = [];
     if (state.integrations.githubRemoteUrl !== null) {
       const openOnGitHub = button({
         className: 'toolbar-button',
         label: 'Open on GitHub',
-        title: `Open ${commit.shortHash} on ${state.integrations.githubRemoteUrl}`,
+        title: `Open ${commitHash.slice(0, 8)} on ${state.integrations.githubRemoteUrl}`,
         icon: 'linkExternal',
         showLabel: true,
       });
-      openOnGitHub.addEventListener('click', () => this.callbacks.onOpenCommitOnGitHub(commit.hash));
+      openOnGitHub.addEventListener('click', () => this.callbacks.onOpenCommitOnGitHub(commitHash));
       const signIn = button({ className: 'link-button', label: 'Sign in to GitHub', title: 'Sign in with your GitHub account', showLabel: true });
       signIn.addEventListener('click', () => this.callbacks.onSignInGitHub());
       actions.push(openOnGitHub, signIn);

@@ -4,6 +4,7 @@ import type { ExtensionToWebviewMessage, SyncStatePayload } from '../src/types/m
 
 const mocks = vi.hoisted(() => ({
   getRepoSnapshot: vi.fn(),
+  getCommitPage: vi.fn(),
   checkoutBranch: vi.fn(),
   getCommitDetails: vi.fn(),
   getGitHubRemoteUrl: vi.fn(),
@@ -24,6 +25,9 @@ const mocks = vi.hoisted(() => ({
   resetCurrentBranch: vi.fn(),
   revertMergeCommit: vi.fn(),
   openCommitFileDiff: vi.fn(),
+  buildShowUri: vi.fn(),
+  stat: vi.fn(),
+  showTextDocument: vi.fn(),
   openGitHubCommit: vi.fn(),
   isTrusted: true,
   trustGrantedListeners: [] as Array<() => void>,
@@ -61,6 +65,10 @@ vi.mock('vscode', () => {
       showErrorMessage: mocks.showErrorMessage,
       showInformationMessage: mocks.showInformationMessage,
       withProgress: (_options: unknown, task: () => Promise<void>) => task(),
+      showTextDocument: mocks.showTextDocument,
+    },
+    Uri: {
+      file: (fsPath: string) => ({ scheme: 'file', fsPath }),
     },
     ProgressLocation: { Notification: 15 },
     RelativePattern: class {},
@@ -70,6 +78,7 @@ vi.mock('vscode', () => {
 vi.mock('../src/git/gitService', () => ({
   GitService: class {
     getRepoSnapshot = mocks.getRepoSnapshot;
+    getCommitPage = mocks.getCommitPage;
     checkoutBranch = mocks.checkoutBranch;
     getGitHubRemoteUrl = mocks.getGitHubRemoteUrl;
     getCommitDetails = mocks.getCommitDetails;
@@ -89,18 +98,24 @@ vi.mock('../src/git/gitService', () => ({
   },
   isValidCommitHash: (value: string): boolean => /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value),
 }));
+
+vi.mock('fs', () => ({ promises: { stat: mocks.stat } }));
 vi.mock('../src/github/githubService', () => ({
   GitHubService: class {
     openCommit = mocks.openGitHubCommit;
   },
 }));
-vi.mock('../src/git/gitDiffProvider', () => ({ openCommitFileDiff: mocks.openCommitFileDiff }));
+vi.mock('../src/git/gitDiffProvider', () => ({
+  openCommitFileDiff: mocks.openCommitFileDiff,
+  buildShowUri: mocks.buildShowUri,
+}));
 vi.mock('../src/git/gitGraphInterop', () => ({ findGitGraphExtensionId: () => null, openInGitGraph: vi.fn() }));
 
 import type { RepoCoordinatorHost, SurfaceId, WebviewSurface } from '../src/webview/RepoCoordinator';
 import { RepoCoordinator } from '../src/webview/RepoCoordinator';
 
 const sha = (char: string): string => char.repeat(40);
+const indexedSha = (index: number): string => index.toString(16).padStart(40, '0');
 
 function branch(name: string, isCurrent: boolean): BranchInfo {
   return {
@@ -128,6 +143,7 @@ function makeSnapshot(branches: BranchInfo[]): RepoSnapshot {
     remoteGroups: [],
     tags: [{ name: 'v1', fullName: 'refs/tags/v1', targetHash: sha('a') }],
     commits: [],
+    hasMoreCommits: false,
   };
 }
 
@@ -172,10 +188,12 @@ describe('RepoCoordinator', () => {
   let host: RepoCoordinatorHost & {
     setTabPinned: ReturnType<typeof vi.fn>;
     setShowCheckedOutBadge: ReturnType<typeof vi.fn>;
+    setShowFolderCounts: ReturnType<typeof vi.fn>;
     setTrackingOrder: ReturnType<typeof vi.fn>;
     openPanel: ReturnType<typeof vi.fn>;
   };
   let showCheckedOutBadge = true;
+  let showFolderCounts = true;
   let trackingOrder: 'vscode' | 'visualStudio' = 'vscode';
   let coordinator: RepoCoordinator;
   let sidebar: FakeSurface;
@@ -186,16 +204,31 @@ describe('RepoCoordinator', () => {
     mocks.isTrusted = true;
     mocks.trustGrantedListeners.length = 0;
     mocks.getRepoSnapshot.mockImplementation(async () => MAIN_AND_FEATURE());
+    mocks.getCommitPage.mockResolvedValue({ commits: [], hasMoreCommits: false });
+    mocks.getCommitDetails.mockResolvedValue({ hash: sha('d'), body: 'details', files: [] });
     mocks.getGitHubRemoteUrl.mockResolvedValue(null);
     mocks.checkoutBranch.mockResolvedValue(undefined);
     mocks.openGitHubCommit.mockResolvedValue(true);
     showCheckedOutBadge = true;
+    showFolderCounts = true;
+    mocks.stat.mockResolvedValue({ isFile: () => true });
+    mocks.buildShowUri.mockImplementation((repoRoot: string, revSpec: string, filePath: string) => ({
+      scheme: 'git-repo-explorer-show',
+      repoRoot,
+      revSpec,
+      filePath,
+    }));
+    mocks.showTextDocument.mockResolvedValue(undefined);
     trackingOrder = 'vscode';
     host = {
       getTabPinned: () => false,
       setTabPinned: vi.fn(),
       getShowCheckedOutBadge: () => showCheckedOutBadge,
       setShowCheckedOutBadge: vi.fn(),
+      getShowFolderCounts: () => showFolderCounts,
+      setShowFolderCounts: vi.fn((show: boolean) => {
+        showFolderCounts = show;
+      }),
       getTrackingOrder: () => trackingOrder,
       setTrackingOrder: vi.fn((order: 'vscode' | 'visualStudio') => {
         trackingOrder = order;
@@ -216,7 +249,82 @@ describe('RepoCoordinator', () => {
     coordinator.handleMessage('editor', { type: 'webviewReady' });
   }
 
+  it('loads more commits single-flight and broadcasts only deduplicated appends', async () => {
+    const snapshot = MAIN_AND_FEATURE();
+    snapshot.commits = [commitNode(sha('a'))];
+    snapshot.hasMoreCommits = true;
+    mocks.getRepoSnapshot.mockResolvedValue(snapshot);
+    let resolvePage: ((value: { commits: RepoSnapshot['commits']; hasMoreCommits: boolean }) => void) | undefined;
+    mocks.getCommitPage.mockImplementation(
+      () => new Promise((resolve) => {
+        resolvePage = resolve;
+      }),
+    );
+    await openBoth();
+
+    coordinator.handleMessage('editor', { type: 'loadMoreCommits' });
+    coordinator.handleMessage('editor', { type: 'loadMoreCommits' });
+    expect(mocks.getCommitPage).toHaveBeenCalledTimes(1);
+    resolvePage?.({
+      commits: [commitNode(sha('a')), commitNode(sha('b'))],
+      hasMoreCommits: false,
+    });
+
+    await vi.waitFor(() => expect(editor.ofType('commitsAppended')).toEqual([
+      {
+        type: 'commitsAppended',
+        payload: { commits: [commitNode(sha('b'))], hasMoreCommits: false },
+      },
+    ]));
+    expect(sidebar.ofType('commitsAppended')).toEqual(editor.ofType('commitsAppended'));
+  });
+
+  it('auto-pages a deep reveal until the commit is found', async () => {
+    const snapshot = MAIN_AND_FEATURE();
+    snapshot.commits = [commitNode(indexedSha(1))];
+    snapshot.hasMoreCommits = true;
+    const target = indexedSha(3);
+    mocks.getRepoSnapshot.mockResolvedValue(snapshot);
+    mocks.getCommitPage
+      .mockResolvedValueOnce({ commits: [commitNode(indexedSha(2))], hasMoreCommits: true })
+      .mockResolvedValueOnce({ commits: [commitNode(target)], hasMoreCommits: false });
+    await openBoth();
+
+    coordinator.revealCommit(target);
+    await vi.waitFor(() => expect(editor.ofType('revealCommit')).toEqual([
+      { type: 'revealCommit', payload: { hash: target } },
+    ]));
+    expect(mocks.getCommitPage).toHaveBeenCalledTimes(2);
+    expect(mocks.getCommitPage).toHaveBeenNthCalledWith(1, '/repo', 1);
+    expect(mocks.getCommitPage).toHaveBeenNthCalledWith(2, '/repo', 2);
+  });
+
+  it('falls back to direct details after the deep reveal search cap', async () => {
+    const snapshot = MAIN_AND_FEATURE();
+    snapshot.commits = [commitNode(indexedSha(1))];
+    snapshot.hasMoreCommits = true;
+    const target = sha('f');
+    mocks.getRepoSnapshot.mockResolvedValue(snapshot);
+    mocks.getCommitPage.mockImplementation(async (_repoRoot: string, skip: number) => ({
+      commits: [commitNode(indexedSha(skip + 1))],
+      hasMoreCommits: true,
+    }));
+    const details = { hash: target, body: 'outside history', files: [] };
+    mocks.getCommitDetails.mockResolvedValue(details);
+    await openBoth();
+
+    coordinator.revealCommit(target);
+    await vi.waitFor(() => expect(editor.ofType('revealCommit')).toEqual([
+      { type: 'revealCommit', payload: { hash: target, outsideGraph: true } },
+    ]));
+    expect(mocks.getCommitPage).toHaveBeenCalledTimes(10);
+    expect(editor.ofType('commitDetails')).toContainEqual({ type: 'commitDetails', payload: details });
+  });
+
   it('reveals a valid commit immediately and normalizes uppercase hashes', async () => {
+    const snapshot = MAIN_AND_FEATURE();
+    snapshot.commits = [commitNode(sha('a'))];
+    mocks.getRepoSnapshot.mockResolvedValue(snapshot);
     await openBoth();
     coordinator.revealCommit('A'.repeat(40));
     expect(editor.ofType('revealCommit')).toEqual([
@@ -234,13 +342,14 @@ describe('RepoCoordinator', () => {
 
   it('queues a reveal during cold start and flushes after the editor snapshot loads', async () => {
     const uppercaseSha256 = 'A'.repeat(64);
+    mocks.getCommitDetails.mockResolvedValue({ hash: 'a'.repeat(64), body: 'details', files: [] });
     coordinator.revealCommit(uppercaseSha256);
     expect(editor.ofType('revealCommit')).toEqual([]);
 
     coordinator.attach(editor);
     coordinator.handleMessage('editor', { type: 'webviewReady' });
     await vi.waitFor(() => expect(editor.ofType('revealCommit')).toEqual([
-      { type: 'revealCommit', payload: { hash: 'a'.repeat(64) } },
+      { type: 'revealCommit', payload: { hash: 'a'.repeat(64), outsideGraph: true } },
     ]));
   });
 
@@ -255,13 +364,14 @@ describe('RepoCoordinator', () => {
     expect(editor.ofType('revealCommit')).toEqual([]);
 
     coordinator.handleMessage('editor', { type: 'webviewReady' });
+    await vi.waitFor(() => expect(editor.ofType('revealCommit')).toHaveLength(1));
     const messageTypes = editor.messages.map((message) => message.type);
     const snapshotIndex = messageTypes.indexOf('repoSnapshot');
     const revealIndex = messageTypes.indexOf('revealCommit');
     expect(snapshotIndex).toBeGreaterThanOrEqual(0);
     expect(revealIndex).toBeGreaterThan(snapshotIndex);
     expect(editor.ofType('revealCommit')).toEqual([
-      { type: 'revealCommit', payload: { hash } },
+      { type: 'revealCommit', payload: { hash, outsideGraph: true } },
     ]);
 
     coordinator.handleMessage('editor', { type: 'webviewReady' });
@@ -662,6 +772,91 @@ describe('RepoCoordinator', () => {
       expect(surface.messages[surface.messages.length - 1].type).toBe('repoSnapshot');
       expect(surface.ofType('repoSnapshot')).toHaveLength(2);
     }
+  });
+
+  it('persists and synchronizes folder branch count changes with the snapshot', async () => {
+    await openBoth();
+    expect(sidebar.ofType('initState')[0].payload).toMatchObject({ showFolderCounts: true });
+
+    coordinator.handleMessage('sidebar', { type: 'setShowFolderCounts', payload: { show: false } });
+
+    expect(host.setShowFolderCounts).toHaveBeenCalledWith(false);
+    for (const surface of [sidebar, editor]) {
+      const inits = surface.ofType('initState');
+      expect(inits[inits.length - 1].payload).toMatchObject({ showFolderCounts: false });
+      expect(surface.messages[surface.messages.length - 1].type).toBe('repoSnapshot');
+      expect(surface.ofType('repoSnapshot')).toHaveLength(2);
+    }
+  });
+
+  it('rejects openFile operations in an untrusted workspace', async () => {
+    await openBoth();
+    mocks.isTrusted = false;
+
+    coordinator.handleMessage('editor', {
+      type: 'openFile',
+      payload: { hash: sha('a'), filePath: 'src/a.ts', status: 'M' },
+    });
+
+    expect(mocks.stat).not.toHaveBeenCalled();
+    expect(mocks.showTextDocument).not.toHaveBeenCalled();
+  });
+
+  it('rejects openFile path traversal without touching the filesystem', async () => {
+    await openBoth();
+
+    coordinator.handleMessage('editor', {
+      type: 'openFile',
+      payload: { hash: sha('a'), filePath: 'src/../../outside.ts', status: 'M' },
+    });
+
+    expect(mocks.stat).not.toHaveBeenCalled();
+    expect(mocks.buildShowUri).not.toHaveBeenCalled();
+    expect(mocks.showTextDocument).not.toHaveBeenCalled();
+  });
+
+  it('opens an existing working-tree file directly', async () => {
+    await openBoth();
+
+    coordinator.handleMessage('editor', {
+      type: 'openFile',
+      payload: { hash: sha('a'), filePath: 'src/a.ts', status: 'M' },
+    });
+
+    await vi.waitFor(() => expect(mocks.showTextDocument).toHaveBeenCalledTimes(1));
+    expect(mocks.stat).toHaveBeenCalledTimes(1);
+    expect(mocks.showTextDocument).toHaveBeenCalledWith(
+      expect.objectContaining({ scheme: 'file', fsPath: expect.stringMatching(/src[\\/]a\.ts$/) }),
+    );
+    expect(mocks.buildShowUri).not.toHaveBeenCalled();
+  });
+
+  it('opens deleted and missing files from a read-only commit revision', async () => {
+    await openBoth();
+
+    coordinator.handleMessage('editor', {
+      type: 'openFile',
+      payload: { hash: sha('a'), filePath: 'deleted.ts', status: 'D' },
+    });
+    await vi.waitFor(() => expect(mocks.showTextDocument).toHaveBeenCalledTimes(1));
+    expect(mocks.buildShowUri).toHaveBeenLastCalledWith(
+      '/repo',
+      `${sha('a')}~1:deleted.ts`,
+      'deleted.ts',
+    );
+    expect(mocks.stat).not.toHaveBeenCalled();
+
+    mocks.stat.mockRejectedValueOnce(new Error('ENOENT'));
+    coordinator.handleMessage('editor', {
+      type: 'openFile',
+      payload: { hash: sha('b'), filePath: 'missing.ts', status: 'M' },
+    });
+    await vi.waitFor(() => expect(mocks.showTextDocument).toHaveBeenCalledTimes(2));
+    expect(mocks.buildShowUri).toHaveBeenLastCalledWith(
+      '/repo',
+      `${sha('b')}:missing.ts`,
+      'missing.ts',
+    );
   });
 
   it('forgets the repository once every view is gone and reloads for the next one', async () => {

@@ -1,5 +1,6 @@
 import type { SyncStatePayload, TrackingIndicatorOrder } from '../../types/messages';
 import type { BranchInfo, CommitDetails, CommitNode, ExternalIntegrationsInfo, RefBadge, RepoSnapshot, TagInfo } from '../../types/git';
+import { collectAncestorFolderIds } from './branchFolderTree';
 
 export const NODE_BRANCHES = 'branches';
 export const NODE_TAGS = 'tags';
@@ -135,6 +136,8 @@ export interface ExplorerUiState {
   snapshot: RepoSnapshot | null;
   errorMessage: string | null;
   isLoading: boolean;
+  /** True while the next older-commit page is being fetched. */
+  isLoadingMore: boolean;
   branchFilterText: string;
   historyFilterText: string;
   /** Branches isolated via the eye toggle; empty means every branch's history is shown. */
@@ -147,6 +150,8 @@ export interface ExplorerUiState {
   tabPinned: boolean;
   /** Whether the sidebar shows the "Checked Out" pill (the check icon and accent bar always mark HEAD). */
   showCheckedOutBadge: boolean;
+  /** Whether folder rows in the sidebar show their branch counts. */
+  showFolderCounts: boolean;
   /** Preferred branch ahead/behind counter order. */
   trackingOrder: TrackingIndicatorOrder;
   showLocalBranchBadges: boolean;
@@ -167,6 +172,7 @@ export function createInitialState(): ExplorerUiState {
     snapshot: null,
     errorMessage: null,
     isLoading: true,
+    isLoadingMore: false,
     branchFilterText: '',
     historyFilterText: '',
     pinnedBranchFullNames: new Set(),
@@ -174,6 +180,7 @@ export function createInitialState(): ExplorerUiState {
     selectedBranchRef: null,
     tabPinned: false,
     showCheckedOutBadge: true,
+    showFolderCounts: true,
     trackingOrder: 'vscode',
     showLocalBranchBadges: true,
     showRemoteBranchBadges: true,
@@ -435,6 +442,7 @@ export function reconcileStateWithSnapshot(
   state: ExplorerUiState,
   snapshot: RepoSnapshot,
   knownRemoteNames: ReadonlySet<string>,
+  folderExpansionStateLoaded = false,
 ): ExplorerUiState {
   const fullNames = new Set(getAllBranches(snapshot).map((b) => b.fullName));
   const pinned = new Set([...state.pinnedBranchFullNames].filter((name) => fullNames.has(name)));
@@ -444,6 +452,21 @@ export function reconcileStateWithSnapshot(
   for (const group of snapshot.remoteGroups) {
     if (!knownRemoteNames.has(group.remoteName)) {
       expandedNodes.add(remoteNodeKey(group.remoteName));
+    }
+  }
+  const currentBranch = snapshot.localBranches.find((branch) => branch.isCurrent);
+  const previousCurrentBranch = state.snapshot?.localBranches.find((branch) => branch.isCurrent);
+  const shouldRevealCurrent =
+    currentBranch !== undefined &&
+    ((state.snapshot === null && !folderExpansionStateLoaded) ||
+      (state.snapshot !== null && previousCurrentBranch?.fullName !== currentBranch.fullName));
+  if (shouldRevealCurrent) {
+    for (const id of collectAncestorFolderIds(
+      snapshot.localBranches,
+      'local',
+      new Set([currentBranch.fullName]),
+    )) {
+      expandedNodes.add(id);
     }
   }
   return {

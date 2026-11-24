@@ -146,9 +146,14 @@ const historyPane = new HistoryPane({
         ? { hash, filePath: file.path, status: file.status }
         : { hash, filePath: file.path, oldPath: file.oldPath, status: file.status },
     }),
+  onOpenFile: (file) => vscode.postMessage({ type: 'openFile', payload: file }),
   onOpenInGitGraph: () => vscode.postMessage({ type: 'openInGitGraph' }),
   onOpenCommitOnGitHub: (hash) => vscode.postMessage({ type: 'openCommitOnGitHub', payload: { hash } }),
   onSignInGitHub: () => vscode.postMessage({ type: 'signInGitHub' }),
+  onLoadMoreCommits: () => {
+    setState({ isLoadingMore: true });
+    vscode.postMessage({ type: 'loadMoreCommits' });
+  },
   onColumnWidthsChange: (widths) => {
     columnWidths = widths;
     persist();
@@ -179,9 +184,13 @@ function requestRefresh(): void {
   vscode.postMessage({ type: 'requestRefresh' });
 }
 
-function applyRevealCommit(hash: string): void {
+function applyRevealCommit(hash: string, outsideGraph = false): void {
   if (state.snapshot === null) {
     pendingRevealCommitHash = hash;
+    return;
+  }
+  if (outsideGraph) {
+    selectCommit(hash);
     return;
   }
   const commitExists = state.snapshot.commits.some((commit) => commit.hash === hash);
@@ -218,6 +227,7 @@ function handleMessage(message: ExtensionToWebviewMessage): void {
         isLoading: true,
         ...(message.payload.tabPinned === undefined ? {} : { tabPinned: message.payload.tabPinned }),
         ...(message.payload.showCheckedOutBadge === undefined ? {} : { showCheckedOutBadge: message.payload.showCheckedOutBadge }),
+        showFolderCounts: message.payload.showFolderCounts,
         ...(message.payload.trackingOrder === undefined ? {} : { trackingOrder: message.payload.trackingOrder }),
       });
       break;
@@ -233,6 +243,29 @@ function handleMessage(message: ExtensionToWebviewMessage): void {
         applyRevealCommit(hash);
       }
       break;
+    case 'commitsAppended': {
+      const snapshot = state.snapshot;
+      if (snapshot === null) {
+        break;
+      }
+      const knownHashes = new Set(snapshot.commits.map((commit) => commit.hash));
+      const appended = message.payload.commits.filter((commit) => {
+        if (knownHashes.has(commit.hash)) {
+          return false;
+        }
+        knownHashes.add(commit.hash);
+        return true;
+      });
+      setState({
+        snapshot: {
+          ...snapshot,
+          commits: [...snapshot.commits, ...appended],
+          hasMoreCommits: message.payload.hasMoreCommits,
+        },
+        isLoadingMore: false,
+      });
+      break;
+    }
     case 'repoError':
       setState({ snapshot: null, errorMessage: message.payload.message, isLoading: false, selectedCommitHash: null });
       break;
@@ -251,7 +284,7 @@ function handleMessage(message: ExtensionToWebviewMessage): void {
       setState(selectionPatch(normalizeSelection(state.snapshot, message.payload)));
       break;
     case 'revealCommit': {
-      applyRevealCommit(message.payload.hash);
+      applyRevealCommit(message.payload.hash, message.payload.outsideGraph === true);
       break;
     }
   }

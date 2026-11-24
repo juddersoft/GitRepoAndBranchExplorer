@@ -1,5 +1,6 @@
 import type { BranchInfo, RemoteGroup, RepoSnapshot, TagInfo } from '../../types/git';
 import type { TrackingIndicatorOrder } from '../../types/messages';
+import { buildBranchFolderTree, type BranchTreeNode } from './branchFolderTree';
 import { button, createSearchBox, el, icon, type IconName, rebuildPreservingFocus } from './dom';
 import { computeCheckedOutPillLayout, MIN_READABLE_PILL_SCALE } from './pillLayout';
 import type { ExplorerUiState, RefTarget, TrackingSummary } from './state';
@@ -261,7 +262,7 @@ export class BranchTree {
     const locals = filterBranches(snapshot.localBranches, state.branchFilterText);
     const localItems =
       locals.length > 0
-        ? locals.map((b) => this.renderBranch(b, state, 1))
+        ? this.renderBranchNodes(buildBranchFolderTree(locals, 'local'), 1, state, filtering)
         : [this.placeholder(filtering ? 'No matching branches' : `${snapshot.currentBranch} (no commits yet)`, 1)];
 
     const remoteNodes = snapshot.remoteGroups
@@ -275,6 +276,62 @@ export class BranchTree {
       depth: 0,
       open: isOpen(NODE_BRANCHES),
       children: [...localItems, ...remoteNodes],
+    });
+  }
+
+  private renderBranchNodes(
+    nodes: readonly BranchTreeNode[],
+    depth: number,
+    state: ExplorerUiState,
+    isFiltering: boolean,
+  ): HTMLLIElement[] {
+    return nodes.map((node) => {
+      if (node.kind === 'branch') {
+        return this.renderBranch(node.branch, state, depth, node.label);
+      }
+
+      const open = isFiltering || state.expandedNodes.has(node.id);
+      const row = el(
+        'div',
+        { className: 'tree-row tree-folder-row', title: node.fullPrefix },
+        [
+          icon(open ? 'chevronDown' : 'chevronRight', 'icon twisty'),
+          icon(open ? 'folderOpen' : 'folder', 'icon tree-folder-icon'),
+          el('span', { className: 'tree-label', text: node.name }),
+          ...(state.showFolderCounts
+            ? [el('span', { className: 'tree-folder-count', text: String(node.branchCount), attrs: { 'aria-hidden': 'true' } })]
+            : []),
+        ],
+      );
+      this.setTreeDepth(row, depth);
+      row.addEventListener('click', () => this.callbacks.onToggleNode(node.id));
+
+      const item = el(
+        'li',
+        {
+          className: 'tree-node tree-folder',
+          attrs: {
+            role: 'treeitem',
+            'aria-expanded': String(open),
+            'aria-level': String(depth + 1),
+            'aria-label': `${node.name}, ${node.branchCount} branch${node.branchCount === 1 ? '' : 'es'}`,
+            tabindex: '-1',
+            'data-focus-key': `folder:${node.id}`,
+            'data-node-key': node.id,
+          },
+        },
+        [row],
+      );
+      if (open) {
+        const group = el(
+          'ul',
+          { className: 'tree tree-group', attrs: { role: 'group' } },
+          this.renderBranchNodes(node.children, depth + 1, state, isFiltering),
+        );
+        group.style.setProperty('--tree-depth', String(depth));
+        item.append(group);
+      }
+      return item;
     });
   }
 
@@ -316,7 +373,12 @@ export class BranchTree {
       iconName: 'remote',
       depth: 1,
       open: isOpen(key),
-      children: branches.map((b) => this.renderBranch(b, state, 2)),
+      children: this.renderBranchNodes(
+        buildBranchFolderTree(branches, `remote:${group.remoteName}`, `${group.remoteName}/`),
+        2,
+        state,
+        filtering,
+      ),
     });
   }
 
@@ -333,12 +395,13 @@ export class BranchTree {
       ...(options.iconName ? [icon(options.iconName)] : []),
       el('span', { className: 'tree-label', text: options.label, title: options.label }),
     ]);
+    this.setTreeDepth(row, options.depth);
     row.addEventListener('click', () => this.callbacks.onToggleNode(options.key));
 
     const item = el(
       'li',
       {
-        className: 'tree-node tree-group',
+        className: 'tree-node tree-group-node',
         attrs: {
           role: 'treeitem',
           'aria-expanded': String(options.open),
@@ -357,7 +420,7 @@ export class BranchTree {
     return item;
   }
 
-  private renderBranch(branch: BranchInfo, state: ExplorerUiState, depth: number): HTMLLIElement {
+  private renderBranch(branch: BranchInfo, state: ExplorerUiState, depth: number, label = branch.displayName): HTMLLIElement {
     const pinned = state.pinnedBranchFullNames.has(branch.fullName);
     const canCheckout = !branch.isRemote && !branch.isCurrent;
 
@@ -377,6 +440,7 @@ export class BranchTree {
     const selected = state.selectedBranchFullName === branch.fullName;
     const tracking = trackingSummary(branch);
     const tooltip = [
+      branch.name,
       branch.fullName,
       branch.isCurrent ? 'Checked out' : null,
       branch.upstream ? `Tracking ${branch.upstream}` : null,
@@ -387,7 +451,7 @@ export class BranchTree {
       .filter((line): line is string => line !== null)
       .join('\n');
 
-    const rowClasses = ['tree-row', `depth-${depth}`];
+    const rowClasses = ['tree-row'];
     if (depth === 1) {
       rowClasses.push('tree-leaf');
     }
@@ -399,14 +463,15 @@ export class BranchTree {
     }
     const row = el('div', { className: rowClasses.join(' '), title: tooltip }, [
       el('span', { className: 'twisty-spacer' }),
-      branch.isCurrent ? icon('checkCircle', 'icon checked-out-icon') : icon('branch'),
-      el('span', { className: 'tree-label', text: branch.displayName }),
+      branch.isCurrent ? icon('check', 'icon checked-out-icon') : icon('branch'),
+      el('span', { className: 'tree-label', text: label }),
       ...(branch.isCurrent && state.showCheckedOutBadge
         ? [el('span', { className: 'checked-out-badge', text: 'Checked Out', title: 'This branch is checked out (HEAD)' })]
         : []),
       ...(tracking ? [trackingElement(tracking, this.trackingOrder)] : []),
       eye,
     ]);
+    this.setTreeDepth(row, depth);
     this.wireRefRow(row, target);
     if (canCheckout) {
       row.addEventListener('dblclick', () => this.callbacks.onCheckout(branch));
@@ -422,7 +487,7 @@ export class BranchTree {
     if (branch.isCurrent) {
       classes.push('checked-out');
     }
-    const labelParts = [branch.name];
+    const labelParts = [branch.name, `full ref ${branch.fullName}`];
     if (branch.isCurrent) {
       labelParts.push('checked out');
     }
@@ -460,11 +525,12 @@ export class BranchTree {
     const row = el(
       'div',
       {
-        className: selected ? 'tree-row depth-1 tree-leaf selected-ref' : 'tree-row depth-1 tree-leaf',
+        className: selected ? 'tree-row tree-leaf selected-ref' : 'tree-row tree-leaf',
         title: `${tag.fullName}\nClick to inspect its history\nRight-click for more actions`,
       },
       [el('span', { className: 'twisty-spacer' }), icon('tag'), el('span', { className: 'tree-label', text: tag.name })],
     );
+    this.setTreeDepth(row, 1);
     this.wireRefRow(row, target);
 
     return el(
@@ -496,9 +562,13 @@ export class BranchTree {
   }
 
   private placeholder(text: string, depth: number): HTMLLIElement {
-    return el('li', { className: 'tree-node', attrs: { role: 'none' } }, [
-      el('div', { className: `tree-row depth-${depth} placeholder`, text }),
-    ]);
+    const row = el('div', { className: 'tree-row placeholder', text });
+    this.setTreeDepth(row, depth);
+    return el('li', { className: 'tree-node', attrs: { role: 'none' } }, [row]);
+  }
+
+  private setTreeDepth(row: HTMLElement, depth: number): void {
+    row.style.setProperty('--tree-depth', String(depth));
   }
 
   /** Arrow keys move between visible items; Enter/Space activate; Left/Right collapse/expand. */

@@ -165,7 +165,7 @@ describe('static webview sink and Git spawning audit', () => {
   });
 
   it('contains no innerHTML or inline style= attributes in the new layout and history files', () => {
-    const files = ['pillLayout.ts', 'columnResize.ts', 'BranchTree.ts', 'HistoryPane.ts'];
+    const files = ['dom.ts', 'pillLayout.ts', 'columnResize.ts', 'BranchTree.ts', 'HistoryPane.ts'];
     for (const name of files) {
       const file = path.resolve('src/webview/ui', name);
       const source = fs.readFileSync(file, 'utf8');

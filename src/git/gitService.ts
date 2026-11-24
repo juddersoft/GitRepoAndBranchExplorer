@@ -330,7 +330,7 @@ export class GitService {
       this.resolveHead(repoRoot),
     ]);
     const refs = parseForEachRefOutput(refOutput);
-    const commits = parseGitLogOutput(await this.readLog(repoRoot), buildRefMap(refs, head.hash));
+    const page = await this.readLog(repoRoot, MAX_LOG_COMMITS, 0, buildRefMap(refs, head.hash));
 
     const isDetachedHead = head.branch === null;
     const currentBranch = head.branch ?? (head.hash ? `HEAD (${head.hash.slice(0, 8)})` : 'HEAD');
@@ -341,8 +341,21 @@ export class GitService {
       currentBranch,
       isDetachedHead,
       ...refs,
-      commits,
+      ...page,
     };
+  }
+
+  public async getCommitPage(
+    repoRoot: string,
+    skip: number,
+    limit = MAX_LOG_COMMITS,
+  ): Promise<{ commits: CommitNode[]; hasMoreCommits: boolean }> {
+    const [refOutput, head] = await Promise.all([
+      this.runGit(['for-each-ref', `--format=${FOR_EACH_REF_FORMAT}`, 'refs/heads', 'refs/remotes', 'refs/tags'], repoRoot),
+      this.resolveHead(repoRoot),
+    ]);
+    const refs = parseForEachRefOutput(refOutput);
+    return this.readLog(repoRoot, limit, skip, buildRefMap(refs, head.hash));
   }
 
   public async getCommitDetails(repoRoot: string, commitHash: string): Promise<CommitDetails> {
@@ -527,24 +540,32 @@ export class GitService {
     return { branch, hash };
   }
 
-  private async readLog(repoRoot: string): Promise<string> {
+  private async readLog(
+    repoRoot: string,
+    maxCount = MAX_LOG_COMMITS,
+    skip = 0,
+    refMap: Map<string, RefBadge[]> = new Map(),
+  ): Promise<{ commits: CommitNode[]; hasMoreCommits: boolean }> {
     try {
-      return await this.runGit(
-        [
-          'log',
-          // Stash and notes refs are bookkeeping commits, not history.
-          '--exclude=refs/stash',
-          '--exclude=refs/notes/*',
-          '--all',
-          '--topo-order',
-          `--max-count=${MAX_LOG_COMMITS}`,
-          `--format=${LOG_FORMAT}`,
-        ],
-        repoRoot,
-      );
+      const args = [
+        'log',
+        // Stash and notes refs are bookkeeping commits, not history.
+        '--exclude=refs/stash',
+        '--exclude=refs/notes/*',
+        '--all',
+        '--date-order',
+        `--max-count=${maxCount + 1}`,
+        ...(skip > 0 ? [`--skip=${skip}`] : []),
+        `--format=${LOG_FORMAT}`,
+      ];
+      const parsed = parseGitLogOutput(await this.runGit(args, repoRoot), refMap);
+      return {
+        commits: parsed.slice(0, maxCount),
+        hasMoreCommits: parsed.length > maxCount,
+      };
     } catch (err) {
       if (err instanceof GitExecutionError && /does not have any commits yet/i.test(err.stderr)) {
-        return '';
+        return { commits: [], hasMoreCommits: false };
       }
       throw err;
     }

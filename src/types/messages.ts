@@ -1,4 +1,4 @@
-import type { ChangedFileStatus, CommitDetails, ExternalIntegrationsInfo, RepoSnapshot } from './git';
+import type { ChangedFileStatus, CommitDetails, CommitNode, ExternalIntegrationsInfo, RepoSnapshot } from './git';
 
 export type TrackingIndicatorOrder = 'vscode' | 'visualStudio';
 
@@ -79,15 +79,18 @@ export type WebviewToExtensionMessage =
   | { type: 'webviewReady' }
   | { type: 'openRepositoryPanel' }
   | { type: 'requestRefresh' }
+  | { type: 'loadMoreCommits' }
   | { type: 'syncState'; payload: SyncStatePayload }
   | { type: 'checkoutBranch'; payload: { branchName: string } }
   | { type: 'gitAction'; payload: GitActionPayload }
   | { type: 'createBranchAtRef'; payload: { startPoint: string } }
   | { type: 'setTabPinned'; payload: { pinned: boolean } }
   | { type: 'setShowCheckedOutBadge'; payload: { show: boolean } }
+  | { type: 'setShowFolderCounts'; payload: { show: boolean } }
   | { type: 'setTrackingOrder'; payload: { order: TrackingIndicatorOrder } }
   | { type: 'copyCommitHash'; payload: { hash: string } }
   | { type: 'requestCommitDetails'; payload: { hash: string } }
+  | { type: 'openFile'; payload: { hash: string; filePath: string; status: string } }
   | { type: 'openFileDiff'; payload: OpenFileDiffPayload }
   | { type: 'openInGitGraph' }
   | { type: 'openCommitOnGitHub'; payload: { hash: string } }
@@ -133,6 +136,8 @@ export interface InitStatePayload {
   tabPinned?: boolean;
   /** Whether the sidebar shows the "Checked Out" pill next to the checked-out branch (default `true`). */
   showCheckedOutBadge: boolean;
+  /** Whether branch-folder rows show their contained branch counts (default `true`). */
+  showFolderCounts: boolean;
   /** Display incoming before outgoing counters like VS Code, or Visual Studio's outgoing-first order. */
   trackingOrder?: TrackingIndicatorOrder;
 }
@@ -145,12 +150,13 @@ export interface RepoErrorPayload {
 export type ExtensionToWebviewMessage =
   | { type: 'initState'; payload: InitStatePayload }
   | { type: 'repoSnapshot'; payload: RepoSnapshot }
+  | { type: 'commitsAppended'; payload: { commits: CommitNode[]; hasMoreCommits: boolean } }
   | { type: 'repoError'; payload: RepoErrorPayload }
   | { type: 'commitDetails'; payload: CommitDetails }
   | { type: 'integrationsInfo'; payload: ExternalIntegrationsInfo }
   | { type: 'actionStatus'; payload: ActionStatusPayload }
   | { type: 'syncState'; payload: SyncStatePayload }
-  | { type: 'revealCommit'; payload: { hash: string } };
+  | { type: 'revealCommit'; payload: { hash: string; outsideGraph?: boolean } };
 
 export interface ActionStatusPayload {
   busy: boolean;
@@ -251,6 +257,7 @@ export function isWebviewToExtensionMessage(value: unknown): value is WebviewToE
     case 'webviewReady':
     case 'openRepositoryPanel':
     case 'requestRefresh':
+    case 'loadMoreCommits':
       return true;
     case 'checkoutBranch': {
       const branchName = payload === null ? undefined : ownField(payload, 'branchName');
@@ -267,6 +274,7 @@ export function isWebviewToExtensionMessage(value: unknown): value is WebviewToE
     case 'setTabPinned':
       return payload !== null && typeof ownField(payload, 'pinned') === 'boolean';
     case 'setShowCheckedOutBadge':
+    case 'setShowFolderCounts':
       return payload !== null && typeof ownField(payload, 'show') === 'boolean';
     case 'setTrackingOrder':
       return payload !== null && isTrackingIndicatorOrder(ownField(payload, 'order'));
@@ -274,6 +282,7 @@ export function isWebviewToExtensionMessage(value: unknown): value is WebviewToE
     case 'requestCommitDetails':
     case 'openCommitOnGitHub':
       return payload !== null && isCommitHash(ownField(payload, 'hash'));
+    case 'openFile':
     case 'openFileDiff':
       return payload !== null && isOpenFileDiffPayload(payload);
     case 'openInGitGraph':
@@ -286,6 +295,30 @@ export function isWebviewToExtensionMessage(value: unknown): value is WebviewToE
 
 function isCommitHash(value: unknown): value is string {
   return typeof value === 'string' && COMMIT_HASH_PATTERN.test(value);
+}
+
+function isCommitNodeShape(value: unknown): value is CommitNode {
+  if (!isSafeRecord(value)) {
+    return false;
+  }
+  return (
+    isCommitHash(ownField(value, 'hash')) &&
+    typeof ownField(value, 'shortHash') === 'string' &&
+    Array.isArray(ownField(value, 'parents')) &&
+    (ownField(value, 'parents') as unknown[]).every(isCommitHash) &&
+    typeof ownField(value, 'subject') === 'string' &&
+    typeof ownField(value, 'authorName') === 'string' &&
+    typeof ownField(value, 'authorEmail') === 'string' &&
+    typeof ownField(value, 'authorDateIso') === 'string' &&
+    typeof ownField(value, 'authorTimestamp') === 'number' &&
+    Array.isArray(ownField(value, 'refs')) &&
+    (ownField(value, 'refs') as unknown[]).every(
+      (ref: unknown) =>
+        isSafeRecord(ref) &&
+        ['head', 'localBranch', 'remoteBranch', 'tag'].includes(String(ownField(ref, 'kind'))) &&
+        typeof ownField(ref, 'label') === 'string',
+    )
+  );
 }
 
 function isOpenFileDiffPayload(payload: Record<string, unknown>): boolean {
@@ -310,7 +343,8 @@ function isRepoSnapshotShape(p: Record<string, unknown>): boolean {
     Array.isArray(p.localBranches) &&
     Array.isArray(p.remoteGroups) &&
     Array.isArray(p.tags) &&
-    Array.isArray(p.commits)
+    Array.isArray(p.commits) &&
+    typeof p.hasMoreCommits === 'boolean'
   );
 }
 
@@ -326,10 +360,17 @@ export function isExtensionToWebviewMessage(value: unknown): value is ExtensionT
         (payload.workspacePath === null || typeof payload.workspacePath === 'string') &&
         (payload.tabPinned === undefined || typeof payload.tabPinned === 'boolean') &&
         (payload.showCheckedOutBadge === undefined || typeof payload.showCheckedOutBadge === 'boolean') &&
+        (payload.showFolderCounts === undefined || typeof payload.showFolderCounts === 'boolean') &&
         (payload.trackingOrder === undefined || isTrackingIndicatorOrder(payload.trackingOrder))
       );
     case 'repoSnapshot':
       return isRepoSnapshotShape(payload);
+    case 'commitsAppended':
+      return (
+        Array.isArray(payload.commits) &&
+        payload.commits.every((commit: unknown) => isCommitNodeShape(commit)) &&
+        typeof payload.hasMoreCommits === 'boolean'
+      );
     case 'repoError':
       return typeof payload.message === 'string' && (payload.code === undefined || typeof payload.code === 'string');
     case 'commitDetails':
@@ -356,7 +397,10 @@ export function isExtensionToWebviewMessage(value: unknown): value is ExtensionT
     case 'syncState':
       return isSyncStatePayload(payload);
     case 'revealCommit':
-      return isCommitHash(payload.hash);
+      return (
+        isCommitHash(payload.hash) &&
+        (payload.outsideGraph === undefined || typeof payload.outsideGraph === 'boolean')
+      );
     default:
       return false;
   }

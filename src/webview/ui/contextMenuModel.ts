@@ -16,6 +16,7 @@ export type MenuActionId =
   | 'newBranch'
   | 'refresh'
   | 'toggleCheckedOutBadge'
+  | 'toggleFolderCounts'
   | 'toggleTrackingOrder'
   | 'createBranchHere'
   | 'isolate'
@@ -145,6 +146,7 @@ export function buildRepoMenu(
   snapshot: RepoSnapshot,
   state: ExplorerUiState,
   showCheckedOutBadge = true,
+  showFolderCounts = true,
   trackingOrder: TrackingIndicatorOrder = 'vscode',
 ): MenuEntry[] {
   const busy = state.isBusy && BUSY_REASON;
@@ -168,6 +170,7 @@ export function buildRepoMenu(
     item('newBranch', 'New Branch\u2026', firstReason(busy)),
     SEPARATOR,
     item('toggleCheckedOutBadge', showCheckedOutBadge ? 'Hide "Checked Out" Badge' : 'Show "Checked Out" Badge'),
+    item('toggleFolderCounts', showFolderCounts ? 'Hide Folder Branch Counts' : 'Show Folder Branch Counts'),
     item(
       'toggleTrackingOrder',
       trackingOrder === 'vscode'

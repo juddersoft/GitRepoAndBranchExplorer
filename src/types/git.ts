@@ -82,4 +82,5 @@ export interface RepoSnapshot {
   remoteGroups: RemoteGroup[];
   tags: TagInfo[];
   commits: CommitNode[];
+  hasMoreCommits: boolean;
 }

@@ -3,6 +3,15 @@
 All notable changes to **Git Repo & Branch Explorer** are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [1.6.0] - 2026-11-24
+
+### Added
+- **Unlimited History with 500-Commit Chunked Pagination & Virtualized Scrolling:** Switched `git log` from `--topo-order` to `--date-order` so recent commits across parallel branches interleave chronologically, replaced the hard 500-commit limit with append-only 500-commit background pagination, and added `26px` virtualized table rendering that keeps SVG graph lanes seamless at 60fps.
+- **Deep "Reveal in Commit Timeline" from Git Blame:** Commits outside the initial 500-commit window are revealed by paging older commits, up to 10 pages, before scrolling to and highlighting the row; even older commits fall back directly to the Commit Details drawer.
+- **Visual Studio-Style Hierarchical Branch Folders:** Local and remote branches are grouped into collapsible `/`-delimited folder trees with folder-first alphabetical sorting, indent guides, persisted expansion state, checked-out ancestor auto-expansion, filter-aware expansion, and a persisted **Show/Hide Folder Branch Counts** repository-menu toggle.
+- **Multi-Color TreeView Icons:** Replaced monochrome treeview line icons with layered, multi-color SVG illustrations for classic tan folders and peeking page tabs, a layered sky-blue remote cloud, and two-tone branch, checked-out, tag, and repository icons.
+- **Direct "Open File" in Commit Details:** Added an inline **Open File** button beside each changed file name to open the working-tree file without a side-by-side diff, with a read-only commit-revision fallback for deleted or missing files.
+
 ## [1.5.0] - 2026-11-24
 
 ### Added

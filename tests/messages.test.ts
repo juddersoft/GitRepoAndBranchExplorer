@@ -93,6 +93,12 @@ describe('setTabPinned validation', () => {
   });
 });
 
+describe('commit pagination validation', () => {
+  it('accepts loadMoreCommits without a payload', () => {
+    expect(isWebviewToExtensionMessage({ type: 'loadMoreCommits' })).toBe(true);
+  });
+});
+
 describe('setShowCheckedOutBadge validation', () => {
   it('accepts only a boolean show', () => {
     expect(isWebviewToExtensionMessage({ type: 'setShowCheckedOutBadge', payload: { show: true } })).toBe(true);
@@ -107,6 +113,51 @@ describe('setShowCheckedOutBadge validation', () => {
     const payload = JSON.parse('{"show":true,"__proto__":{"polluted":true}}') as unknown;
     expect(isWebviewToExtensionMessage({ type: 'setShowCheckedOutBadge', payload })).toBe(false);
     expect(isWebviewToExtensionMessage(JSON.parse('{"type":"setShowCheckedOutBadge","payload":{"show":true},"constructor":{}}'))).toBe(false);
+  });
+});
+
+describe('setShowFolderCounts validation', () => {
+  it('accepts only a boolean show', () => {
+    expect(isWebviewToExtensionMessage({ type: 'setShowFolderCounts', payload: { show: true } })).toBe(true);
+    expect(isWebviewToExtensionMessage({ type: 'setShowFolderCounts', payload: { show: false } })).toBe(true);
+    expect(isWebviewToExtensionMessage({ type: 'setShowFolderCounts', payload: { show: 'yes' } })).toBe(false);
+    expect(isWebviewToExtensionMessage({ type: 'setShowFolderCounts', payload: {} })).toBe(false);
+  });
+
+  it('rejects prototype-pollution keys', () => {
+    const payload = JSON.parse('{"show":true,"__proto__":{"polluted":true}}') as unknown;
+    expect(isWebviewToExtensionMessage({ type: 'setShowFolderCounts', payload })).toBe(false);
+  });
+});
+
+describe('openFile validation', () => {
+  const open = (overrides: Record<string, unknown>): unknown => ({
+    type: 'openFile',
+    payload: { hash: HASH, filePath: 'src/a.ts', status: 'M', ...overrides },
+  });
+
+  it('accepts safe commit-file requests', () => {
+    expect(isWebviewToExtensionMessage(open({}))).toBe(true);
+    expect(isWebviewToExtensionMessage(open({ status: 'D' }))).toBe(true);
+  });
+
+  it.each(['../a.ts', 'src/../../a.ts', '/a.ts', '\\a.ts', 'C:a.ts', 'C:\\a.ts', 'src\\a.ts\0'])(
+    'rejects unsafe path %j',
+    (filePath) => {
+      expect(isWebviewToExtensionMessage(open({ filePath }))).toBe(false);
+    },
+  );
+
+  it('rejects control characters, invalid hashes and statuses, and oversized paths', () => {
+    expect(isWebviewToExtensionMessage(open({ hash: 'HEAD' }))).toBe(false);
+    expect(isWebviewToExtensionMessage(open({ status: 'unknown' }))).toBe(false);
+    expect(isWebviewToExtensionMessage(open({ filePath: 'a\nb' }))).toBe(false);
+    expect(isWebviewToExtensionMessage(open({ filePath: 'x'.repeat(4097) }))).toBe(false);
+  });
+
+  it('rejects prototype-pollution keys', () => {
+    const polluted = JSON.parse(`{"type":"openFile","payload":{"hash":"${HASH}","filePath":"a.ts","status":"M","__proto__":{"x":1}}}`);
+    expect(isWebviewToExtensionMessage(polluted)).toBe(false);
   });
 });
 
@@ -213,6 +264,16 @@ describe('initState tabPinned', () => {
     });
     expect(isExtensionToWebviewMessage(initState({ showCheckedOutBadge: false }))).toBe(true);
     expect(isExtensionToWebviewMessage(initState({ showCheckedOutBadge: 'no' }))).toBe(false);
+  });
+
+  it('accepts a boolean showFolderCounts', () => {
+    const initState = (extra: Record<string, unknown>): unknown => ({
+      type: 'initState',
+      payload: { repoName: 'r', workspacePath: null, ...extra },
+    });
+    expect(isExtensionToWebviewMessage(initState({ showFolderCounts: true }))).toBe(true);
+    expect(isExtensionToWebviewMessage(initState({ showFolderCounts: false }))).toBe(true);
+    expect(isExtensionToWebviewMessage(initState({ showFolderCounts: 'no' }))).toBe(false);
   });
 
   it('accepts only supported trackingOrder values', () => {

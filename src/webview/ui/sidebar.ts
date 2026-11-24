@@ -22,7 +22,20 @@ import { vscode } from './vscodeApi';
  * status and the snapshot are kept in step with the editor timeline by the extension host.
  */
 
-let state: ExplorerUiState = createInitialState();
+function restoredExpandedNodes(): { loaded: boolean; nodes: Set<string> } {
+  const saved = vscode.getState();
+  if (typeof saved !== 'object' || saved === null || !('expandedNodes' in saved)) {
+    return { loaded: false, nodes: createInitialState().expandedNodes };
+  }
+  const expandedNodes = saved.expandedNodes;
+  if (!Array.isArray(expandedNodes) || !expandedNodes.every((node): node is string => typeof node === 'string')) {
+    return { loaded: false, nodes: createInitialState().expandedNodes };
+  }
+  return { loaded: true, nodes: new Set(expandedNodes) };
+}
+
+const restoredState = restoredExpandedNodes();
+let state: ExplorerUiState = { ...createInitialState(), expandedNodes: restoredState.nodes };
 const knownRemoteNames = new Set<string>();
 const contextMenu = new ContextMenu();
 
@@ -100,6 +113,12 @@ function runRepoMenuAction(id: MenuActionId): void {
       vscode.postMessage({ type: 'setShowCheckedOutBadge', payload: { show } });
       break;
     }
+    case 'toggleFolderCounts': {
+      const show = !state.showFolderCounts;
+      setState({ showFolderCounts: show });
+      vscode.postMessage({ type: 'setShowFolderCounts', payload: { show } });
+      break;
+    }
     case 'toggleTrackingOrder': {
       const order = state.trackingOrder === 'vscode' ? 'visualStudio' : 'vscode';
       branchTree.setTrackingOrder(order);
@@ -117,7 +136,7 @@ function showRepoContextMenu(x: number, y: number): void {
     contextMenu.show(
       x,
       y,
-      buildRepoMenu(state.snapshot, state, state.showCheckedOutBadge, state.trackingOrder),
+      buildRepoMenu(state.snapshot, state, state.showCheckedOutBadge, state.showFolderCounts, state.trackingOrder),
       runRepoMenuAction,
     );
   }
@@ -132,7 +151,11 @@ function showRefContextMenu(target: RefTarget, x: number, y: number): void {
 
 const branchTree = new BranchTree({
   onFilterChange: (text) => setState({ branchFilterText: text }),
-  onToggleNode: (key) => setState({ expandedNodes: toggleSetMember(state.expandedNodes, key) }),
+  onToggleNode: (key) => {
+    const expandedNodes = toggleSetMember(state.expandedNodes, key);
+    setState({ expandedNodes });
+    vscode.setState({ expandedNodes: [...expandedNodes] });
+  },
   onTogglePin: (fullName) => changeSelection({ pinnedBranchFullNames: toggleSetMember(state.pinnedBranchFullNames, fullName) }),
   onCheckout: (branch) => vscode.postMessage({ type: 'checkoutBranch', payload: { branchName: branch.name } }),
   onSelectRef: selectRef,
@@ -153,11 +176,12 @@ function handleMessage(message: ExtensionToWebviewMessage): void {
         isLoading: true,
         ...(message.payload.tabPinned === undefined ? {} : { tabPinned: message.payload.tabPinned }),
         ...(message.payload.showCheckedOutBadge === undefined ? {} : { showCheckedOutBadge: message.payload.showCheckedOutBadge }),
+        showFolderCounts: message.payload.showFolderCounts,
         ...(message.payload.trackingOrder === undefined ? {} : { trackingOrder: message.payload.trackingOrder }),
       });
       break;
     case 'repoSnapshot':
-      state = reconcileStateWithSnapshot(state, message.payload, knownRemoteNames);
+      state = reconcileStateWithSnapshot(state, message.payload, knownRemoteNames, restoredState.loaded);
       message.payload.remoteGroups.forEach((group) => knownRemoteNames.add(group.remoteName));
       render();
       break;
