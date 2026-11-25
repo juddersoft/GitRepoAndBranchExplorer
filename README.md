@@ -14,7 +14,8 @@ A Visual Studio-unified **Git Repository** window, natively for VS Code, Cursor,
 - Safe Reset `--mixed` / `--hard` modes and Merge-Commit Revert `-m 1`.
 - Read-only commit inspection and trust-gated side-by-side `vscode.diff` views.
 - One-click **Open File** beside each changed file, while retaining the row's side-by-side diff action.
-- Git Graph and GitHub integration.
+- Git Graph plus GitHub, Azure DevOps, GitLab and Bitbucket browser integration.
+- Cloud remotes use a sky-blue cloud, while local-drive remotes use a distinct drive icon, `(local)` marker and full-path tooltip.
 - Subtle inline Git blame and status-bar summaries, with an on-demand blame gutter and bounded, trust-gated caching.
 
 ## Feature Walkthrough
@@ -64,14 +65,14 @@ Extension Git actions run only in trusted workspaces, with `protocol.ext.allow=n
 - Every local branch shows explicit **↓ (commits to pull) / ↑ (commits to push)** counts in VS Code's default order, `↓0 ↑0` when up to date. The repository row's right-click menu can persistently switch to Visual Studio's `↑ ↓` order. A branch with no upstream shows dashes, and a deleted upstream retains the warning tooltip instead of claiming it is up to date.
 - **Single-click** any branch, remote branch or tag to *inspect* it: it is highlighted with the list-selection colours and the history table, breadcrumb and "Showing N of M commits" indicator focus on the commits reachable from it. **Clear filter** returns to the full history.
 - **Double-click** (or press <kbd>Enter</kbd> on) a non-current local branch to check it out. The eye button still isolates several branches at once.
-- **Right-click** a branch, remote branch, tag or commit for a context menu (<kbd>Shift</kbd>+<kbd>F10</kbd> / the Menu key work too). Inapplicable actions are disabled and say why.
+- **Right-click** a branch, remote branch, tag or commit for a viewport-clamped, scrollable context menu (<kbd>Shift</kbd>+<kbd>F10</kbd> / the Menu key work too). Inapplicable actions are disabled and say why.
 
 ### Context menus and Git operations
-- Repository (right-click the repository row, or focus it and press <kbd>Shift</kbd>+<kbd>F10</kbd> / <kbd>Enter</kbd>): **Fetch**, Pull, Push/Publish, New Branch…, Refresh. Fetch only contacts remotes that at least one local branch tracks (with prune); local branches without an upstream are skipped without failing, and a summary reports what was fetched and skipped.
-- Local branch: Check Out, Merge into current, Rebase current onto this, Pull, Push/Publish, Fetch, Create Branch from Here, Show Only This Branch, Delete Branch (with a force-delete prompt when Git says it is not fully merged).
-- Remote branch: Check Out as Local Tracking Branch, Merge, Rebase, Create Branch from Here.
+- Repository (right-click the repository row, or focus it and press <kbd>Shift</kbd>+<kbd>F10</kbd> / <kbd>Enter</kbd>): **Fetch**, Pull, Push/Publish, New Branch…, Refresh. Local-only repositories offer **Publish Repository / Add Remote…**. Fetch only contacts remotes that at least one local branch tracks (with prune); local branches without an upstream are skipped without failing, and a summary reports what was fetched and skipped.
+- Local branch: Check Out, Merge into current, Rebase current onto this, Pull, Push/Publish (including branches that are not checked out), Push and Open PR, Open Branch, Create Pull Request, Fetch, Create Branch from Here, Rename Branch, Untrack Remote Branch, Show Only This Branch, Delete Branch (with an irreversible-action warning and a force-delete prompt when Git says it is not fully merged).
+- Remote branch: Check Out as Local Tracking Branch, Merge, Rebase, Create Branch from Here, Open Branch, Create Pull Request.
 - Tag: Create Branch from Here, Merge, Rebase.
-- Commit: Copy Commit Hash, Create Branch from Here, Cherry-Pick, Revert, Open in Git Graph, Open on GitHub.
+- Commit: Copy Commit Hash, Create Branch from Here, Cherry-Pick, Revert, Open in Git Graph, Open Commit in Browser.
 - Merge, Rebase and Delete are disabled for the checked-out branch or a detached HEAD; Pull is disabled without an upstream or for a branch that is not checked out; Cherry-Pick is disabled for commits already in the current history; merge commits cannot be cherry-picked or reverted from the view.
 - Rebase and Delete ask for confirmation. If a merge, rebase, cherry-pick or revert stops on conflicts, the error message tells you to resolve them in the Source Control view or abort in a terminal.
 
@@ -85,17 +86,19 @@ Extension Git actions run only in trusted workspaces, with `protocol.ext.allow=n
 
 ### Live Git actions
 - **Fetch** (all remotes, with prune), **Pull** and **Push** from the toolbar.
-- Pushing a branch without an upstream asks before publishing it to `origin`.
-- **Create Branch** validates the name as you type.
+- Pushing any local branch without an upstream (or with a deleted upstream) asks which remote to use and shows the exact hosted URL or local drive path before creating the remote branch. Renamed branches can publish the new name or continue pushing to the existing old upstream branch.
+- Repositories with no remote, or a local-only remote, can be published through a silent guided flow that creates a Personal or Organization GitHub repository, creates a local bare remote on disk, or attaches an existing remote URL.
+- **Push and Open PR in Browser** opens a pre-filled pull-request page; regular feature-branch pushes offer the same action in a non-blocking notification.
+- **Create Branch** uses an in-webview dialog that validates the name as you type, offers checkout and remote-tracking options, and safely handles dirty working-tree changes.
 - Every action shows a progress notification and refreshes the view when it finishes.
 
 ### Commit details and file diffs
 - Select a commit to see its full message and the list of changed files with **A** (added), **M** (modified), **D** (deleted) and **R** (renamed) badges.
 - Click a file row to open VS Code's native read-only diff of the parent revision against the commit, or use the inline **Open File** button directly beside the name to open the working-tree file. Deleted or missing files open from the appropriate read-only commit revision.
 
-### Git Graph and GitHub integration
+### Git Graph and hosted-remote integration
 - **Open in Git Graph** appears when the [Git Graph](https://marketplace.visualstudio.com/items?itemName=mhutchie.git-graph) extension is installed.
-- **Open on GitHub** appears for repositories with a GitHub remote (SSH or HTTPS).
+- Repository, branch and commit browser actions recognize GitHub, Azure DevOps, GitLab and Bitbucket SSH or HTTPS remotes. Pull-request actions open each provider's pre-filled creation page.
 - GitHub sign-in uses VS Code's built-in authentication; the extension never stores credentials.
 
 ### Auto-refresh

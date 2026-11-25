@@ -1,4 +1,5 @@
 import type { ChangedFileStatus, CommitDetails, CommitNode, ExternalIntegrationsInfo, RepoSnapshot } from './git';
+import type { CreateBranchDialogRequest, CreateBranchSourceKind } from '../webview/ui/branchCreateModel';
 
 export type TrackingIndicatorOrder = 'vscode' | 'visualStudio';
 
@@ -7,7 +8,15 @@ export type GitAction =
   | 'fetchTracked'
   | 'pull'
   | 'push'
+  | 'pushAndOpenPr'
+  | 'openRepoInBrowser'
+  | 'openBranchInBrowser'
+  | 'openCommitInBrowser'
+  | 'createPrInBrowser'
   | 'createBranch'
+  | 'renameBranch'
+  | 'untrackBranch'
+  | 'publishRepository'
   | 'merge'
   | 'rebase'
   | 'cherryPick'
@@ -23,7 +32,15 @@ export const GIT_ACTION_LABELS: Readonly<Record<GitAction, string>> = {
   fetchTracked: 'Fetch Tracked Branches',
   pull: 'Pull',
   push: 'Push',
+  pushAndOpenPr: 'Push and Open PR in Browser',
+  openRepoInBrowser: 'Open Repository in Browser',
+  openBranchInBrowser: 'Open Branch in Browser',
+  openCommitInBrowser: 'Open Commit in Browser',
+  createPrInBrowser: 'Create Pull Request in Browser',
   createBranch: 'New Branch',
+  renameBranch: 'Rename Branch',
+  untrackBranch: 'Untrack Remote Branch',
+  publishRepository: 'Publish Repository / Add Remote',
   merge: 'Merge',
   rebase: 'Rebase',
   cherryPick: 'Cherry-Pick',
@@ -36,14 +53,22 @@ export const GIT_ACTION_LABELS: Readonly<Record<GitAction, string>> = {
 };
 
 /** What a `gitAction` must carry in `target`: nothing, a ref name (branch/tag), or a full commit hash. */
-export type GitActionTargetKind = 'none' | 'ref' | 'commit' | 'refOrCommit';
+export type GitActionTargetKind = 'none' | 'optionalRef' | 'ref' | 'commit' | 'refOrCommit';
 
 export const GIT_ACTION_TARGETS: Readonly<Record<GitAction, GitActionTargetKind>> = {
   fetch: 'none',
   fetchTracked: 'none',
   pull: 'none',
-  push: 'none',
+  push: 'optionalRef',
+  pushAndOpenPr: 'optionalRef',
+  openRepoInBrowser: 'none',
+  openBranchInBrowser: 'ref',
+  openCommitInBrowser: 'commit',
+  createPrInBrowser: 'optionalRef',
   createBranch: 'none',
+  renameBranch: 'ref',
+  untrackBranch: 'ref',
+  publishRepository: 'none',
   merge: 'ref',
   rebase: 'ref',
   cherryPick: 'commit',
@@ -84,6 +109,8 @@ export type WebviewToExtensionMessage =
   | { type: 'checkoutBranch'; payload: { branchName: string } }
   | { type: 'gitAction'; payload: GitActionPayload }
   | { type: 'createBranchAtRef'; payload: { startPoint: string } }
+  | { type: 'openCreateBranchDialog'; payload: { startPoint?: string; sourceKind?: CreateBranchSourceKind } }
+  | { type: 'submitCreateBranch'; payload: { branchName: string; startPoint?: string; checkout: boolean; track: boolean } }
   | { type: 'setTabPinned'; payload: { pinned: boolean } }
   | { type: 'setShowCheckedOutBadge'; payload: { show: boolean } }
   | { type: 'setShowFolderCounts'; payload: { show: boolean } }
@@ -156,7 +183,8 @@ export type ExtensionToWebviewMessage =
   | { type: 'integrationsInfo'; payload: ExternalIntegrationsInfo }
   | { type: 'actionStatus'; payload: ActionStatusPayload }
   | { type: 'syncState'; payload: SyncStatePayload }
-  | { type: 'revealCommit'; payload: { hash: string; outsideGraph?: boolean } };
+  | { type: 'revealCommit'; payload: { hash: string; outsideGraph?: boolean } }
+  | { type: 'showCreateBranchDialog'; payload: CreateBranchDialogRequest };
 
 export interface ActionStatusPayload {
   busy: boolean;
@@ -174,11 +202,19 @@ function isSafeRecord(value: unknown): value is Record<string, unknown> {
   if (!isRecord(value) || Array.isArray(value)) {
     return false;
   }
-  return FORBIDDEN_KEYS.every((key) => !Object.prototype.hasOwnProperty.call(value, key));
+  const prototype = Object.getPrototypeOf(value);
+  return (
+    (prototype === Object.prototype || prototype === null) &&
+    FORBIDDEN_KEYS.every((key) => !Object.prototype.hasOwnProperty.call(value, key))
+  );
 }
 
 function ownField(record: Record<string, unknown>, key: string): unknown {
   return Object.prototype.hasOwnProperty.call(record, key) ? record[key] : undefined;
+}
+
+function hasOnlyFields(record: Record<string, unknown>, allowed: readonly string[]): boolean {
+  return Object.keys(record).every((key) => allowed.includes(key));
 }
 
 function isGitAction(value: unknown): value is GitAction {
@@ -187,6 +223,10 @@ function isGitAction(value: unknown): value is GitAction {
 
 function isTrackingIndicatorOrder(value: unknown): value is TrackingIndicatorOrder {
   return value === 'vscode' || value === 'visualStudio';
+}
+
+function isCreateBranchSourceKind(value: unknown): value is CreateBranchSourceKind {
+  return value === 'remote' || value === 'local' || value === 'tag' || value === 'commit' || value === 'head';
 }
 
 /**
@@ -223,7 +263,7 @@ export function isSyncStatePayload(value: unknown): value is SyncStatePayload {
 }
 
 function isValidGitActionPayload(payload: Record<string, unknown> | null): boolean {
-  if (payload === null) {
+  if (payload === null || !hasOnlyFields(payload, ['action', 'target'])) {
     return false;
   }
   const action = ownField(payload, 'action');
@@ -234,6 +274,8 @@ function isValidGitActionPayload(payload: Record<string, unknown> | null): boole
   switch (GIT_ACTION_TARGETS[action]) {
     case 'none':
       return target === undefined;
+    case 'optionalRef':
+      return target === undefined || isSafeRefArgument(target);
     case 'ref':
       return isSafeRefArgument(target);
     case 'commit':
@@ -271,6 +313,34 @@ export function isWebviewToExtensionMessage(value: unknown): value is WebviewToE
       const startPoint = payload === null ? undefined : ownField(payload, 'startPoint');
       return isCommitHash(startPoint) || isSafeRefArgument(startPoint);
     }
+    case 'openCreateBranchDialog':
+      if (payload === null) {
+        return false;
+      }
+      {
+        const startPoint = ownField(payload, 'startPoint');
+        const sourceKind = ownField(payload, 'sourceKind');
+        return (
+          hasOnlyFields(payload, ['startPoint', 'sourceKind']) &&
+          (startPoint === undefined || isCommitHash(startPoint) || isSafeRefArgument(startPoint)) &&
+          (sourceKind === undefined || isCreateBranchSourceKind(sourceKind))
+        );
+      }
+    case 'submitCreateBranch':
+      if (payload === null) {
+        return false;
+      }
+      {
+        const branchName = ownField(payload, 'branchName');
+        const startPoint = ownField(payload, 'startPoint');
+        return (
+          hasOnlyFields(payload, ['branchName', 'startPoint', 'checkout', 'track']) &&
+          isSafeRefArgument(branchName) &&
+          (startPoint === undefined || isCommitHash(startPoint) || isSafeRefArgument(startPoint)) &&
+          typeof ownField(payload, 'checkout') === 'boolean' &&
+          typeof ownField(payload, 'track') === 'boolean'
+        );
+      }
     case 'setTabPinned':
       return payload !== null && typeof ownField(payload, 'pinned') === 'boolean';
     case 'setShowCheckedOutBadge':
@@ -341,6 +411,7 @@ function isRepoSnapshotShape(p: Record<string, unknown>): boolean {
     typeof p.currentBranch === 'string' &&
     typeof p.isDetachedHead === 'boolean' &&
     Array.isArray(p.localBranches) &&
+    (p.remotes === undefined || (Array.isArray(p.remotes) && p.remotes.every((name: unknown) => isSafeRefArgument(name)))) &&
     Array.isArray(p.remoteGroups) &&
     Array.isArray(p.tags) &&
     Array.isArray(p.commits) &&
@@ -386,7 +457,14 @@ export function isExtensionToWebviewMessage(value: unknown): value is ExtensionT
       return (
         typeof payload.gitGraphAvailable === 'boolean' &&
         (payload.gitGraphExtensionId === null || typeof payload.gitGraphExtensionId === 'string') &&
-        (payload.githubRemoteUrl === null || typeof payload.githubRemoteUrl === 'string')
+        (payload.githubRemoteUrl === null || typeof payload.githubRemoteUrl === 'string') &&
+        (payload.remoteWebUrl === undefined || payload.remoteWebUrl === null || typeof payload.remoteWebUrl === 'string') &&
+        (payload.remoteProvider === undefined ||
+          payload.remoteProvider === null ||
+          ['github', 'azureDevOps', 'gitlab', 'bitbucket'].includes(String(payload.remoteProvider))) &&
+        (payload.remoteProviderName === undefined ||
+          payload.remoteProviderName === null ||
+          typeof payload.remoteProviderName === 'string')
       );
     case 'actionStatus':
       return (
@@ -400,6 +478,25 @@ export function isExtensionToWebviewMessage(value: unknown): value is ExtensionT
       return (
         isCommitHash(payload.hash) &&
         (payload.outsideGraph === undefined || typeof payload.outsideGraph === 'boolean')
+      );
+    case 'showCreateBranchDialog':
+      return (
+        isSafeRecord(payload) &&
+        hasOnlyFields(payload, [
+          'sourceKind',
+          'startPoint',
+          'startLabel',
+          'initialName',
+          'remoteTrackingRef',
+          'existingLocalBranches',
+        ]) &&
+        isCreateBranchSourceKind(payload.sourceKind) &&
+        (payload.startPoint === undefined || isCommitHash(payload.startPoint) || isSafeRefArgument(payload.startPoint)) &&
+        typeof payload.startLabel === 'string' &&
+        typeof payload.initialName === 'string' &&
+        (payload.remoteTrackingRef === undefined || isSafeRefArgument(payload.remoteTrackingRef)) &&
+        Array.isArray(payload.existingLocalBranches) &&
+        payload.existingLocalBranches.every((branch: unknown) => isSafeRefArgument(branch))
       );
     default:
       return false;

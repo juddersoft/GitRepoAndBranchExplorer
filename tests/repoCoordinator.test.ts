@@ -1,3 +1,4 @@
+import * as path from 'path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { BranchInfo, RepoSnapshot } from '../src/types/git';
 import type { ExtensionToWebviewMessage, SyncStatePayload } from '../src/types/messages';
@@ -8,14 +9,32 @@ const mocks = vi.hoisted(() => ({
   checkoutBranch: vi.fn(),
   getCommitDetails: vi.fn(),
   getGitHubRemoteUrl: vi.fn(),
+  getRemoteUrl: vi.fn(),
+  getRemoteRawUrl: vi.fn(),
   showWarningMessage: vi.fn(),
   showErrorMessage: vi.fn(),
   showInformationMessage: vi.fn(),
+  showQuickPick: vi.fn(),
+  showInputBox: vi.fn(),
+  showOpenDialog: vi.fn(),
   fetchTrackedBranches: vi.fn(),
   pullCurrentBranch: vi.fn(),
   fetchAll: vi.fn(),
   pushCurrentBranch: vi.fn(),
+  pushToRemoteBranch: vi.fn(),
+  openExternal: vi.fn(),
   createBranch: vi.fn(),
+  hasWorkingTreeChanges: vi.fn(),
+  resolveCommitHash: vi.fn(),
+  stashChanges: vi.fn(),
+  discardWorkingTreeChanges: vi.fn(),
+  renameLocalBranch: vi.fn(),
+  unsetBranchUpstream: vi.fn(),
+  addRemote: vi.fn(),
+  initBareRepository: vi.fn(),
+  getPublishSession: vi.fn(),
+  listPublishOwners: vi.fn(),
+  createRepository: vi.fn(),
   mergeBranch: vi.fn(),
   rebaseOnto: vi.fn(),
   cherryPickCommit: vi.fn(),
@@ -31,6 +50,8 @@ const mocks = vi.hoisted(() => ({
   openGitHubCommit: vi.fn(),
   isTrusted: true,
   trustGrantedListeners: [] as Array<() => void>,
+  getCommands: vi.fn(),
+  executeCommand: vi.fn(),
 }));
 
 vi.mock('vscode', () => {
@@ -64,11 +85,20 @@ vi.mock('vscode', () => {
       showWarningMessage: mocks.showWarningMessage,
       showErrorMessage: mocks.showErrorMessage,
       showInformationMessage: mocks.showInformationMessage,
+      showQuickPick: mocks.showQuickPick,
+      showInputBox: mocks.showInputBox,
+      showOpenDialog: mocks.showOpenDialog,
       withProgress: (_options: unknown, task: () => Promise<void>) => task(),
       showTextDocument: mocks.showTextDocument,
     },
     Uri: {
       file: (fsPath: string) => ({ scheme: 'file', fsPath }),
+      parse: (url: string, strict: boolean) => ({ url, strict }),
+    },
+    env: { openExternal: mocks.openExternal },
+    commands: {
+      getCommands: mocks.getCommands,
+      executeCommand: mocks.executeCommand,
     },
     ProgressLocation: { Notification: 15 },
     RelativePattern: class {},
@@ -81,12 +111,23 @@ vi.mock('../src/git/gitService', () => ({
     getCommitPage = mocks.getCommitPage;
     checkoutBranch = mocks.checkoutBranch;
     getGitHubRemoteUrl = mocks.getGitHubRemoteUrl;
+    getRemoteUrl = mocks.getRemoteUrl;
+    getRemoteRawUrl = mocks.getRemoteRawUrl;
     getCommitDetails = mocks.getCommitDetails;
     fetchTrackedBranches = mocks.fetchTrackedBranches;
     pullCurrentBranch = mocks.pullCurrentBranch;
     fetchAll = mocks.fetchAll;
     pushCurrentBranch = mocks.pushCurrentBranch;
+    pushToRemoteBranch = mocks.pushToRemoteBranch;
     createBranch = mocks.createBranch;
+    hasWorkingTreeChanges = mocks.hasWorkingTreeChanges;
+    resolveCommitHash = mocks.resolveCommitHash;
+    stashChanges = mocks.stashChanges;
+    discardWorkingTreeChanges = mocks.discardWorkingTreeChanges;
+    renameLocalBranch = mocks.renameLocalBranch;
+    unsetBranchUpstream = mocks.unsetBranchUpstream;
+    addRemote = mocks.addRemote;
+    initBareRepository = mocks.initBareRepository;
     mergeBranch = mocks.mergeBranch;
     rebaseOnto = mocks.rebaseOnto;
     cherryPickCommit = mocks.cherryPickCommit;
@@ -103,6 +144,9 @@ vi.mock('fs', () => ({ promises: { stat: mocks.stat } }));
 vi.mock('../src/github/githubService', () => ({
   GitHubService: class {
     openCommit = mocks.openGitHubCommit;
+    getPublishSession = mocks.getPublishSession;
+    listPublishOwners = mocks.listPublishOwners;
+    createRepository = mocks.createRepository;
   },
 }));
 vi.mock('../src/git/gitDiffProvider', () => ({
@@ -207,8 +251,29 @@ describe('RepoCoordinator', () => {
     mocks.getCommitPage.mockResolvedValue({ commits: [], hasMoreCommits: false });
     mocks.getCommitDetails.mockResolvedValue({ hash: sha('d'), body: 'details', files: [] });
     mocks.getGitHubRemoteUrl.mockResolvedValue(null);
+    mocks.getRemoteUrl.mockResolvedValue(null);
+    mocks.getRemoteRawUrl.mockResolvedValue('https://example.com/owner/repo.git');
+    mocks.getCommands.mockResolvedValue([]);
+    mocks.executeCommand.mockResolvedValue(undefined);
     mocks.checkoutBranch.mockResolvedValue(undefined);
+    mocks.hasWorkingTreeChanges.mockResolvedValue(false);
+    mocks.resolveCommitHash.mockResolvedValue(sha('a'));
+    mocks.createBranch.mockResolvedValue(undefined);
+    mocks.stashChanges.mockResolvedValue(undefined);
+    mocks.discardWorkingTreeChanges.mockResolvedValue(undefined);
+    mocks.renameLocalBranch.mockResolvedValue(undefined);
+    mocks.addRemote.mockResolvedValue(undefined);
+    mocks.initBareRepository.mockResolvedValue(undefined);
+    mocks.getPublishSession.mockResolvedValue({ accessToken: 'token', account: { label: 'Alice' } });
+    mocks.listPublishOwners.mockResolvedValue([{ login: 'alice', type: 'user' }]);
+    mocks.createRepository.mockResolvedValue({
+      cloneUrl: 'https://github.com/alice/project.git',
+      htmlUrl: 'https://github.com/alice/project',
+      fullName: 'alice/project',
+      isPrivate: true,
+    });
     mocks.openGitHubCommit.mockResolvedValue(true);
+    mocks.openExternal.mockResolvedValue(true);
     showCheckedOutBadge = true;
     showFolderCounts = true;
     mocks.stat.mockResolvedValue({ isFile: () => true });
@@ -277,6 +342,171 @@ describe('RepoCoordinator', () => {
       },
     ]));
     expect(sidebar.ofType('commitsAppended')).toEqual(editor.ofType('commitsAppended'));
+  });
+
+  it('queues a smart remote branch dialog and sends it to a ready editor', async () => {
+      const snapshot = MAIN_AND_FEATURE();
+      const remote: BranchInfo = {
+        ...branch('origin/feature/pdj/foo', false),
+        displayName: 'feature/pdj/foo',
+        fullName: 'refs/remotes/origin/feature/pdj/foo',
+        isRemote: true,
+        remoteName: 'origin',
+      };
+      snapshot.remoteGroups = [{ remoteName: 'origin', branches: [remote] }];
+      mocks.getRepoSnapshot.mockResolvedValue(snapshot);
+      await openBoth();
+
+      coordinator.handleMessage('sidebar', {
+        type: 'openCreateBranchDialog',
+        payload: { startPoint: remote.name, sourceKind: 'remote' },
+      });
+
+      expect(host.openPanel).toHaveBeenCalled();
+      expect(editor.ofType('showCreateBranchDialog')).toContainEqual({
+        type: 'showCreateBranchDialog',
+        payload: {
+          sourceKind: 'remote',
+          startPoint: remote.fullName,
+          startLabel: remote.name,
+          initialName: 'feature/pdj/foo',
+          remoteTrackingRef: remote.name,
+          existingLocalBranches: ['main', 'feature'],
+        },
+      });
+    });
+
+    it('creates a branch without checkout without inspecting the worktree', async () => {
+      await openBoth();
+      coordinator.handleMessage('editor', {
+        type: 'submitCreateBranch',
+        payload: { branchName: 'topic/new', checkout: false, track: false },
+      });
+      await vi.waitFor(() => expect(mocks.createBranch).toHaveBeenCalledWith(
+        '/repo',
+        'topic/new',
+        undefined,
+        { checkout: false, track: false },
+      ));
+      expect(mocks.hasWorkingTreeChanges).not.toHaveBeenCalled();
+    });
+
+    it('stashes a dirty worktree before checking out a new branch', async () => {
+      await openBoth();
+      mocks.hasWorkingTreeChanges.mockResolvedValue(true);
+      mocks.showQuickPick.mockResolvedValueOnce({ label: 'Stash Changes & Switch' });
+      coordinator.handleMessage('editor', {
+        type: 'submitCreateBranch',
+        payload: { branchName: 'topic/stashed', checkout: true, track: false },
+      });
+
+      await vi.waitFor(() => expect(mocks.createBranch).toHaveBeenCalled());
+      expect(mocks.stashChanges).toHaveBeenCalledWith('/repo', 'Auto-stash before creating topic/stashed');
+      expect(mocks.stashChanges.mock.invocationCallOrder[0]).toBeLessThan(mocks.createBranch.mock.invocationCallOrder[0]);
+    });
+
+    it('confirms destructive discard before creating a branch', async () => {
+      await openBoth();
+      mocks.hasWorkingTreeChanges.mockResolvedValue(true);
+      mocks.showQuickPick
+        .mockResolvedValueOnce({ label: 'Discard Changes & Switch' })
+        .mockResolvedValueOnce({ label: 'Yes, Discard All Changes' });
+      coordinator.handleMessage('editor', {
+        type: 'submitCreateBranch',
+        payload: { branchName: 'topic/discard', checkout: true, track: false },
+      });
+
+      await vi.waitFor(() => expect(mocks.discardWorkingTreeChanges).toHaveBeenCalledWith('/repo'));
+      expect(mocks.showQuickPick).toHaveBeenNthCalledWith(2, expect.any(Array), {
+        title: 'Confirm Permanent Discard',
+        placeHolder:
+          'Permanently discard all uncommitted and untracked changes? This action cannot be undone.',
+        ignoreFocusOut: true,
+      });
+    });
+
+    it('renames a known local branch and refreshes the snapshot', async () => {
+      await openBoth();
+      mocks.showInputBox.mockResolvedValue('feature-renamed');
+      coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'renameBranch', target: 'feature' },
+      });
+      await vi.waitFor(() => expect(mocks.renameLocalBranch).toHaveBeenCalledWith(
+        '/repo',
+        'feature',
+        'feature-renamed',
+      ));
+  });
+
+  it('untracks a known local branch upstream', async () => {
+    const snapshot = makeSnapshot([
+      { ...branch('main', true), upstream: 'origin/main' },
+      branch('feature', false),
+    ]);
+    mocks.getRepoSnapshot.mockResolvedValue(snapshot);
+    await openBoth();
+
+    coordinator.handleMessage('sidebar', {
+      type: 'gitAction',
+      payload: { action: 'untrackBranch', target: 'main' },
+    });
+
+    await vi.waitFor(() => expect(mocks.unsetBranchUpstream).toHaveBeenCalledWith('/repo', 'main'));
+  });
+
+  it('shows an irreversible silent delete confirmation', async () => {
+    await openBoth();
+    mocks.showQuickPick.mockResolvedValueOnce({ label: 'Delete Branch "feature"' });
+
+    coordinator.handleMessage('sidebar', {
+      type: 'gitAction',
+      payload: { action: 'deleteBranch', target: 'feature' },
+    });
+
+    await vi.waitFor(() => expect(mocks.deleteLocalBranch).toHaveBeenCalledWith('/repo', 'feature'));
+    expect(mocks.showQuickPick).toHaveBeenCalledWith(expect.any(Array), {
+      title: 'Delete Branch "feature"',
+      placeHolder:
+        'Warning: You are about to permanently delete local branch "feature". This action cannot be undone.',
+      ignoreFocusOut: true,
+    });
+  });
+
+  it('offers guided repository publish choices', async () => {
+    await openBoth();
+    mocks.showQuickPick.mockResolvedValueOnce({ label: 'Cancel' });
+
+    coordinator.handleMessage('sidebar', {
+      type: 'gitAction',
+      payload: { action: 'publishRepository' },
+    });
+
+    await vi.waitFor(() => expect(mocks.showQuickPick).toHaveBeenCalled());
+    const items = mocks.showQuickPick.mock.calls[0][0];
+    expect(items.map((item: { label: string }) => item.label)).toEqual([
+      'Create & Publish Repository on GitHub…',
+      'Create Local Bare Remote on Disk…',
+      'Add Existing Remote URL (origin)…',
+      'Cancel',
+    ]);
+  });
+
+  it('adds an origin remote manually from the publish workflow', async () => {
+    await openBoth();
+    mocks.showQuickPick.mockResolvedValueOnce({ label: 'Add Existing Remote URL (origin)…' });
+    mocks.showInputBox.mockResolvedValueOnce('https://github.com/user/repo.git');
+
+    coordinator.handleMessage('sidebar', {
+      type: 'gitAction',
+      payload: { action: 'publishRepository' },
+    });
+
+    await vi.waitFor(() => expect(mocks.addRemote).toHaveBeenCalledWith(
+      '/repo',
+      'origin',
+      'https://github.com/user/repo.git',
+    ));
   });
 
   it('auto-pages a deep reveal until the commit is found', async () => {
@@ -931,6 +1161,321 @@ describe('RepoCoordinator', () => {
 
       await vi.waitFor(() => expect(mocks.showWarningMessage).toHaveBeenCalledWith(expect.stringMatching(/no longer exists/i)));
       expect(mocks.pullCurrentBranch).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('push recovery and provider browser actions', () => {
+    const snapshotWith = (localBranches: BranchInfo[], remotes = ['origin']): RepoSnapshot => ({
+      ...makeSnapshot(localBranches),
+      remoteGroups: remotes.map((remoteName) => ({ remoteName, branches: [] })),
+    });
+
+    it('creates and tracks a remote branch for an unpushed branch', async () => {
+      const snap = snapshotWith([{ ...branch('feature/new', true), upstream: null }]);
+      mocks.getRepoSnapshot.mockResolvedValue(snap);
+      mocks.showQuickPick.mockResolvedValueOnce({ label: 'Create Remote Branch "origin/feature/new"' });
+      await openBoth();
+
+      coordinator.handleMessage('sidebar', { type: 'gitAction', payload: { action: 'push', target: 'feature/new' } });
+
+      await vi.waitFor(() => expect(mocks.pushToRemoteBranch).toHaveBeenCalledWith(
+        '/repo',
+        'origin',
+        'feature/new',
+        'feature/new',
+        true,
+      ));
+      expect(mocks.showQuickPick).toHaveBeenCalledWith(
+        [
+          {
+            label: 'Create Remote Branch "origin/feature/new"',
+            detail: 'Destination: https://example.com/owner/repo.git',
+          },
+          { label: 'Cancel' },
+        ],
+        {
+          title: 'Publish Branch to Remote',
+          placeHolder: 'Branch "feature/new" does not exist on "origin" yet',
+          ignoreFocusOut: true,
+        },
+      );
+    });
+
+    it('blocks publishing in a local-only repository and offers repository setup', async () => {
+      const snap = snapshotWith([{ ...branch('feature/local', true), upstream: null }], []);
+      mocks.getRepoSnapshot.mockResolvedValue(snap);
+      mocks.showQuickPick.mockResolvedValueOnce({ label: 'Cancel' });
+      await openBoth();
+
+      coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'push', target: 'feature/local' },
+      });
+
+      await vi.waitFor(() => expect(mocks.showQuickPick).toHaveBeenCalledWith(expect.arrayContaining([
+        expect.objectContaining({ label: 'Create & Publish Repository on GitHub…' }),
+        expect.objectContaining({ label: 'Create Local Bare Remote on Disk…' }),
+        expect.objectContaining({ label: 'Add Existing Remote URL (origin)…' }),
+      ]), {
+        title: 'Publish Repository / Add Remote',
+        ignoreFocusOut: true,
+      }));
+      expect(mocks.pushToRemoteBranch).not.toHaveBeenCalled();
+      expect(mocks.pushCurrentBranch).not.toHaveBeenCalled();
+    });
+
+    it('shows a hosted or local destination and offers GitHub for a local-path remote', async () => {
+      mocks.getRepoSnapshot.mockResolvedValue(snapshotWith([
+        { ...branch('feature/local', true), upstream: null },
+      ]));
+      mocks.getRemoteRawUrl.mockResolvedValue(String.raw`C:\Backups\repo.git`);
+      mocks.showQuickPick.mockResolvedValueOnce({ label: 'Cancel' });
+      await openBoth();
+
+      coordinator.handleMessage('sidebar', { type: 'gitAction', payload: { action: 'push', target: 'feature/local' } });
+      await vi.waitFor(() => expect(mocks.showQuickPick).toHaveBeenCalled());
+      const localItems = mocks.showQuickPick.mock.calls[0][0];
+      expect(localItems).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          label: 'Create Remote Branch "origin/feature/local"',
+          detail: String.raw`Destination: Local drive: C:\Backups\repo.git`,
+        }),
+        expect.objectContaining({ label: 'Create & Publish Repository on GitHub…' }),
+      ]));
+
+      mocks.getRemoteRawUrl.mockResolvedValue('git@github.com:owner/repo.git');
+      mocks.showQuickPick.mockResolvedValueOnce({ label: 'Cancel' });
+      coordinator.handleMessage('sidebar', { type: 'requestRefresh' });
+      await vi.waitFor(() => expect(sidebar.ofType('repoSnapshot').length).toBeGreaterThan(1));
+      coordinator.handleMessage('sidebar', { type: 'gitAction', payload: { action: 'push', target: 'feature/local' } });
+      await vi.waitFor(() => expect(mocks.showQuickPick).toHaveBeenCalledTimes(2));
+      expect(mocks.showQuickPick.mock.calls[1][0][0]).toMatchObject({
+        detail: 'Destination: GitHub: https://github.com/owner/repo',
+      });
+    });
+
+    it('recovers a renamed branch by creating the new remote branch', async () => {
+      const renamed = { ...branch('feature/renamed', true), upstream: 'origin/feature/old' };
+      mocks.getRepoSnapshot.mockResolvedValue(snapshotWith([renamed]));
+      mocks.showQuickPick.mockResolvedValueOnce({ label: 'Create New Remote Branch (origin/feature/renamed)' });
+      await openBoth();
+
+      coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'push', target: 'feature/renamed' },
+      });
+
+      await vi.waitFor(() => expect(mocks.pushToRemoteBranch).toHaveBeenCalledWith(
+        '/repo',
+        'origin',
+        'feature/renamed',
+        'feature/renamed',
+        true,
+      ));
+    });
+
+    it('can push a renamed branch to its existing old remote name', async () => {
+      const renamed = { ...branch('feature/renamed', true), upstream: 'origin/feature/old' };
+      mocks.getRepoSnapshot.mockResolvedValue(snapshotWith([renamed]));
+      mocks.showQuickPick.mockResolvedValueOnce({
+        label: 'Push to Existing Remote Branch (origin/feature/old)',
+      });
+      await openBoth();
+
+      coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'push', target: 'feature/renamed' },
+      });
+
+      await vi.waitFor(() => expect(mocks.pushToRemoteBranch).toHaveBeenCalledWith(
+        '/repo',
+        'origin',
+        'feature/renamed',
+        'feature/old',
+        false,
+      ));
+    });
+
+    it('shows the resolved local destination and GitHub alternative for a renamed branch', async () => {
+      mocks.getRepoSnapshot.mockResolvedValue(snapshotWith([
+        { ...branch('feature/renamed', true), upstream: 'origin/feature/old' },
+      ]));
+      mocks.getRemoteRawUrl.mockResolvedValue('/srv/git/repo.git');
+      mocks.showQuickPick.mockResolvedValueOnce({ label: 'Cancel' });
+      await openBoth();
+
+      coordinator.handleMessage('sidebar', { type: 'gitAction', payload: { action: 'push' } });
+      await vi.waitFor(() => expect(mocks.showQuickPick).toHaveBeenCalled());
+      expect(mocks.showQuickPick.mock.calls[0][0]).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          label: 'Create New Remote Branch (origin/feature/renamed)',
+          detail: expect.stringContaining('Destination: Local drive: /srv/git/repo.git'),
+        }),
+        expect.objectContaining({ label: 'Create & Publish Repository on GitHub…' }),
+      ]));
+    });
+
+    it.each([
+      ['user', [], 'origin'],
+      ['org', ['origin'], 'github'],
+    ] as const)('guides %s GitHub publication and wires the %s remote', async (ownerType, remotes, expectedRemote) => {
+      mocks.getRepoSnapshot.mockResolvedValue(snapshotWith([{ ...branch('main', true) }], [...remotes]));
+      mocks.listPublishOwners.mockResolvedValue([{ login: ownerType === 'user' ? 'alice' : 'acme', type: ownerType }]);
+      mocks.showQuickPick
+        .mockResolvedValueOnce({ label: 'Create & Publish Repository on GitHub…' })
+        .mockResolvedValueOnce({
+          label: ownerType === 'user' ? 'alice' : 'acme',
+          ownerLogin: ownerType === 'user' ? 'alice' : 'acme',
+          ownerType,
+        })
+        .mockResolvedValueOnce({ label: 'Private Repository', isPrivate: true })
+        .mockResolvedValueOnce({ label: "Create Repository & Push 'main'" });
+      mocks.showInputBox.mockResolvedValueOnce('new-project');
+      await openBoth();
+
+      coordinator.handleMessage('sidebar', { type: 'gitAction', payload: { action: 'publishRepository' } });
+      await vi.waitFor(() => expect(mocks.pushToRemoteBranch).toHaveBeenCalledWith(
+        '/repo',
+        expectedRemote,
+        'main',
+        'main',
+        true,
+      ));
+      expect(mocks.createRepository).toHaveBeenCalledWith('token', {
+        ownerLogin: ownerType === 'user' ? 'alice' : 'acme',
+        ownerType,
+        name: 'new-project',
+        isPrivate: true,
+      });
+      expect(mocks.addRemote).toHaveBeenCalledWith('/repo', expectedRemote, 'https://github.com/alice/project.git');
+    });
+
+    it('makes no GitHub API request when repository creation is cancelled at confirmation', async () => {
+      mocks.getRepoSnapshot.mockResolvedValue(snapshotWith([{ ...branch('main', true) }], []));
+      mocks.showQuickPick
+        .mockResolvedValueOnce({ label: 'Create & Publish Repository on GitHub…' })
+        .mockResolvedValueOnce({ label: 'alice', ownerLogin: 'alice', ownerType: 'user' })
+        .mockResolvedValueOnce({ label: 'Private Repository', isPrivate: true })
+        .mockResolvedValueOnce({ label: 'Cancel' });
+      mocks.showInputBox.mockResolvedValueOnce('not-created');
+      await openBoth();
+
+      coordinator.handleMessage('sidebar', { type: 'gitAction', payload: { action: 'publishRepository' } });
+      await vi.waitFor(() => expect(mocks.showQuickPick).toHaveBeenCalledTimes(4));
+      expect(mocks.createRepository).not.toHaveBeenCalled();
+      expect(mocks.addRemote).not.toHaveBeenCalled();
+      expect(mocks.pushToRemoteBranch).not.toHaveBeenCalled();
+    });
+
+    it('creates and publishes to a local bare remote on disk', async () => {
+      mocks.getRepoSnapshot.mockResolvedValue(snapshotWith([{ ...branch('main', true) }], ['origin']));
+      mocks.showQuickPick
+        .mockResolvedValueOnce({ label: 'Create Local Bare Remote on Disk…' })
+        .mockResolvedValueOnce({ label: 'Create Bare Remote & Push' });
+      mocks.showOpenDialog.mockResolvedValueOnce([{ fsPath: '/backups' }]);
+      mocks.showInputBox.mockResolvedValueOnce('project-copy.git');
+      await openBoth();
+
+      coordinator.handleMessage('sidebar', { type: 'gitAction', payload: { action: 'publishRepository' } });
+      await vi.waitFor(() => expect(mocks.pushToRemoteBranch).toHaveBeenCalledWith(
+        '/repo',
+        'local-backup',
+        'main',
+        'main',
+        true,
+      ));
+      const expectedPath = path.join('/backups', 'project-copy.git');
+      expect(mocks.initBareRepository).toHaveBeenCalledWith(expectedPath, 'main');
+      expect(mocks.addRemote).toHaveBeenCalledWith('/repo', 'local-backup', expectedPath);
+    });
+
+    it('cancels renamed-branch recovery without pushing', async () => {
+      mocks.getRepoSnapshot.mockResolvedValue(snapshotWith([
+        { ...branch('feature/renamed', true), upstream: 'origin/feature/old' },
+      ]));
+      mocks.showQuickPick.mockResolvedValueOnce({ label: 'Cancel' });
+      await openBoth();
+      coordinator.handleMessage('sidebar', { type: 'gitAction', payload: { action: 'push' } });
+      await Promise.resolve();
+      expect(mocks.pushToRemoteBranch).not.toHaveBeenCalled();
+      expect(mocks.pushCurrentBranch).not.toHaveBeenCalled();
+    });
+
+    it('opens a pre-filled PR page after push and remote resolution', async () => {
+      mocks.getRepoSnapshot.mockResolvedValue(snapshotWith([
+        { ...branch('feature/pr', true), upstream: 'origin/feature/pr' },
+      ]));
+      mocks.getRemoteUrl.mockResolvedValue('https://github.com/owner/repo');
+      await openBoth();
+      coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'pushAndOpenPr', target: 'feature/pr' },
+      });
+
+      await vi.waitFor(() => expect(mocks.openExternal).toHaveBeenCalledWith({
+        url: 'https://github.com/owner/repo/compare/feature/pr?expand=1',
+        strict: true,
+      }));
+    });
+
+    it('offers Create PR after a regular feature push but not for main', async () => {
+      mocks.getRepoSnapshot.mockResolvedValue(snapshotWith([
+        { ...branch('feature/pr', true), upstream: 'origin/feature/pr' },
+      ]));
+      mocks.getRemoteUrl.mockResolvedValue('https://github.com/owner/repo');
+      await openBoth();
+      coordinator.handleMessage('sidebar', { type: 'gitAction', payload: { action: 'push' } });
+      await vi.waitFor(() => expect(mocks.showInformationMessage).toHaveBeenCalledWith(
+        'Pushed "feature/pr" to origin.',
+        'Create PR in Browser',
+      ));
+
+      vi.clearAllMocks();
+      const mainSnapshot = snapshotWith([{ ...branch('main', true), upstream: 'origin/main' }]);
+      mocks.getRepoSnapshot.mockResolvedValue(mainSnapshot);
+      coordinator.handleMessage('sidebar', { type: 'requestRefresh' });
+      await vi.waitFor(() => expect(sidebar.ofType('repoSnapshot').length).toBeGreaterThan(2));
+      coordinator.handleMessage('sidebar', { type: 'gitAction', payload: { action: 'push' } });
+      await vi.waitFor(() => expect(mocks.pushCurrentBranch).toHaveBeenCalled());
+      expect(mocks.showInformationMessage).not.toHaveBeenCalled();
+    });
+
+    it('opens repository, branch, commit and PR URLs in the browser', async () => {
+      const local = { ...branch('feature/web', true), upstream: 'origin/feature/web' };
+      const remote: BranchInfo = {
+        ...local,
+        name: 'origin/feature/web',
+        displayName: 'feature/web',
+        fullName: 'refs/remotes/origin/feature/web',
+        isCurrent: false,
+        isRemote: true,
+        remoteName: 'origin',
+        upstream: null,
+      };
+      const snap = snapshotWith([local]);
+      snap.remoteGroups = [{ remoteName: 'origin', branches: [remote] }];
+      snap.commits = [commitNode(sha('a'))];
+      mocks.getRepoSnapshot.mockResolvedValue(snap);
+      mocks.getRemoteUrl.mockResolvedValue('git@gitlab.com:group/repo.git');
+      await openBoth();
+
+      for (const action of [
+        { action: 'openRepoInBrowser' },
+        { action: 'openBranchInBrowser', target: 'origin/feature/web' },
+        { action: 'openCommitInBrowser', target: sha('a') },
+        { action: 'createPrInBrowser', target: 'feature/web' },
+      ]) {
+        coordinator.handleMessage('sidebar', { type: 'gitAction', payload: action });
+      }
+
+      await vi.waitFor(() => expect(mocks.openExternal).toHaveBeenCalledTimes(4));
+      const urls = mocks.openExternal.mock.calls.map(([value]: [{ url: string }]) => value.url);
+      expect(urls).toEqual([
+        'https://gitlab.com/group/repo',
+        'https://gitlab.com/group/repo/-/tree/feature/web',
+        `https://gitlab.com/group/repo/-/commit/${sha('a')}`,
+        'https://gitlab.com/group/repo/-/merge_requests/new?merge_request%5Bsource_branch%5D=feature%2Fweb',
+      ]);
     });
   });
 

@@ -367,10 +367,18 @@ export class BranchTree {
       return null;
     }
     const key = remoteNodeKey(group.remoteName);
+    const local = group.destinationKind === 'localPath';
+    const title = local
+      ? `Local drive remote${group.url ? `: ${group.url}` : ''}`
+      : group.destinationKind === 'hosted'
+        ? `${group.providerName ?? 'Cloud'} remote${group.url ? `: ${group.url}` : ''}`
+        : group.url;
     return this.renderGroup({
       key,
       label: `remotes/${group.remoteName}`,
-      iconName: 'remote',
+      iconName: local ? 'localDrive' : 'remote',
+      ...(title === undefined ? {} : { title }),
+      ...(local ? { labelSuffix: '(local)' } : {}),
       depth: 1,
       open: isOpen(key),
       children: this.renderBranchNodes(
@@ -386,14 +394,20 @@ export class BranchTree {
     key: string;
     label: string;
     iconName: IconName | null;
+    title?: string;
+    labelSuffix?: string;
     depth: number;
     open: boolean;
     children: HTMLLIElement[];
   }): HTMLLIElement {
-    const row = el('div', { className: `tree-row depth-${options.depth}` }, [
+    const label = el('span', { className: 'tree-label', text: options.label, title: options.label });
+    if (options.labelSuffix) {
+      label.append(el('span', { className: 'remote-kind-tag', text: options.labelSuffix }));
+    }
+    const row = el('div', { className: `tree-row depth-${options.depth}`, title: options.title ?? options.label }, [
       icon(options.open ? 'chevronDown' : 'chevronRight', 'icon twisty'),
       ...(options.iconName ? [icon(options.iconName)] : []),
-      el('span', { className: 'tree-label', text: options.label, title: options.label }),
+      label,
     ]);
     this.setTreeDepth(row, options.depth);
     row.addEventListener('click', () => this.callbacks.onToggleNode(options.key));

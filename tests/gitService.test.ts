@@ -524,6 +524,44 @@ describe('GitService operations (fake runner)', () => {
     expect(calls.find((call) => call.args[0] === 'log')?.args).toContain('--max-count=501');
   });
 
+  it('enriches configured remotes, including groups without fetched refs', async () => {
+    const { service } = recorder((args) => {
+      if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') {
+        return `${ROOT}\n`;
+      }
+      if (args[0] === 'remote' && args[1] === '-v') {
+        return [
+          'origin\thttps://github.com/owner/repo.git (fetch)',
+          'origin\tgit@github.com:owner/repo.git (push)',
+          String.raw`backup	C:\Repos\backup.git (fetch)`,
+          String.raw`backup	C:\Repos\backup.git (push)`,
+        ].join('\n');
+      }
+      if (args[0] === 'for-each-ref') {
+        return records([' ', 'refs/remotes/origin/main', 'origin/main', HASH, '', '']);
+      }
+      return '';
+    });
+
+    const snapshot = await service.getRepoSnapshot(ROOT);
+    expect(snapshot.remotes).toEqual(['backup', 'origin']);
+    expect(snapshot.remoteGroups).toEqual([
+      {
+        remoteName: 'backup',
+        branches: [],
+        url: String.raw`C:\Repos\backup.git`,
+        destinationKind: 'localPath',
+      },
+      {
+        remoteName: 'origin',
+        branches: [expect.objectContaining({ name: 'origin/main' })],
+        url: 'git@github.com:owner/repo.git',
+        destinationKind: 'hosted',
+        providerName: 'GitHub',
+      },
+    ]);
+  });
+
   it('runs fetch, pull and push with network timeouts', async () => {
     const { calls, service } = recorder();
     await service.fetchAll(ROOT);
@@ -534,8 +572,25 @@ describe('GitService operations (fake runner)', () => {
       { args: ['fetch', '--all', '--prune'], timeoutMs: NETWORK_GIT_TIMEOUT_MS },
       { args: ['pull'], timeoutMs: NETWORK_GIT_TIMEOUT_MS },
       { args: ['push'], timeoutMs: NETWORK_GIT_TIMEOUT_MS },
-      { args: ['push', '-u', 'origin', 'feature/new'], timeoutMs: NETWORK_GIT_TIMEOUT_MS },
+      { args: ['push', '-u', '--', 'origin', 'refs/heads/feature/new:refs/heads/feature/new'], timeoutMs: NETWORK_GIT_TIMEOUT_MS },
     ]);
+  });
+
+  it('pushes explicit local and remote branch refspecs with an option separator', async () => {
+    const { calls, service } = recorder();
+    await service.pushToRemoteBranch(ROOT, 'upstream', 'feature/local', 'feature/remote', true);
+    await service.pushToRemoteBranch(ROOT, 'origin', 'topic', 'old-topic', false);
+    expect(calls).toEqual([
+      {
+        args: ['push', '-u', '--', 'upstream', 'refs/heads/feature/local:refs/heads/feature/remote'],
+        timeoutMs: NETWORK_GIT_TIMEOUT_MS,
+      },
+      {
+        args: ['push', '--', 'origin', 'refs/heads/topic:refs/heads/old-topic'],
+        timeoutMs: NETWORK_GIT_TIMEOUT_MS,
+      },
+    ]);
+    await expect(service.pushToRemoteBranch(ROOT, '--force', 'main', 'main', true)).rejects.toThrow();
   });
 
   it('fetches only remotes tracked by local branches, skipping branches without an upstream', async () => {
@@ -637,6 +692,54 @@ describe('GitService operations (fake runner)', () => {
     ]);
   });
 
+  it('unsets a local branch upstream without an option separator', async () => {
+    const { calls, service } = recorder();
+    await service.unsetBranchUpstream(ROOT, 'feature/old');
+    expect(calls).toEqual([{ args: ['branch', '--unset-upstream', 'feature/old'] }]);
+  });
+
+  it('adds a validated origin remote with an option separator', async () => {
+    const { calls, service } = recorder();
+    await service.addRemote(ROOT, 'origin', '  git@github.com:user/repo.git  ');
+    expect(calls).toEqual([{
+      args: ['remote', 'add', '--', 'origin', 'git@github.com:user/repo.git'],
+    }]);
+  });
+
+  it('preserves spaces in classified local remote paths', async () => {
+    const { calls, service } = recorder();
+    const localPath = String.raw`C:\My Projects\backup.git`;
+    await service.addRemote(ROOT, 'backup', localPath);
+    expect(calls).toEqual([{ args: ['remote', 'add', '--', 'backup', localPath] }]);
+  });
+
+  it('validates bare repository targets before running Git', async () => {
+    const { calls, service } = recorder();
+    await expect(service.initBareRepository('', 'main')).rejects.toThrow(/path/i);
+    await expect(service.initBareRepository(ROOT, '--force')).rejects.toThrow(/start with/);
+    expect(calls).toEqual([]);
+  });
+
+  it.each(['', '  ', '-flag', 'ext::sh -c test', 'EXT::command', 'https://example.com/a b.git', 'a\nb'])(
+    'rejects unsafe remote URL %j',
+    async (url) => {
+      const { calls, service } = recorder();
+      await expect(service.addRemote(ROOT, 'origin', url)).rejects.toThrow(/safe remote URL/);
+      expect(calls).toEqual([]);
+    },
+  );
+
+  it('reads and trims the raw URL for a configured remote', async () => {
+    const { calls, service } = recorder(() => '  C:\\Temp\\origin.git\r\n');
+    await expect(service.getRemoteRawUrl(ROOT, 'origin')).resolves.toBe('C:\\Temp\\origin.git');
+    expect(calls).toEqual([{ args: ['remote', 'get-url', '--', 'origin'] }]);
+  });
+
+  it('returns null when the requested raw remote URL is unavailable', async () => {
+    const missing = new GitExecutionError('missing', 'COMMAND_FAILED', 2, 'No such remote');
+    await expect(recorder(() => missing).service.getRemoteRawUrl(ROOT, 'missing')).resolves.toBeNull();
+  });
+
   it('checks out a remote branch as a new tracking branch', async () => {
     const { calls, service } = recorder();
     await service.checkoutRemoteBranch(ROOT, 'origin/feature/x', 'feature/x');
@@ -663,6 +766,8 @@ describe('GitService operations (fake runner)', () => {
     ['delete with revision syntax', (s: GitService) => s.deleteLocalBranch(ROOT, 'main^')],
     ['tracking checkout remote', (s: GitService) => s.checkoutRemoteBranch(ROOT, '--orphan', 'x')],
     ['tracking checkout local name', (s: GitService) => s.checkoutRemoteBranch(ROOT, 'origin/x', '-f')],
+    ['untrack option-like branch', (s: GitService) => s.unsetBranchUpstream(ROOT, '--unset-upstream')],
+    ['add option-like remote name', (s: GitService) => s.addRemote(ROOT, '--force', 'https://example.com/a.git')],
   ])('rejects invalid input for %s before running Git', async (_label, run) => {
     const { calls, service } = recorder();
     await expect(run(service)).rejects.toThrow();
@@ -680,6 +785,48 @@ describe('GitService operations (fake runner)', () => {
       ['checkout', '-b', 'feature/y', '--'],
       ['checkout', '-b', 'feature/z', HASH, '--'],
       ['checkout', '-b', 'feature/w', 'origin/main', '--'],
+    ]);
+  });
+
+  it('supports tracked and non-checkout branch creation argument variants', async () => {
+    const { calls, service } = recorder();
+    await service.createBranch(ROOT, 'from-remote', 'origin/main', { track: true });
+    await service.createBranch(ROOT, 'from-local', 'main', { checkout: true, track: false });
+    await service.createBranch(ROOT, 'without-checkout', 'main', { checkout: false, track: false });
+    await service.createBranch(ROOT, 'tracked-no-checkout', 'origin/main', { checkout: false, track: true });
+    await service.createBranch(ROOT, 'head-no-checkout', undefined, { checkout: false });
+    expect(calls.map((call) => call.args)).toEqual([
+      ['checkout', '-b', 'from-remote', '--track', 'origin/main'],
+      ['checkout', '-b', 'from-local', '--no-track', 'main'],
+      ['branch', '--no-track', 'without-checkout', 'main'],
+      ['branch', '--track', 'tracked-no-checkout', 'origin/main'],
+      ['branch', 'head-no-checkout'],
+    ]);
+    expect(calls[0]?.timeoutMs).toBe(WORKTREE_GIT_TIMEOUT_MS);
+    expect(calls[1]?.timeoutMs).toBe(WORKTREE_GIT_TIMEOUT_MS);
+  });
+
+  it('implements dirty worktree inspection, safe stashing and discard', async () => {
+    const { calls, service } = recorder((args) => args[0] === 'status' ? ' M a.txt\n' : '');
+    await expect(service.hasWorkingTreeChanges(ROOT)).resolves.toBe(true);
+    await service.stashChanges(ROOT, '  before\ncreating\x00 branch  ');
+    await service.discardWorkingTreeChanges(ROOT);
+    expect(calls.map((call) => call.args)).toEqual([
+      ['status', '--porcelain=v1'],
+      ['stash', 'push', '-u', '-m', 'before creating  branch'],
+      ['reset', '--hard', 'HEAD'],
+      ['clean', '-fd'],
+    ]);
+  });
+
+  it('resolves commit hashes and safely renames local branches', async () => {
+    const { calls, service } = recorder((args) => args[0] === 'rev-parse' ? HASH.toUpperCase() : '');
+    await expect(service.resolveCommitHash(ROOT, 'HEAD')).resolves.toBe(HASH);
+    await expect(service.renameLocalBranch(ROOT, 'old/name', 'new/name')).resolves.toBeUndefined();
+    await expect(service.renameLocalBranch(ROOT, 'same', 'same')).rejects.toThrow();
+    expect(calls.map((call) => call.args)).toEqual([
+      ['rev-parse', '--verify', 'HEAD^{commit}'],
+      ['branch', '-m', '--', 'old/name', 'new/name'],
     ]);
   });
 
@@ -751,6 +898,22 @@ describe('GitService operations (fake runner)', () => {
 
     const none = recorder((args) => (args[1] === 'get-url' ? 'https://gitlab.com/a/b.git' : ''));
     await expect(none.service.getGitHubRemoteUrl(ROOT)).resolves.toBeNull();
+  });
+
+  it('resolves supported remote URLs by preferred remote or verbose fallback', async () => {
+    const preferred = recorder(() => 'git@bitbucket.org:team/project.git\n');
+    await expect(preferred.service.getRemoteUrl(ROOT, 'upstream')).resolves.toBe(
+      'git@bitbucket.org:team/project.git',
+    );
+    expect(preferred.calls[0].args).toEqual(['remote', 'get-url', '--', 'upstream']);
+
+    const noOrigin = new GitExecutionError('error', 'COMMAND_FAILED', 2, "error: No such remote 'origin'");
+    const fallback = recorder((args) =>
+      args[1] === 'get-url'
+        ? noOrigin
+        : 'other\thttps://gitlab.com/team/other.git (fetch)\norigin\tgit@github.com:me/repo.git (push)\n',
+    );
+    await expect(fallback.service.getRemoteUrl(ROOT)).resolves.toBe('git@github.com:me/repo.git');
   });
 });
 
@@ -1062,5 +1225,16 @@ describe.skipIf(!isGitAvailable())('GitService against real repositories', () =>
     expect(after.localBranches.find((b) => b.name === 'topic')).toMatchObject({ upstream: 'origin/topic', ahead: 0, behind: 0, upstreamGone: true });
     expect(after.localBranches.find((b) => b.name === 'main')).toMatchObject({ upstreamGone: false });
     expect(after.localBranches.find((b) => b.name === 'scratch')).toMatchObject({ upstream: null, upstreamGone: false });
+  });
+
+  it('initializes a bare repository and refuses to overwrite an existing one', async () => {
+    const parent = makeTempDir();
+    const target = path.join(parent, 'nested', 'backup.git');
+    await service.initBareRepository(target, 'main');
+    expect(fs.existsSync(path.join(target, 'HEAD'))).toBe(true);
+    expect(fs.readFileSync(path.join(target, 'HEAD'), 'utf8').trim()).toBe('ref: refs/heads/main');
+
+    await expect(service.initBareRepository(target, 'other')).rejects.toThrow(/Refusing to overwrite/);
+    expect(fs.readFileSync(path.join(target, 'HEAD'), 'utf8').trim()).toBe('ref: refs/heads/main');
   });
 }, 60_000);

@@ -3,6 +3,20 @@
 All notable changes to **Git Repo & Branch Explorer** are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [1.7.0] - 2026-11-25
+
+### Added
+- **In-Webview Create Branch Modal:** Create branches in a dedicated webview modal with **Checkout** and **Track Remote Branch** checkboxes, smart defaults, and automatic unchecking when branching locally or renaming.
+- **Remote Branch and Pull Request Workflows:** Added browser actions for repositories, branches, and commits across GitHub, Azure DevOps, GitLab, and Bitbucket, **Push and Open PR in Browser**, a post-push **Create PR** toast, and persistent **Create Pull Request in Browser** menu entries.
+- **Remote Publishing Tools:** Added a guided, four-step GitHub repository publish flow with Personal or Organization ownership, private-first visibility, and URL confirmation, plus **Create Local Bare Remote on Disk** with a folder picker.
+- **Branch Management Actions:** Added local branch rename via `git branch -m` and **Untrack Remote Branch** via `git branch --unset-upstream`.
+
+### Changed
+- **Dirty-Worktree Branch Checkout:** When checking out a new branch from the same parent, choose **Bring Changes**, **Stash & Switch**, or **Discard & Switch**.
+- **Safer Push Recovery:** Renamed branches now offer **Create New Remote Branch**, **Push to Existing Old Remote Branch**, or **Cancel**; untracked local branches automatically create their remote branch when pushed.
+- **Clearer Remote Destinations:** Cloud and local-drive remotes now use distinct multi-color local-drive icons, `(local)` badges, and path tooltips, while push QuickPicks show the exact destination.
+- **Safer, Less Noisy UI:** Viewport-clamped context menus remain scrollable, silent QuickPick dialogs replace loud Windows modal chimes, and deleting a branch now warns that the action is irreversible.
+
 ## [1.6.0] - 2026-11-24
 
 ### Added

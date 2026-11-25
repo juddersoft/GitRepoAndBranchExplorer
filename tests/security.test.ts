@@ -130,6 +130,11 @@ describe('adversarial external navigation guards', () => {
 });
 
 describe('static hover trust regression guard', () => {
+  it('keeps the remote URL builder pure and independent of VS Code and Node', () => {
+    const source = fs.readFileSync(path.resolve('src/git/remoteUrlBuilder.ts'), 'utf8');
+    expect(source).not.toMatch(/(?:from\s+['"](?:vscode|fs|path|child_process)['"]|require\s*\()/);
+  });
+
   it('uses a scoped enabledCommands allowlist instead of blanket-trusting Markdown', () => {
     const source = fs.readFileSync(path.resolve('src/blame/BlameController.ts'), 'utf8');
     expect(source).not.toMatch(/\.isTrusted\s*=\s*true\b/);

@@ -6,6 +6,20 @@ import { buildShowUri, openCommitFileDiff } from '../git/gitDiffProvider';
 import { GitExecutionError, validateGitRef } from '../git/gitExecutor';
 import { findGitGraphExtensionId, openInGitGraph } from '../git/gitGraphInterop';
 import { GitService, isValidCommitHash } from '../git/gitService';
+import {
+  buildRemoteBranchUrl,
+  buildRemoteCommitUrl,
+  buildRemoteCreatePrUrl,
+  buildRemoteRepoUrl,
+  classifyRemoteDestination,
+  isDefaultBranchName,
+  isUpstreamMismatchError,
+  parseRemoteHostInfo,
+  parseUpstreamRef,
+  validateGitHubRepoName,
+  validateLocalBareRepoFolderName,
+} from '../git/remoteUrlBuilder';
+import type { ParsedRemoteHost } from '../git/remoteUrlBuilder';
 import type { TrackedFetchResult } from '../git/trackedFetch';
 import { describeTrackedFetch, NOTHING_TO_FETCH_MESSAGE, planTrackedFetch } from '../git/trackedFetch';
 import { GitHubService } from '../github/githubService';
@@ -28,6 +42,8 @@ import {
 } from '../types/messages';
 import type { RefTarget } from './ui/state';
 import { isSameSelection, listRefTargets, normalizeSelection } from './ui/state';
+import type { CreateBranchDialogRequest, CreateBranchSourceKind } from './ui/branchCreateModel';
+import { extractShortRemoteBranchName } from './ui/branchCreateModel';
 
 /** Git metadata whose changes mean branches, HEAD or remote refs moved outside this panel. */
 export const GIT_WATCH_GLOB = '.git/{HEAD,FETCH_HEAD,ORIG_HEAD,packed-refs,refs/**}';
@@ -101,6 +117,9 @@ function isNotFullyMergedError(err: unknown): boolean {
 /** The two webviews the coordinator keeps in step: the Activity Bar branch tree and the editor timeline. */
 export type SurfaceId = 'sidebar' | 'editor';
 
+/** `leaveInWorktree` will be added once Git Worktrees are supported. */
+export type DirtyWorktreeAction = 'bring' | 'stash' | 'discard' | 'cancel';
+
 export interface WebviewSurface {
   readonly id: SurfaceId;
   post(message: ExtensionToWebviewMessage): void;
@@ -147,6 +166,9 @@ export class RepoCoordinator implements vscode.Disposable {
     gitGraphAvailable: false,
     gitGraphExtensionId: null,
     githubRemoteUrl: null,
+    remoteWebUrl: null,
+    remoteProvider: null,
+    remoteProviderName: null,
   };
   private operationInProgress = false;
   private gitWatcher: vscode.FileSystemWatcher | undefined;
@@ -154,6 +176,7 @@ export class RepoCoordinator implements vscode.Disposable {
   private watchedRepoRoot: string | null = null;
   private watchDebounceTimer: ReturnType<typeof setTimeout> | undefined;
   private pendingRevealCommitHash: string | null = null;
+  private pendingCreateBranchDialog: CreateBranchDialogRequest | null = null;
   private isLoadingMoreCommits = false;
   private loadingMoreCommits: Promise<boolean> | null = null;
   private isSearchingForRevealCommit = false;
@@ -228,6 +251,7 @@ export class RepoCoordinator implements vscode.Disposable {
         this.sendInitialState(source);
         if (source === 'editor') {
           this.flushPendingRevealCommit();
+          this.flushPendingCreateBranchDialog();
         }
         break;
       case 'requestRefresh':
@@ -258,7 +282,13 @@ export class RepoCoordinator implements vscode.Disposable {
         void this.handleGitAction(message.payload.action, message.payload.target);
         break;
       case 'createBranchAtRef':
-        void this.handleCreateBranch(message.payload.startPoint);
+        void this.openCreateBranchDialog(message.payload.startPoint);
+        break;
+      case 'openCreateBranchDialog':
+        void this.openCreateBranchDialog(message.payload.startPoint, message.payload.sourceKind);
+        break;
+      case 'submitCreateBranch':
+        void this.handleSubmitCreateBranch(message.payload);
         break;
       case 'setTabPinned':
         this.host.setTabPinned(message.payload.pinned);
@@ -373,6 +403,7 @@ export class RepoCoordinator implements vscode.Disposable {
     this.loadSequence++;
     this.lastSnapshot = null;
     this.selection = EMPTY_SELECTION;
+    this.pendingCreateBranchDialog = null;
     this.gitDiffProvider?.clearAllowedRepoRoots();
     this.disposeGitWatcher();
     this.notifyRepositoryChange(null);
@@ -382,18 +413,18 @@ export class RepoCoordinator implements vscode.Disposable {
     title: string,
     operation: (repoRoot: string) => Promise<void>,
     failureHint?: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     if (!this.ensureTrustedWorkspace()) {
-      return;
+      return false;
     }
     const snapshot = this.lastSnapshot;
     if (!snapshot) {
       void vscode.window.showWarningMessage('No Git repository is loaded.');
-      return;
+      return false;
     }
     if (this.operationInProgress) {
       void vscode.window.showWarningMessage('Another Git operation is already running.');
-      return;
+      return false;
     }
     this.operationInProgress = true;
     this.postActionStatus(true, `${title}\u2026`);
@@ -402,10 +433,12 @@ export class RepoCoordinator implements vscode.Disposable {
         { location: vscode.ProgressLocation.Notification, title, cancellable: false },
         () => operation(snapshot.repoRoot),
       );
+      return true;
     } catch (err) {
       void vscode.window.showErrorMessage(
         `${title} failed: ${describeError(err)}${failureHint === undefined ? '' : ` ${failureHint}`}`,
       );
+      return false;
     } finally {
       this.operationInProgress = false;
       this.postActionStatus(false);
@@ -452,10 +485,34 @@ export class RepoCoordinator implements vscode.Disposable {
         await this.handlePull();
         break;
       case 'push':
-        await this.handlePush();
+        await this.handlePush(target);
+        break;
+      case 'pushAndOpenPr':
+        await this.handlePush(target, true);
+        break;
+      case 'openRepoInBrowser':
+        await this.handleOpenRepoInBrowser();
+        break;
+      case 'openBranchInBrowser':
+        await this.handleOpenBranchInBrowser(target);
+        break;
+      case 'openCommitInBrowser':
+        await this.handleOpenCommitInBrowser(target);
+        break;
+      case 'createPrInBrowser':
+        await this.handleCreatePrInBrowser(target);
         break;
       case 'createBranch':
-        await this.handleCreateBranch();
+        this.openCreateBranchDialog();
+        break;
+      case 'renameBranch':
+        await this.handleRenameBranch(target);
+        break;
+      case 'untrackBranch':
+        await this.handleUntrackBranch(target);
+        break;
+      case 'publishRepository':
+        await this.handlePublishRepository();
         break;
       case 'merge':
         await this.handleMerge(target);
@@ -606,7 +663,9 @@ export class RepoCoordinator implements vscode.Disposable {
       void vscode.window.showWarningMessage(`Invalid ref: ${describeError(err)}`);
       return null;
     }
-    const found = listRefTargets(snapshot).find((target) => target.name === ref && kinds.includes(target.kind));
+    const found = listRefTargets(snapshot).find(
+      (target) => (target.name === ref || target.fullName === ref) && kinds.includes(target.kind),
+    );
     if (!found) {
       void vscode.window.showWarningMessage(`"${ref}" is not a known ${kinds.join('/')} ref in this repository.`);
       return null;
@@ -746,9 +805,20 @@ export class RepoCoordinator implements vscode.Disposable {
       );
       return;
     }
-    const deleteLabel = 'Delete';
-    const choice = await vscode.window.showWarningMessage(`Delete local branch "${target.name}"?`, { modal: true }, deleteLabel);
-    if (choice !== deleteLabel) {
+    const deleteLabel = `Delete Branch "${target.name}"`;
+    const choice = await vscode.window.showQuickPick(
+      [
+        { label: deleteLabel, detail: 'Permanently deletes this local branch. This cannot be undone.' },
+        { label: 'Cancel' },
+      ],
+      {
+        title: `Delete Branch "${target.name}"`,
+        placeHolder:
+          `Warning: You are about to permanently delete local branch "${target.name}". This action cannot be undone.`,
+        ignoreFocusOut: true,
+      },
+    );
+    if (choice?.label !== deleteLabel) {
       return;
     }
     let needsForce = false as boolean;
@@ -765,17 +835,37 @@ export class RepoCoordinator implements vscode.Disposable {
     if (!needsForce) {
       return;
     }
-    const force = 'Force Delete';
-    const forceChoice = await vscode.window.showWarningMessage(
-      `"${target.name}" is not fully merged. Force-delete it and lose its unmerged commits?`,
-      { modal: true },
-      force,
+    const force = `Force Delete Branch "${target.name}"`;
+    const forceChoice = await vscode.window.showQuickPick(
+      [
+        { label: force, detail: 'Permanently deletes this unmerged local branch. This action cannot be undone.' },
+        { label: 'Cancel' },
+      ],
+      {
+        title: `Force Delete Branch "${target.name}"`,
+        placeHolder:
+          `"${target.name}" is not fully merged. Force-delete it and lose its unmerged commits? This action cannot be undone.`,
+        ignoreFocusOut: true,
+      },
     );
-    if (forceChoice === force) {
+    if (forceChoice?.label === force) {
       await this.runGitOperation(`Force-deleting branch ${target.name}`, (root) =>
         this.gitService.deleteLocalBranch(root, target.name, true),
       );
     }
+  }
+
+  private async handleUntrackBranch(branchName: string | undefined): Promise<void> {
+    const target = this.resolveRef(branchName, ['local']);
+    if (!target?.branch?.upstream) {
+      if (target) {
+        void vscode.window.showWarningMessage(`Branch "${target.name}" is not tracking a remote branch.`);
+      }
+      return;
+    }
+    await this.runGitOperation(`Untracking ${target.name}`, (root) =>
+      this.gitService.unsetBranchUpstream(root, target.name),
+    );
   }
 
   private async handleCheckoutRemoteBranch(remoteBranchName: string | undefined): Promise<void> {
@@ -810,71 +900,705 @@ export class RepoCoordinator implements vscode.Disposable {
     );
   }
 
-  private async handlePush(): Promise<void> {
+  private async handlePush(targetBranchName?: string, openPrAfterPush = false): Promise<void> {
     const snapshot = this.lastSnapshot;
-    const current = snapshot?.localBranches.find((b) => b.isCurrent);
-    if (!snapshot || !current || snapshot.isDetachedHead) {
-      void vscode.window.showWarningMessage('Check out a branch before pushing.');
+    const branch = targetBranchName === undefined
+      ? snapshot?.localBranches.find((candidate) => candidate.isCurrent)
+      : snapshot?.localBranches.find((candidate) => candidate.name === targetBranchName);
+    if (!snapshot || !branch || (targetBranchName === undefined && snapshot.isDetachedHead)) {
+      void vscode.window.showWarningMessage(
+        targetBranchName === undefined
+          ? 'Check out a branch before pushing.'
+          : `"${targetBranchName}" is not a local branch in this repository.`,
+      );
       return;
     }
-    const hasUpstream = current.upstream !== null;
-    if (!hasUpstream) {
-      if (!snapshot.remoteGroups.some((g) => g.remoteName === 'origin')) {
-        void vscode.window.showWarningMessage(`"${current.name}" has no upstream and this repository has no "origin" remote.`);
+
+    const knownRemotes = this.getRemoteNames(snapshot);
+    const upstream = branch.upstream ? parseUpstreamRef(branch.upstream, knownRemotes) : null;
+    const mismatch = upstream !== null && upstream.remoteBranch !== branch.name;
+    let pushed: { remoteName: string; remoteBranchName: string } | null = null;
+    let pushOperation: ((repoRoot: string) => Promise<void>) | null = null;
+    let title = `Pushing ${branch.name}`;
+
+    if (!upstream || branch.upstreamGone) {
+      if (knownRemotes.length === 0) {
+        await this.offerRepositoryRemoteSetup();
         return;
       }
-      const publish = 'Publish Branch';
-      const choice = await vscode.window.showInformationMessage(
-        `"${current.name}" has no upstream branch. Publish it to "origin/${current.name}"?`,
-        { modal: true },
-        publish,
+      const remoteName = await this.pickRemoteName(snapshot);
+      if (remoteName === null) {
+        return;
+      }
+      const destination = await this.getRemoteDestinationInfo(snapshot.repoRoot, remoteName);
+      const create = `Create Remote Branch "${remoteName}/${branch.name}"`;
+      const publishToGitHub = 'Create & Publish Repository on GitHub…';
+      const choice = await vscode.window.showQuickPick(
+        [
+          { label: create, detail: `Destination: ${destination.displayLabel}` },
+          ...(destination.kind === 'localPath'
+            ? [{
+                label: publishToGitHub,
+                detail: `Create a new cloud GitHub repository and push '${branch.name}' there instead of only to the local drive`,
+              }]
+            : []),
+          { label: 'Cancel' },
+        ],
+        {
+          title: 'Publish Branch to Remote',
+          placeHolder: `Branch "${branch.name}" does not exist on "${remoteName}" yet`,
+          ignoreFocusOut: true,
+        },
       );
-      if (choice !== publish) {
+      if (choice?.label === publishToGitHub) {
+        await this.publishBranchToGitHub(branch.name);
         return;
       }
+      if (choice?.label !== create) {
+        return;
+      }
+      title = `Publishing ${branch.name} to ${remoteName}`;
+      pushed = { remoteName, remoteBranchName: branch.name };
+      pushOperation = (root) => this.gitService.pushToRemoteBranch(root, remoteName, branch.name, branch.name, true);
+    } else if (mismatch) {
+      const selection = await this.chooseRenamedBranchPush(branch, upstream);
+      if (selection === null) {
+        return;
+      }
+      pushed = selection;
+      pushOperation = (root) =>
+        this.gitService.pushToRemoteBranch(
+          root,
+          selection.remoteName,
+          branch.name,
+          selection.remoteBranchName,
+          selection.remoteBranchName === branch.name,
+        );
+    } else {
+      const isCurrent = branch.isCurrent;
+      pushed = { remoteName: upstream.remoteName, remoteBranchName: branch.name };
+      pushOperation = (root) => {
+        if (isCurrent) {
+          return this.gitService.pushCurrentBranch(root, branch.name, true);
+        }
+        return this.gitService.pushToRemoteBranch(root, upstream.remoteName, branch.name, branch.name, false);
+      };
     }
-    const title = hasUpstream ? `Pushing ${current.name}` : `Publishing ${current.name} to origin`;
-    await this.runGitOperation(title, (root) => this.gitService.pushCurrentBranch(root, current.name, hasUpstream));
+
+    let recoveryCancelled = false;
+    const succeeded = await this.runGitOperation(title, async (root) => {
+      try {
+        await pushOperation?.(root);
+      } catch (err) {
+        const errorText = `${describeError(err)} ${err instanceof GitExecutionError ? err.stderr : ''}`;
+        if (mismatch || !upstream || !isUpstreamMismatchError(errorText)) {
+          throw err;
+        }
+        const selection = await this.chooseRenamedBranchPush(branch, upstream);
+        if (selection === null) {
+          recoveryCancelled = true;
+          return;
+        }
+        pushed = selection;
+        await this.gitService.pushToRemoteBranch(
+          root,
+          selection.remoteName,
+          branch.name,
+          selection.remoteBranchName,
+          selection.remoteBranchName === branch.name,
+        );
+      }
+    });
+    if (!succeeded || recoveryCancelled || pushed === null) {
+      return;
+    }
+    await this.handlePostPushPr(pushed, openPrAfterPush);
   }
 
-  /** Creates and checks out a branch from HEAD, or from `startPoint` (a full commit hash or a known ref name). */
-  private async handleCreateBranch(startPoint?: string): Promise<void> {
+  private async pickRemoteName(snapshot: RepoSnapshot): Promise<string | null> {
+    const remotes = this.getRemoteNames(snapshot);
+    if (remotes.length === 0) {
+      return null;
+    }
+    if (remotes.length === 1) {
+      return remotes[0] ?? null;
+    }
+    const selected = await vscode.window.showQuickPick(remotes, {
+      placeHolder: 'Choose a remote for the new branch',
+      title: 'Push to Remote',
+    });
+    return selected ?? null;
+  }
+
+  private getRemoteNames(snapshot: RepoSnapshot): string[] {
+    return [...new Set([...(snapshot.remotes ?? []), ...snapshot.remoteGroups.map((group) => group.remoteName)])];
+  }
+
+  private async offerRepositoryRemoteSetup(): Promise<void> {
+    await this.handlePublishRepository();
+  }
+
+  private async handlePublishRepository(): Promise<void> {
+    const snapshot = this.lastSnapshot;
+    if (!snapshot || snapshot.isDetachedHead) {
+      void vscode.window.showWarningMessage('Check out a branch before publishing this repository.');
+      return;
+    }
+    const publish = 'Create & Publish Repository on GitHub…';
+    const local = 'Create Local Bare Remote on Disk…';
+    const addRemote = 'Add Existing Remote URL (origin)…';
+    const choice = await vscode.window.showQuickPick(
+      [
+        {
+          label: publish,
+          detail: 'Choose Personal Account or Organization, visibility, and confirm target URL',
+        },
+        {
+          label: local,
+          detail: 'Choose a folder on a local or network drive to initialize a bare Git remote',
+        },
+        {
+          label: addRemote,
+          detail: 'Attach an existing remote URL and push',
+        },
+        { label: 'Cancel' },
+      ],
+      {
+        title: 'Publish Repository / Add Remote',
+        ignoreFocusOut: true,
+      },
+    );
+    if (choice?.label === publish) {
+      await this.publishBranchToGitHub(snapshot.currentBranch);
+    } else if (choice?.label === local) {
+      await this.createLocalBareRemote(snapshot.currentBranch);
+    } else if (choice?.label === addRemote) {
+      await this.addOriginRemoteManually(snapshot.currentBranch);
+    }
+  }
+
+  private async publishBranchToGitHub(branchName: string): Promise<void> {
+    let session: vscode.AuthenticationSession | undefined;
+    try {
+      session = await this.githubService.getPublishSession();
+    } catch {
+      return;
+    }
+    if (!session) {
+      return;
+    }
+
+    let owners;
+    try {
+      owners = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: 'Loading GitHub publish destinations…' },
+        () => this.githubService.listPublishOwners(session!.accessToken),
+      );
+    } catch (err) {
+      void vscode.window.showErrorMessage(`Could not load GitHub accounts: ${describeError(err)}`);
+      return;
+    }
+    const ownerChoice = await vscode.window.showQuickPick(
+      owners.map((owner) => ({
+        label: `${owner.login} (${owner.type === 'user' ? 'Personal Account' : 'Organization'})`,
+        ownerLogin: owner.login,
+        ownerType: owner.type,
+      })),
+      {
+        title: 'Publish Repository to GitHub (1/4): Select Owner',
+        ignoreFocusOut: true,
+      },
+    );
+    if (!ownerChoice) {
+      return;
+    }
+    const visibility = await vscode.window.showQuickPick(
+      [
+        { label: 'Private Repository', description: 'Recommended', isPrivate: true },
+        { label: 'Public Repository', isPrivate: false },
+      ],
+      {
+        title: 'Publish Repository to GitHub (2/4): Visibility',
+        ignoreFocusOut: true,
+      },
+    );
+    if (!visibility) {
+      return;
+    }
     const snapshot = this.lastSnapshot;
     if (!snapshot) {
       return;
     }
-    let startRef: string | undefined;
-    let startLabel = snapshot.currentBranch;
+    const repoName = await vscode.window.showInputBox({
+      title: 'Publish Repository to GitHub (3/4): Repository Name',
+      value: path.basename(snapshot.repoRoot),
+      ignoreFocusOut: true,
+      validateInput: validateGitHubRepoName,
+    });
+    if (repoName === undefined) {
+      return;
+    }
+    const name = repoName.trim();
+    const targetUrl = `https://github.com/${ownerChoice.ownerLogin}/${name}`;
+    const confirm = `Create Repository & Push '${branchName}'`;
+    const confirmation = await vscode.window.showQuickPick(
+      [
+        {
+          label: confirm,
+          detail: `Target: ${targetUrl} (${visibility.isPrivate ? 'Private' : 'Public'})`,
+        },
+        { label: 'Cancel' },
+      ],
+      {
+        title: 'Publish Repository to GitHub (4/4): Confirm',
+        ignoreFocusOut: true,
+      },
+    );
+    if (confirmation?.label !== confirm) {
+      return;
+    }
+
+    let created;
+    try {
+      created = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: 'Creating GitHub repository…' },
+        () => this.githubService.createRepository(session!.accessToken, {
+          ownerLogin: ownerChoice.ownerLogin,
+          ownerType: ownerChoice.ownerType,
+          name,
+          isPrivate: visibility.isPrivate,
+        }),
+      );
+    } catch (err) {
+      void vscode.window.showErrorMessage(`Could not create GitHub repository: ${describeError(err)}`);
+      return;
+    }
+
+    const remoteNames = this.getRemoteNames(snapshot);
+    const remoteName = !remoteNames.includes('origin')
+      ? 'origin'
+      : !remoteNames.includes('github')
+        ? 'github'
+        : 'github-origin';
+    const succeeded = await this.runGitOperation(`Publishing ${branchName} to GitHub`, async (repoRoot) => {
+      await this.gitService.addRemote(repoRoot, remoteName, created.cloneUrl);
+      await this.gitService.pushToRemoteBranch(repoRoot, remoteName, branchName, branchName, true);
+    });
+    if (!succeeded) {
+      return;
+    }
+    const action = await vscode.window.showInformationMessage(
+      `Published '${branchName}' to ${created.fullName}.`,
+      'Open on GitHub',
+    );
+    if (action === 'Open on GitHub') {
+      await this.openHttpsUrl(created.htmlUrl);
+    }
+  }
+
+  private async createLocalBareRemote(branchName: string): Promise<void> {
+    const snapshot = this.lastSnapshot;
+    if (!snapshot) {
+      return;
+    }
+    const [parent] = await vscode.window.showOpenDialog({
+      canSelectFiles: false,
+      canSelectFolders: true,
+      canSelectMany: false,
+      openLabel: 'Select Parent Folder for Bare Remote',
+      title: 'Create Local Bare Remote (1/2): Choose Parent Folder',
+    }) ?? [];
+    if (!parent) {
+      return;
+    }
+    const folderNameInput = await vscode.window.showInputBox({
+      title: 'Create Local Bare Remote (2/2): Folder Name',
+      value: `${path.basename(snapshot.repoRoot)}.git`,
+      ignoreFocusOut: true,
+      validateInput: validateLocalBareRepoFolderName,
+    });
+    if (folderNameInput === undefined) {
+      return;
+    }
+    const folderName = folderNameInput.trim();
+    const fullPath = path.join(parent.fsPath, folderName);
+    const remoteName = this.getRemoteNames(snapshot).includes('origin') ? 'local-backup' : 'origin';
+    const confirm = 'Create Bare Remote & Push';
+    const confirmation = await vscode.window.showQuickPick(
+      [
+        {
+          label: confirm,
+          detail: `Destination: ${fullPath} (remote: ${remoteName})`,
+        },
+        { label: 'Cancel' },
+      ],
+      {
+        title: 'Create Local Bare Remote: Confirm Destination',
+        ignoreFocusOut: true,
+      },
+    );
+    if (confirmation?.label !== confirm) {
+      return;
+    }
+    const succeeded = await this.runGitOperation(`Creating local bare remote ${folderName}`, async (repoRoot) => {
+      await this.gitService.initBareRepository(fullPath, branchName);
+      await this.gitService.addRemote(repoRoot, remoteName, fullPath);
+      await this.gitService.pushToRemoteBranch(repoRoot, remoteName, branchName, branchName, true);
+    });
+    if (succeeded) {
+      void vscode.window.showInformationMessage(`Created local bare remote at ${fullPath}.`);
+    }
+  }
+
+  private async addOriginRemoteManually(branchName?: string): Promise<void> {
+    const snapshot = this.lastSnapshot;
+    if (!snapshot) {
+      return;
+    }
+    const input = await vscode.window.showInputBox({
+      title: 'Add Remote "origin"',
+      placeHolder: 'https://github.com/user/repo.git',
+      ignoreFocusOut: true,
+      validateInput: (value) => this.validateRemoteUrlInput(value),
+    });
+    if (input === undefined) {
+      return;
+    }
+    const validationError = this.validateRemoteUrlInput(input);
+    if (validationError !== undefined) {
+      void vscode.window.showWarningMessage(validationError);
+      return;
+    }
+    await this.runGitOperation('Adding remote origin', async (root) => {
+      await this.gitService.addRemote(root, 'origin', input);
+      if (branchName !== undefined) {
+        await this.gitService.pushToRemoteBranch(root, 'origin', branchName, branchName, true);
+      }
+    });
+  }
+
+  private validateRemoteUrlInput(value: string): string | undefined {
+    const url = value.trim();
+    if (url.length === 0) {
+      return 'Enter a remote URL or path.';
+    }
+    if (url.startsWith('-')) {
+      return 'A remote URL or path cannot start with "-".';
+    }
+    if (/[\x00-\x1f\x7f]/.test(url)) {
+      return 'A remote URL or path cannot contain control characters.';
+    }
+    if (/\s/.test(url) && classifyRemoteDestination(url).kind !== 'localPath') {
+      return 'A remote URL cannot contain whitespace.';
+    }
+    if (/^ext::/i.test(url)) {
+      return 'The ext:: transport is not allowed.';
+    }
+    return undefined;
+  }
+
+  private async chooseRenamedBranchPush(
+    branch: BranchInfo,
+    upstream: { remoteName: string; remoteBranch: string },
+  ): Promise<{ remoteName: string; remoteBranchName: string } | null> {
+    const createNew = `Create New Remote Branch (${upstream.remoteName}/${branch.name})`;
+    const useExisting = `Push to Existing Remote Branch (${upstream.remoteName}/${upstream.remoteBranch})`;
+    const publishToGitHub = 'Create & Publish Repository on GitHub…';
+    const snapshot = this.lastSnapshot;
+    const destination = snapshot
+      ? await this.getRemoteDestinationInfo(snapshot.repoRoot, upstream.remoteName)
+      : null;
+    const choice = await vscode.window.showQuickPick(
+      [
+        {
+          label: createNew,
+          detail: `Destination: ${destination?.displayLabel ?? upstream.remoteName}. Creates the renamed remote branch and updates upstream tracking`,
+        },
+        {
+          label: useExisting,
+          detail: `Destination: ${destination?.displayLabel ?? upstream.remoteName}. Pushes commits onto the old remote branch name`,
+        },
+        ...(destination?.kind === 'localPath'
+          ? [{
+              label: publishToGitHub,
+              detail: `Create a new cloud GitHub repository and push '${branch.name}' there instead of only to the local drive`,
+            }]
+          : []),
+        { label: 'Cancel' },
+      ],
+      {
+        title: 'Remote Branch Name Mismatch',
+        placeHolder: `Local branch "${branch.name}" tracks "${upstream.remoteName}/${upstream.remoteBranch}"`,
+        ignoreFocusOut: true,
+      },
+    );
+    if (choice?.label === publishToGitHub) {
+      await this.publishBranchToGitHub(branch.name);
+      return null;
+    }
+    if (choice?.label === createNew) {
+      return { remoteName: upstream.remoteName, remoteBranchName: branch.name };
+    }
+    if (choice?.label === useExisting) {
+      return { remoteName: upstream.remoteName, remoteBranchName: upstream.remoteBranch };
+    }
+    return null;
+  }
+
+  private async getRemoteDestinationInfo(repoRoot: string, remoteName: string) {
+    const rawUrl = await this.gitService.getRemoteRawUrl(repoRoot, remoteName);
+    return classifyRemoteDestination(rawUrl ?? remoteName);
+  }
+
+  private async handlePostPushPr(
+    pushed: { remoteName: string; remoteBranchName: string },
+    openImmediately: boolean,
+  ): Promise<void> {
+    const snapshot = this.lastSnapshot;
+    if (!snapshot) {
+      return;
+    }
+    const remote = await this.resolveRemoteHost(snapshot.repoRoot, pushed.remoteName);
+    if (!remote) {
+      if (openImmediately) {
+        void vscode.window.showInformationMessage(`The "${pushed.remoteName}" remote uses an unsupported hosting provider.`);
+      }
+      return;
+    }
+    const url = buildRemoteCreatePrUrl(remote, pushed.remoteBranchName);
+    if (!url) {
+      return;
+    }
+    if (openImmediately) {
+      await this.openHttpsUrl(url);
+    } else if (!isDefaultBranchName(pushed.remoteBranchName)) {
+      const choice = await vscode.window.showInformationMessage(
+        `Pushed "${pushed.remoteBranchName}" to ${pushed.remoteName}.`,
+        'Create PR in Browser',
+      );
+      if (choice === 'Create PR in Browser') {
+        await this.openHttpsUrl(url);
+      }
+    }
+  }
+
+  private openCreateBranchDialog(startPoint?: string, requestedKind?: CreateBranchSourceKind): void {
+    const snapshot = this.lastSnapshot;
+    if (!snapshot) {
+      return;
+    }
+
+    let sourceKind: CreateBranchSourceKind = requestedKind ?? 'head';
+    let resolvedStartPoint: string | undefined;
+    let startLabel = snapshot.isDetachedHead ? 'HEAD' : snapshot.currentBranch;
+    let initialName = '';
+    let remoteTrackingRef: string | undefined;
+
     if (startPoint !== undefined) {
       if (isValidCommitHash(startPoint)) {
         const hash = startPoint.toLowerCase();
-        if (!snapshot.commits.some((c) => c.hash === hash)) {
+        if (requestedKind !== undefined && requestedKind !== 'commit') {
+          return;
+        }
+        if (!snapshot.commits.some((commit) => commit.hash === hash)) {
           void vscode.window.showWarningMessage('That commit is not part of the loaded history.');
           return;
         }
-        startRef = hash;
+        sourceKind = 'commit';
+        resolvedStartPoint = hash;
         startLabel = hash.slice(0, 8);
       } else {
-        const target = this.resolveRef(startPoint, ['local', 'remote', 'tag']);
+        const target = listRefTargets(snapshot).find(
+          (candidate) =>
+            (requestedKind === undefined ||
+              (requestedKind === 'remote' && candidate.kind === 'remote') ||
+              (requestedKind === 'local' && candidate.kind === 'local') ||
+              (requestedKind === 'tag' && candidate.kind === 'tag')) &&
+            (candidate.name === startPoint || candidate.fullName === startPoint),
+        );
         if (!target) {
+          void vscode.window.showWarningMessage(`"${startPoint}" is not a known ref in this repository.`);
           return;
         }
-        startRef = target.name;
+        const targetKind = target.kind;
+        if (
+          (targetKind === 'remote' && requestedKind !== undefined && requestedKind !== 'remote') ||
+          (targetKind === 'local' && requestedKind !== undefined && requestedKind !== 'local') ||
+          (targetKind === 'tag' && requestedKind !== undefined && requestedKind !== 'tag')
+        ) {
+          return;
+        }
+        sourceKind = targetKind;
+        resolvedStartPoint = target.fullName;
         startLabel = target.name;
+        if (target.kind === 'remote' && target.branch) {
+          initialName = extractShortRemoteBranchName(target.name, target.branch.remoteName ?? undefined);
+          remoteTrackingRef = target.name;
+        } else if (target.kind === 'local' && target.branch) {
+          initialName = target.branch.name;
+        }
+      }
+    } else if (requestedKind !== undefined && requestedKind !== 'head') {
+      return;
+    }
+
+    this.pendingCreateBranchDialog = {
+      sourceKind,
+      ...(resolvedStartPoint === undefined ? {} : { startPoint: resolvedStartPoint }),
+      startLabel,
+      initialName,
+      ...(remoteTrackingRef === undefined ? {} : { remoteTrackingRef }),
+      existingLocalBranches: snapshot.localBranches.map((branch) => branch.name),
+    };
+    this.host.openPanel();
+    this.flushPendingCreateBranchDialog();
+  }
+
+  private async handleSubmitCreateBranch(
+    payload: { branchName: string; startPoint?: string; checkout: boolean; track: boolean },
+  ): Promise<void> {
+    const snapshot = this.lastSnapshot;
+    if (!snapshot) {
+      return;
+    }
+    if (this.operationInProgress) {
+      void vscode.window.showWarningMessage('Another Git operation is already running.');
+      return;
+    }
+
+    let name: string;
+    try {
+      name = validateGitRef(payload.branchName);
+    } catch (err) {
+      void vscode.window.showWarningMessage(`Cannot create branch: ${describeError(err)}`);
+      return;
+    }
+    if (snapshot.localBranches.some((branch) => branch.name === name)) {
+      void vscode.window.showWarningMessage(`Branch "${name}" already exists.`);
+      return;
+    }
+
+    const startTarget = payload.startPoint === undefined
+      ? null
+      : isValidCommitHash(payload.startPoint)
+        ? { target: payload.startPoint.toLowerCase(), kind: 'commit' as const }
+        : (() => {
+            const target = listRefTargets(snapshot).find(
+              (candidate) => candidate.name === payload.startPoint || candidate.fullName === payload.startPoint,
+            );
+            return target === undefined ? null : { target: target.name, kind: target.kind };
+          })();
+    if (payload.startPoint !== undefined && startTarget === null) {
+      void vscode.window.showWarningMessage(`"${payload.startPoint}" is not a known ref or commit in this repository.`);
+      return;
+    }
+    if (startTarget?.kind === 'commit' && !snapshot.commits.some((commit) => commit.hash === startTarget.target)) {
+      void vscode.window.showWarningMessage('That commit is not part of the loaded history.');
+      return;
+    }
+    const track = payload.track && startTarget?.kind === 'remote';
+    const resolvedStartPoint = startTarget?.target;
+
+    let dirtyAction: DirtyWorktreeAction = 'bring';
+    if (payload.checkout) {
+      try {
+        if (await this.gitService.hasWorkingTreeChanges(snapshot.repoRoot)) {
+          const choice = await vscode.window.showQuickPick(
+            [
+              {
+                label: 'Bring Changes to New Branch',
+                detail: 'Keep uncommitted files in your working tree on the new branch',
+              },
+              {
+                label: 'Stash Changes & Switch',
+                detail: 'Save uncommitted and untracked changes to a Git stash before switching',
+              },
+              {
+                label: 'Discard Changes & Switch',
+                detail: 'Permanently discard all uncommitted and untracked changes (cannot be undone)',
+              },
+              { label: 'Cancel' },
+            ],
+            {
+              title: 'Uncommitted Changes Detected',
+              placeHolder:
+                `Choose what to do with your uncommitted changes before switching to "${name}"`,
+              ignoreFocusOut: true,
+            },
+          );
+          dirtyAction =
+            choice?.label === 'Bring Changes to New Branch'
+              ? 'bring'
+              : choice?.label === 'Stash Changes & Switch'
+                ? 'stash'
+                : choice?.label === 'Discard Changes & Switch'
+                  ? 'discard'
+                  : 'cancel';
+        }
+      } catch (err) {
+        void vscode.window.showErrorMessage(`Could not inspect the working tree: ${describeError(err)}`);
+        return;
       }
     }
-    const existing = new Set(snapshot.localBranches.map((b) => b.name));
+    if (dirtyAction === 'cancel') {
+      return;
+    }
+    if (dirtyAction === 'discard') {
+      const discard = 'Yes, Discard All Changes';
+      const confirmation = await vscode.window.showQuickPick(
+        [{ label: discard }, { label: 'Cancel' }],
+        {
+          title: 'Confirm Permanent Discard',
+          placeHolder: 'Permanently discard all uncommitted and untracked changes? This action cannot be undone.',
+          ignoreFocusOut: true,
+        },
+      );
+      if (confirmation?.label !== discard) {
+        return;
+      }
+    }
+
+    await this.runGitOperation(`Creating branch ${name}`, async (repoRoot) => {
+      if (dirtyAction === 'stash') {
+        await this.gitService.stashChanges(repoRoot, `Auto-stash before creating ${name}`);
+      } else if (dirtyAction === 'discard') {
+        await this.gitService.discardWorkingTreeChanges(repoRoot);
+      }
+      await this.gitService.createBranch(repoRoot, name, resolvedStartPoint, {
+        checkout: payload.checkout,
+        track,
+      });
+    });
+  }
+
+  private async handleRenameBranch(target: string | undefined): Promise<void> {
+    const snapshot = this.lastSnapshot;
+    const oldBranch = target === undefined
+      ? undefined
+      : snapshot?.localBranches.find((branch) => branch.name === target);
+    if (!snapshot || !oldBranch) {
+      void vscode.window.showWarningMessage('That local branch is not available to rename.');
+      return;
+    }
+    const oldName = oldBranch.name;
     const input = await vscode.window.showInputBox({
-      title: 'Create New Branch',
-      prompt: `New branch from ${startLabel}`,
-      placeHolder: 'feature/my-branch',
+      title: 'Rename Branch',
+      prompt: `Rename "${oldName}"`,
+      value: oldName,
       validateInput: (value) => {
-        if (value.trim().length === 0) {
-          return 'Enter a branch name.';
+        const trimmed = value.trim();
+        if (trimmed.length === 0) {
+          return 'Branch name is required.';
         }
         try {
-          const ref = validateGitRef(value);
-          return existing.has(ref) ? `A branch named "${ref}" already exists.` : null;
+          const newName = validateGitRef(trimmed);
+          if (newName === oldName) {
+            return 'Enter a different branch name.';
+          }
+          if (snapshot.localBranches.some((branch) => branch.name === newName)) {
+            return `Branch "${newName}" already exists.`;
+          }
+          return null;
         } catch (err) {
           return describeError(err);
         }
@@ -883,8 +1607,13 @@ export class RepoCoordinator implements vscode.Disposable {
     if (input === undefined) {
       return;
     }
-    const name = validateGitRef(input);
-    await this.runGitOperation(`Creating branch ${name}`, (root) => this.gitService.createBranch(root, name, startRef));
+    const newName = validateGitRef(input);
+    if (newName === oldName) {
+      return;
+    }
+    await this.runGitOperation(`Renaming branch ${oldName}`, (repoRoot) =>
+      this.gitService.renameLocalBranch(repoRoot, oldName, newName),
+    );
   }
 
   private async sendCommitDetails(source: SurfaceId, hash: string): Promise<void> {
@@ -969,6 +1698,130 @@ export class RepoCoordinator implements vscode.Disposable {
     }
   }
 
+  private async resolveRemoteHost(repoRoot: string, remoteName?: string): Promise<ParsedRemoteHost | null> {
+    try {
+      const rawUrl = await this.gitService.getRemoteUrl(repoRoot, remoteName);
+      return rawUrl === null ? null : parseRemoteHostInfo(rawUrl);
+    } catch (err) {
+      void vscode.window.showWarningMessage(`Could not read remote URL: ${describeError(err)}`);
+      return null;
+    }
+  }
+
+  private async openHttpsUrl(url: string): Promise<void> {
+    if (!vscode.workspace.isTrusted) {
+      this.reportUntrustedWorkspace();
+      return;
+    }
+    if (!/^https:\/\/[^/]+(?:\/|$)/i.test(url)) {
+      void vscode.window.showWarningMessage('Refusing to open an external URL that is not a normalized HTTPS URL.');
+      return;
+    }
+    await vscode.env.openExternal(vscode.Uri.parse(url, true));
+  }
+
+  private async handleOpenRepoInBrowser(): Promise<void> {
+    const snapshot = this.lastSnapshot;
+    if (!this.ensureTrustedWorkspace() || !snapshot) {
+      return;
+    }
+    const remote = await this.resolveRemoteHost(snapshot.repoRoot);
+    if (!remote) {
+      void vscode.window.showInformationMessage('This repository has no supported remote web URL.');
+      return;
+    }
+    await this.openHttpsUrl(buildRemoteRepoUrl(remote));
+  }
+
+  private async handleOpenBranchInBrowser(targetRef?: string): Promise<void> {
+    const snapshot = this.lastSnapshot;
+    if (!this.ensureTrustedWorkspace() || !snapshot || targetRef === undefined) {
+      return;
+    }
+    const target = this.resolveRef(targetRef, ['local', 'remote']);
+    if (!target?.branch) {
+      return;
+    }
+    let remoteName: string;
+    let remoteBranch: string;
+    if (target.branch.isRemote) {
+      remoteName = target.branch.remoteName ?? '';
+      remoteBranch = target.branch.displayName;
+    } else {
+      const upstream = target.branch.upstream
+        ? parseUpstreamRef(
+            target.branch.upstream,
+            this.getRemoteNames(snapshot),
+          )
+        : null;
+      if (!upstream || target.branch.upstreamGone) {
+        void vscode.window.showInformationMessage(`Branch "${target.branch.name}" is not pushed to a remote.`);
+        return;
+      }
+      remoteName = upstream.remoteName;
+      remoteBranch = upstream.remoteBranch;
+    }
+    const remote = await this.resolveRemoteHost(snapshot.repoRoot, remoteName);
+    const url = remote === null ? null : buildRemoteBranchUrl(remote, remoteBranch);
+    if (!url) {
+      void vscode.window.showInformationMessage(`The "${remoteName}" remote cannot open branches in a browser.`);
+      return;
+    }
+    await this.openHttpsUrl(url);
+  }
+
+  private async handleOpenCommitInBrowser(hash?: string): Promise<void> {
+    const snapshot = this.lastSnapshot;
+    if (!this.ensureTrustedWorkspace() || !snapshot || !hash || !isValidCommitHash(hash)) {
+      return;
+    }
+    const remote = await this.resolveRemoteHost(snapshot.repoRoot);
+    const url = remote === null ? null : buildRemoteCommitUrl(remote, hash);
+    if (!url) {
+      void vscode.window.showInformationMessage('This repository has no supported remote web URL for commits.');
+      return;
+    }
+    await this.openHttpsUrl(url);
+  }
+
+  private async handleCreatePrInBrowser(targetRef?: string): Promise<void> {
+    const snapshot = this.lastSnapshot;
+    if (!this.ensureTrustedWorkspace() || !snapshot) {
+      return;
+    }
+    const refName = targetRef ?? snapshot.currentBranch;
+    const target = this.resolveRef(refName, ['local', 'remote']);
+    let remoteName: string;
+    let remoteBranch: string;
+    if (target?.branch?.isRemote) {
+      remoteName = target.branch.remoteName ?? '';
+      remoteBranch = target.branch.displayName;
+    } else {
+      const branch = target?.branch?.isRemote === false
+        ? target.branch
+        : snapshot.localBranches.find((candidate) => candidate.isCurrent);
+      const upstream = branch?.upstream
+        ? parseUpstreamRef(
+            branch.upstream,
+            this.getRemoteNames(snapshot),
+          )
+        : null;
+      if (!branch || !upstream || branch.upstreamGone) {
+        void vscode.window.showInformationMessage('Push this branch to a remote before creating a pull request.');
+        return;
+      }
+      remoteName = upstream.remoteName;
+      remoteBranch = upstream.remoteBranch;
+    }
+    const remote = await this.resolveRemoteHost(snapshot.repoRoot, remoteName);
+    const url = remote === null ? null : buildRemoteCreatePrUrl(remote, remoteBranch);
+    if (!url) {
+      void vscode.window.showInformationMessage(`The "${remoteName}" remote cannot create pull requests in a browser.`);
+      return;
+    }
+    await this.openHttpsUrl(url);
+  }
+
   public async openCommitOnGitHubByHash(hash: string): Promise<boolean> {
     const normalizedHash = hash.toLowerCase();
     if (!isValidCommitHash(normalizedHash) || !vscode.workspace.isTrusted) {
@@ -998,18 +1851,43 @@ export class RepoCoordinator implements vscode.Disposable {
     }
     const repoRoot = this.lastSnapshot?.repoRoot;
     let githubRemoteUrl: string | null = null;
+    let remoteWebUrl: string | null = null;
+    let remoteProvider: ExternalIntegrationsInfo['remoteProvider'] = null;
+    let remoteProviderName: string | null = null;
     if (repoRoot) {
       try {
-        githubRemoteUrl = await this.gitService.getGitHubRemoteUrl(repoRoot);
+        const rawUrl = await this.gitService.getRemoteUrl(repoRoot);
+        const parsed = rawUrl === null ? null : parseRemoteHostInfo(rawUrl);
+        if (parsed) {
+          remoteWebUrl = parsed.webBaseUrl;
+          remoteProvider = parsed.provider;
+          remoteProviderName = parsed.displayName;
+        }
+        if (parsed?.provider === 'github') {
+          githubRemoteUrl = parsed.webBaseUrl;
+        }
       } catch {
-        githubRemoteUrl = null;
+        // Continue with the legacy GitHub lookup below.
+      }
+      try {
+        const legacyGithubUrl = await this.gitService.getGitHubRemoteUrl(repoRoot);
+        githubRemoteUrl = legacyGithubUrl ?? githubRemoteUrl;
+      } catch {
+        // Keep a GitHub result from the multi-provider resolver when available.
       }
     }
     if (repoRoot !== this.lastSnapshot?.repoRoot) {
       return;
     }
     const gitGraphExtensionId = findGitGraphExtensionId();
-    this.integrations = { gitGraphAvailable: gitGraphExtensionId !== null, gitGraphExtensionId, githubRemoteUrl };
+    this.integrations = {
+      gitGraphAvailable: gitGraphExtensionId !== null,
+      gitGraphExtensionId,
+      githubRemoteUrl,
+      remoteWebUrl: remoteWebUrl ?? githubRemoteUrl,
+      remoteProvider: remoteProvider ?? (githubRemoteUrl ? 'github' : null),
+      remoteProviderName: remoteProviderName ?? (githubRemoteUrl ? 'GitHub' : null),
+    };
     this.broadcast({ type: 'integrationsInfo', payload: this.integrations });
   }
 
@@ -1057,6 +1935,7 @@ export class RepoCoordinator implements vscode.Disposable {
       this.host.onCurrentBranchChange(snapshot.currentBranch);
       this.broadcast({ type: 'repoSnapshot', payload: snapshot });
       this.flushPendingRevealCommit();
+      this.flushPendingCreateBranchDialog();
       await this.publishIntegrations();
       if (sequence !== this.loadSequence || this.disposed) {
         return;
@@ -1186,6 +2065,7 @@ export class RepoCoordinator implements vscode.Disposable {
     ) {
       return;
     }
+
     this.isSearchingForRevealCommit = true;
     try {
       if (this.lastSnapshot.commits.some((commit) => commit.hash === hash)) {
@@ -1226,6 +2106,18 @@ export class RepoCoordinator implements vscode.Disposable {
       if (this.pendingRevealCommitHash !== null) {
         void this.flushPendingRevealCommit();
       }
+    }
+  }
+
+  private flushPendingCreateBranchDialog(): void {
+    const request = this.pendingCreateBranchDialog;
+    const editor = this.surfaces.get('editor');
+    if (request === null || !editor || !this.readySurfaces.has('editor')) {
+      return;
+    }
+    editor.post({ type: 'showCreateBranchDialog', payload: request });
+    if (this.pendingCreateBranchDialog === request) {
+      this.pendingCreateBranchDialog = null;
     }
   }
 

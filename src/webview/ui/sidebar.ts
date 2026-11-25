@@ -74,17 +74,34 @@ function runRefMenuAction(id: MenuActionId, target: RefTarget): void {
     case 'deleteBranch':
       postGitAction(id === 'checkoutRemote' ? 'checkoutRemoteBranch' : id, target.name);
       break;
+    case 'renameBranch':
+      postGitAction('renameBranch', target.name);
+      break;
+    case 'untrackBranch':
+      postGitAction('untrackBranch', target.name);
+      break;
     case 'resetMixed':
     case 'resetHard':
       postGitAction(id, target.fullName);
       break;
     case 'pull':
-    case 'push':
     case 'fetch':
       postGitAction(id);
       break;
+    case 'push':
+    case 'pushAndOpenPr':
+    case 'createPrInBrowser':
+    case 'openBranchInBrowser':
+      postGitAction(id, target.name);
+      break;
     case 'createBranchHere':
-      vscode.postMessage({ type: 'createBranchAtRef', payload: { startPoint: target.name } });
+      vscode.postMessage({
+        type: 'openCreateBranchDialog',
+        payload: {
+          startPoint: target.name,
+          sourceKind: target.kind === 'remote' ? 'remote' : target.kind === 'local' ? 'local' : 'tag',
+        },
+      });
       break;
     case 'isolate':
       changeSelection({ pinnedBranchFullNames: toggleSetMember(state.pinnedBranchFullNames, target.fullName) });
@@ -99,10 +116,14 @@ function runRepoMenuAction(id: MenuActionId): void {
     case 'fetchTracked':
     case 'pull':
     case 'push':
+    case 'pushAndOpenPr':
+    case 'createPrInBrowser':
+    case 'openRepoInBrowser':
+    case 'publishRepository':
       postGitAction(id);
       break;
     case 'newBranch':
-      postGitAction('createBranch');
+      vscode.postMessage({ type: 'openCreateBranchDialog', payload: { sourceKind: 'head' } });
       break;
     case 'refresh':
       vscode.postMessage({ type: 'requestRefresh' });
@@ -136,7 +157,14 @@ function showRepoContextMenu(x: number, y: number): void {
     contextMenu.show(
       x,
       y,
-      buildRepoMenu(state.snapshot, state, state.showCheckedOutBadge, state.showFolderCounts, state.trackingOrder),
+      buildRepoMenu(
+        state.snapshot,
+        state,
+        state.showCheckedOutBadge,
+        state.showFolderCounts,
+        state.trackingOrder,
+        (state.snapshot.remotes?.length ?? 0) > 0 || state.snapshot.remoteGroups.length > 0,
+      ),
       runRepoMenuAction,
     );
   }
@@ -195,8 +223,9 @@ function handleMessage(message: ExtensionToWebviewMessage): void {
       setState({ isBusy: message.payload.busy, busyMessage: message.payload.message ?? null });
       break;
     case 'commitDetails':
+      break;
     case 'integrationsInfo':
-      // Only the editor timeline shows commit details and the Git Graph/GitHub integrations.
+      setState({ integrations: message.payload });
       break;
   }
 }

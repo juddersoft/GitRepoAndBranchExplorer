@@ -66,15 +66,21 @@ export class ContextMenu {
       }
     };
     const closeNow = (): void => this.close(false);
+    const closeOnOutsideScroll = (event: Event): void => {
+      if (event.target instanceof Node && root.contains(event.target)) {
+        return;
+      }
+      this.close(false);
+    };
     document.addEventListener('pointerdown', closeIfOutside, true);
     window.addEventListener('blur', closeNow);
     window.addEventListener('resize', closeNow);
-    document.addEventListener('scroll', closeNow, true);
+    document.addEventListener('scroll', closeOnOutsideScroll, true);
     this.teardown = [
       () => document.removeEventListener('pointerdown', closeIfOutside, true),
       () => window.removeEventListener('blur', closeNow),
       () => window.removeEventListener('resize', closeNow),
-      () => document.removeEventListener('scroll', closeNow, true),
+      () => document.removeEventListener('scroll', closeOnOutsideScroll, true),
     ];
 
     items[0]?.focus();

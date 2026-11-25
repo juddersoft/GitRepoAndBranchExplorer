@@ -92,7 +92,8 @@ describe('buildRefMenu: local branches', () => {
   it('offers the full branch menu', () => {
     expect(ids(buildRefMenu(snapshot, state(), branchRefTarget(feature)))).toEqual([
       'checkout', 'merge', 'rebase', 'resetMixed', 'resetHard',
-      'pull', 'push', 'fetch', 'createBranchHere', 'isolate', 'deleteBranch',
+      'pull', 'push', 'pushAndOpenPr', 'fetch', 'createPrInBrowser', 'openBranchInBrowser',
+      'createBranchHere', 'renameBranch', 'untrackBranch', 'isolate', 'deleteBranch',
     ]);
   });
 
@@ -100,7 +101,7 @@ describe('buildRefMenu: local branches', () => {
     const menu = buildRefMenu(snapshot, state(), branchRefTarget(feature));
     expect(enabled(menu)).toEqual([
       'checkout', 'merge', 'rebase', 'resetMixed', 'resetHard',
-      'fetch', 'createBranchHere', 'isolate', 'deleteBranch',
+      'push', 'fetch', 'createBranchHere', 'renameBranch', 'isolate', 'deleteBranch',
     ]);
     expect(item(menu, 'pull').reason).toMatch(/check out/i);
     expect(item(menu, 'merge').reason).toBeUndefined();
@@ -112,7 +113,23 @@ describe('buildRefMenu: local branches', () => {
     for (const id of ['checkout', 'merge', 'rebase', 'deleteBranch'] as const) {
       expect(item(menu, id).enabled, id).toBe(false);
     }
-    expect(enabled(menu)).toEqual(['resetMixed', 'resetHard', 'pull', 'push', 'fetch', 'createBranchHere', 'isolate']);
+    expect(enabled(menu)).toEqual(['resetMixed', 'resetHard', 'pull', 'push', 'fetch', 'createBranchHere', 'renameBranch', 'untrackBranch', 'isolate']);
+  });
+
+  it('enables untracking tracked and gone upstreams, and disables it for untracked branches', () => {
+    const tracked = buildRefMenu(snapshot, state(), branchRefTarget(main));
+    const gone = buildRefMenu(
+      { ...snapshot, localBranches: [{ ...main, upstreamGone: true }] },
+      state({ snapshot: { ...snapshot, localBranches: [{ ...main, upstreamGone: true }] } }),
+      branchRefTarget({ ...main, upstreamGone: true }),
+    );
+    const untracked = buildRefMenu(snapshot, state(), branchRefTarget(feature));
+    expect(item(tracked, 'untrackBranch').enabled).toBe(true);
+    expect(item(gone, 'untrackBranch').enabled).toBe(true);
+    expect(item(untracked, 'untrackBranch')).toMatchObject({
+      enabled: false,
+      reason: 'Branch is not tracking a remote branch.',
+    });
   });
 
   it('disables pull when the checked-out branch has no upstream, and labels push as Publish', () => {
@@ -157,8 +174,11 @@ describe('buildRefMenu: remote branches and tags', () => {
     const menu = buildRefMenu(snapshot, state(), branchRefTarget(originFeature));
     expect(ids(menu)).toEqual([
       'checkoutRemote', 'merge', 'rebase', 'resetMixed', 'resetHard', 'createBranchHere', 'isolate', 'fetch',
+      'createPrInBrowser', 'openBranchInBrowser',
     ]);
-    expect(enabled(menu)).toEqual(ids(menu));
+    expect(enabled(menu)).toEqual([
+      'checkoutRemote', 'merge', 'rebase', 'resetMixed', 'resetHard', 'createBranchHere', 'isolate', 'fetch',
+    ]);
   });
 
   it('disables merge/rebase for a remote branch when HEAD is detached', () => {
@@ -234,14 +254,23 @@ describe('buildCommitMenu', () => {
   it('gates the integrations on what is available', () => {
     const none = buildCommitMenu(snapshot, state(), find(C));
     expect(item(none, 'openGitGraph').enabled).toBe(false);
-    expect(item(none, 'openGitHub').enabled).toBe(false);
+    expect(item(none, 'openCommitInBrowser').enabled).toBe(false);
     const both = buildCommitMenu(
       snapshot,
-      state({ integrations: { gitGraphAvailable: true, gitGraphExtensionId: 'x.y', githubRemoteUrl: 'https://github.com/o/r' } }),
+      state({
+        integrations: {
+          gitGraphAvailable: true,
+          gitGraphExtensionId: 'x.y',
+          githubRemoteUrl: 'https://github.com/o/r',
+          remoteWebUrl: 'https://github.com/o/r',
+          remoteProvider: 'github',
+          remoteProviderName: 'GitHub',
+        },
+      }),
       find(C),
     );
     expect(item(both, 'openGitGraph').enabled).toBe(true);
-    expect(item(both, 'openGitHub').enabled).toBe(true);
+    expect(item(both, 'openCommitInBrowser').enabled).toBe(true);
   });
 
   it('always allows copying the hash and disables mutations while busy', () => {
@@ -272,13 +301,25 @@ describe('buildRepoMenu', () => {
     trackingOrder,
   );
 
+  it('offers Publish Repository for a local-only repository', () => {
+    const menu = buildRepoMenu(snapshot, state(), true, true, 'vscode', false);
+    expect(item(menu, 'publishRepository')).toMatchObject({
+      enabled: true,
+      label: 'Publish Repository / Add Remote…',
+    });
+  });
+
   it('offers Fetch, Pull, Push, New Branch, preference toggles and Refresh', () => {
     const menu = menuFor(snapshot);
     expect(ids(menu)).toEqual([
+      'fetchTracked', 'pull', 'push', 'pushAndOpenPr', 'createPrInBrowser', 'openRepoInBrowser',
+      'newBranch', 'toggleCheckedOutBadge', 'toggleFolderCounts',
+      'toggleTrackingOrder', 'refresh',
+    ]);
+    expect(enabled(menu)).toEqual([
       'fetchTracked', 'pull', 'push', 'newBranch', 'toggleCheckedOutBadge', 'toggleFolderCounts',
       'toggleTrackingOrder', 'refresh',
     ]);
-    expect(enabled(menu)).toEqual(ids(menu));
     expect(item(menu, 'push').label).toBe('Push');
   });
 
@@ -374,10 +415,10 @@ describe('clampMenuPosition', () => {
   });
 
   it('shifts the menu back inside the viewport', () => {
-    expect(clampMenuPosition(750, 580, 200, 100, 800, 600)).toEqual({ left: 600, top: 500 });
+    expect(clampMenuPosition(750, 580, 200, 100, 800, 600)).toEqual({ left: 592, top: 492 });
   });
 
   it('never goes negative, even when the menu is larger than the viewport', () => {
-    expect(clampMenuPosition(5, 5, 900, 700, 800, 600)).toEqual({ left: 0, top: 0 });
+    expect(clampMenuPosition(5, 5, 900, 700, 800, 600)).toEqual({ left: 8, top: 8 });
   });
 });

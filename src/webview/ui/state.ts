@@ -188,7 +188,14 @@ export function createInitialState(): ExplorerUiState {
     selectedCommitHash: null,
     expandedNodes: new Set([NODE_BRANCHES]),
     commitDetails: new Map(),
-    integrations: { gitGraphAvailable: false, gitGraphExtensionId: null, githubRemoteUrl: null },
+    integrations: {
+      gitGraphAvailable: false,
+      gitGraphExtensionId: null,
+      githubRemoteUrl: null,
+      remoteWebUrl: null,
+      remoteProvider: null,
+      remoteProviderName: null,
+    },
     isBusy: false,
     busyMessage: null,
   };

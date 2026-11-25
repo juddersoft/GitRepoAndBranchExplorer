@@ -19,15 +19,28 @@ describe('gitAction validation', () => {
     expect(Object.keys(GIT_ACTION_TARGETS).sort()).toEqual(Object.keys(GIT_ACTION_LABELS).sort());
   });
 
-  it.each(['fetch', 'fetchTracked', 'pull', 'push', 'createBranch'] as GitAction[])('accepts %s without a target', (action) => {
+  it.each(['fetch', 'fetchTracked', 'pull', 'push', 'pushAndOpenPr', 'createPrInBrowser', 'openRepoInBrowser', 'createBranch', 'publishRepository'] as GitAction[])('accepts %s without a target', (action) => {
     expect(isWebviewToExtensionMessage(gitAction({ action }))).toBe(true);
   });
 
-  it.each(['fetch', 'fetchTracked', 'pull', 'push', 'createBranch'] as GitAction[])('rejects %s carrying a target', (action) => {
+  it.each(['fetch', 'fetchTracked', 'pull', 'openRepoInBrowser', 'createBranch', 'publishRepository'] as GitAction[])('rejects %s carrying a target', (action) => {
     expect(isWebviewToExtensionMessage(gitAction({ action, target: 'main' }))).toBe(false);
   });
 
-  it.each(['merge', 'rebase', 'deleteBranch', 'checkoutRemoteBranch'] as GitAction[])('requires a safe ref target for %s', (action) => {
+  it.each(['push', 'pushAndOpenPr', 'createPrInBrowser'] as GitAction[])('accepts an optional safe ref for %s', (action) => {
+    expect(isWebviewToExtensionMessage(gitAction({ action }))).toBe(true);
+    expect(isWebviewToExtensionMessage(gitAction({ action, target: 'feature/x' }))).toBe(true);
+    expect(isWebviewToExtensionMessage(gitAction({ action, target: '--force' }))).toBe(false);
+  });
+
+  it('validates browser action target kinds', () => {
+    expect(isWebviewToExtensionMessage(gitAction({ action: 'openBranchInBrowser', target: 'origin/main' }))).toBe(true);
+    expect(isWebviewToExtensionMessage(gitAction({ action: 'openBranchInBrowser' }))).toBe(false);
+    expect(isWebviewToExtensionMessage(gitAction({ action: 'openCommitInBrowser', target: HASH }))).toBe(true);
+    expect(isWebviewToExtensionMessage(gitAction({ action: 'openCommitInBrowser', target: 'main' }))).toBe(false);
+  });
+
+  it.each(['merge', 'rebase', 'deleteBranch', 'checkoutRemoteBranch', 'renameBranch', 'untrackBranch'] as GitAction[])('requires a safe ref target for %s', (action) => {
     expect(isWebviewToExtensionMessage(gitAction({ action, target: 'origin/feature/x' }))).toBe(true);
     expect(isWebviewToExtensionMessage(gitAction({ action }))).toBe(false);
     expect(isWebviewToExtensionMessage(gitAction({ action, target: '' }))).toBe(false);
@@ -63,6 +76,7 @@ describe('gitAction validation', () => {
       expect(isWebviewToExtensionMessage(gitAction({ action })), String(action)).toBe(false);
     }
     expect(isWebviewToExtensionMessage({ type: 'gitAction' })).toBe(false);
+    expect(isWebviewToExtensionMessage(gitAction({ action: 'publishRepository', extra: true }))).toBe(false);
   });
 });
 
@@ -73,6 +87,47 @@ describe('createBranchAtRef validation', () => {
     expect(isWebviewToExtensionMessage(message(HASH))).toBe(true);
     expect(isWebviewToExtensionMessage(message('origin/main'))).toBe(true);
     expect(isWebviewToExtensionMessage(message('v1.0.0'))).toBe(true);
+  });
+
+  describe('create branch dialog messages', () => {
+    it('validates open and submit requests', () => {
+      expect(isWebviewToExtensionMessage({
+        type: 'openCreateBranchDialog',
+        payload: { startPoint: 'refs/remotes/origin/main', sourceKind: 'remote' },
+      })).toBe(true);
+      expect(isWebviewToExtensionMessage({
+        type: 'submitCreateBranch',
+        payload: { branchName: 'feature/x', startPoint: HASH, checkout: true, track: false },
+      })).toBe(true);
+    });
+
+    it('rejects malformed create branch payloads and polluted records', () => {
+      expect(isWebviewToExtensionMessage({ type: 'openCreateBranchDialog', payload: { sourceKind: 'unknown' } })).toBe(false);
+      expect(isWebviewToExtensionMessage({
+        type: 'submitCreateBranch',
+        payload: { branchName: 'feature/x', checkout: 'yes', track: false },
+      })).toBe(false);
+      expect(isWebviewToExtensionMessage({
+        type: 'submitCreateBranch',
+        payload: { branchName: 'feature/x', checkout: true, track: false, extra: true },
+      })).toBe(false);
+      const payload = JSON.parse('{"branchName":"feature/x","checkout":true,"track":false,"__proto__":{}}');
+      expect(isWebviewToExtensionMessage({ type: 'submitCreateBranch', payload })).toBe(false);
+    });
+
+    it('validates dialog requests sent by the extension', () => {
+      expect(isExtensionToWebviewMessage({
+        type: 'showCreateBranchDialog',
+        payload: {
+          sourceKind: 'remote',
+          startPoint: 'refs/remotes/origin/main',
+          startLabel: 'origin/main',
+          initialName: 'main',
+          remoteTrackingRef: 'origin/main',
+          existingLocalBranches: ['main'],
+        },
+      })).toBe(true);
+    });
   });
 
   it('rejects option-like, empty, oversized and non-string start points', () => {

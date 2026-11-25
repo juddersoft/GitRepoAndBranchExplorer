@@ -38,7 +38,7 @@ export interface HistoryPaneCallbacks {
   onOpenFileDiff(hash: string, file: ChangedFileEntry): void;
   onOpenFile?(file: { hash: string; filePath: string; status: string }): void;
   onOpenInGitGraph(): void;
-  onOpenCommitOnGitHub(hash: string): void;
+  onOpenCommitInBrowser(hash: string): void;
   onSignInGitHub(): void;
   onLoadMoreCommits(): void;
   /** The user resized (or reset) a column; `widths` holds only the columns that differ from their defaults. */
@@ -845,18 +845,27 @@ export class HistoryPane {
 
   private renderDetailsActions(commitHash: string, state: ExplorerUiState): HTMLElement {
     const actions: HTMLElement[] = [];
-    if (state.integrations.githubRemoteUrl !== null) {
-      const openOnGitHub = button({
+    if (state.integrations.remoteWebUrl || state.integrations.githubRemoteUrl) {
+      const providerName = state.integrations.remoteProviderName ?? 'GitHub';
+      const openInBrowser = button({
         className: 'toolbar-button',
-        label: 'Open on GitHub',
-        title: `Open ${commitHash.slice(0, 8)} on ${state.integrations.githubRemoteUrl}`,
+        label: `Open Commit on ${providerName}`,
+        title: `Open ${commitHash.slice(0, 8)} on ${state.integrations.remoteWebUrl ?? state.integrations.githubRemoteUrl}`,
         icon: 'linkExternal',
         showLabel: true,
       });
-      openOnGitHub.addEventListener('click', () => this.callbacks.onOpenCommitOnGitHub(commitHash));
-      const signIn = button({ className: 'link-button', label: 'Sign in to GitHub', title: 'Sign in with your GitHub account', showLabel: true });
-      signIn.addEventListener('click', () => this.callbacks.onSignInGitHub());
-      actions.push(openOnGitHub, signIn);
+      openInBrowser.addEventListener('click', () => this.callbacks.onOpenCommitInBrowser(commitHash));
+      actions.push(openInBrowser);
+      if (state.integrations.remoteProvider === 'github' || state.integrations.githubRemoteUrl !== null) {
+        const signIn = button({
+          className: 'link-button',
+          label: 'Sign in to GitHub',
+          title: 'Sign in with your GitHub account',
+          showLabel: true,
+        });
+        signIn.addEventListener('click', () => this.callbacks.onSignInGitHub());
+        actions.push(signIn);
+      }
     }
     const footer = el('div', { className: 'details-actions' }, actions);
     footer.hidden = actions.length === 0;

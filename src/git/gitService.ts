@@ -1,3 +1,4 @@
+import * as fs from 'fs';
 import * as path from 'path';
 import type { BranchInfo, ChangedFileEntry, CommitDetails, CommitNode, RefBadge, RemoteGroup, RepoSnapshot, TagInfo } from '../types/git';
 import { isChangedFileStatus, isSafeRepoRelativePath } from '../types/messages';
@@ -5,6 +6,7 @@ import type { ExecGitOptions } from './gitExecutor';
 import { execGit, GitExecutionError, validateGitRef } from './gitExecutor';
 import type { TrackedFetchResult } from './trackedFetch';
 import { planTrackedFetch } from './trackedFetch';
+import { classifyRemoteDestination, parseRemoteHostInfo } from './remoteUrlBuilder';
 
 const FIELD_SEP = '\x1f';
 const RECORD_SEP = '\x1e';
@@ -38,6 +40,11 @@ export const NETWORK_GIT_TIMEOUT_MS = 120_000;
 
 /** Merge, rebase, cherry-pick, revert and tracking checkouts can rewrite many files in a large worktree. */
 export const WORKTREE_GIT_TIMEOUT_MS = 120_000;
+
+export interface CreateBranchOptions {
+  readonly checkout?: boolean;
+  readonly track?: boolean;
+}
 
 const STRICT_COMMIT_HASH = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i;
 
@@ -325,11 +332,33 @@ export class GitService {
     const topLevel = await this.runGit(['rev-parse', '--show-toplevel'], workspaceFolderPath);
     const repoRoot = path.normalize(topLevel.trim());
 
-    const [refOutput, head] = await Promise.all([
+    const [refOutput, head, remoteOutput] = await Promise.all([
       this.runGit(['for-each-ref', `--format=${FOR_EACH_REF_FORMAT}`, 'refs/heads', 'refs/remotes', 'refs/tags'], repoRoot),
       this.resolveHead(repoRoot),
+      this.runGit(['remote', '-v'], repoRoot),
     ]);
     const refs = parseForEachRefOutput(refOutput);
+    const remoteDestinations = this.parseRemoteDestinations(remoteOutput);
+    const remoteNames = [...remoteDestinations.keys()].sort(compareStrings);
+    const remoteGroupNames = [...new Set([
+      ...remoteNames,
+      ...refs.remoteGroups.map((group) => group.remoteName),
+    ])].sort(compareStrings);
+    const groupsByName = new Map(refs.remoteGroups.map((group) => [group.remoteName, group]));
+    const remoteGroups = remoteGroupNames.map((remoteName): RemoteGroup => {
+      const group = groupsByName.get(remoteName) ?? { remoteName, branches: [] };
+      const url = remoteDestinations.get(remoteName);
+      if (url === undefined) {
+        return group;
+      }
+      const destination = classifyRemoteDestination(url);
+      return {
+        ...group,
+        url,
+        destinationKind: destination.kind,
+        ...(destination.providerName === undefined ? {} : { providerName: destination.providerName }),
+      };
+    });
     const page = await this.readLog(repoRoot, MAX_LOG_COMMITS, 0, buildRefMap(refs, head.hash));
 
     const isDetachedHead = head.branch === null;
@@ -340,9 +369,35 @@ export class GitService {
       repoRoot,
       currentBranch,
       isDetachedHead,
-      ...refs,
+      remotes: remoteNames,
+      localBranches: refs.localBranches,
+      remoteGroups,
+      tags: refs.tags,
       ...page,
     };
+  }
+
+  private parseRemoteDestinations(rawOutput: string): Map<string, string> {
+    const destinations = new Map<string, { fetch?: string; push?: string }>();
+    for (const line of rawOutput.split(/\r?\n/)) {
+      const match = /^\s*(\S+)\s+(\S+)\s+\((fetch|push)\)\s*$/.exec(line);
+      if (!match) {
+        continue;
+      }
+      const [, remoteName, url, operation] = match;
+      const existing = destinations.get(remoteName) ?? {};
+      if (operation === 'push') {
+        existing.push = url;
+      } else {
+        existing.fetch = url;
+      }
+      destinations.set(remoteName, existing);
+    }
+    return new Map(
+      [...destinations.entries()]
+        .map(([name, urls]) => [name, urls.push ?? urls.fetch] as const)
+        .filter((entry): entry is readonly [string, string] => entry[1] !== undefined),
+    );
   }
 
   public async getCommitPage(
@@ -424,8 +479,31 @@ export class GitService {
 
   public async pushCurrentBranch(repoRoot: string, branchName: string, hasUpstream: boolean): Promise<void> {
     const ref = validateGitRef(branchName);
-    const args = hasUpstream ? ['push'] : ['push', '-u', 'origin', ref];
+    const args = hasUpstream ? ['push'] : ['push', '-u', '--', 'origin', `refs/heads/${ref}:refs/heads/${ref}`];
     await this.runGit(args, repoRoot, { timeoutMs: NETWORK_GIT_TIMEOUT_MS });
+  }
+
+  public async pushToRemoteBranch(
+    repoRoot: string,
+    remoteName: string,
+    localBranchName: string,
+    remoteBranchName: string,
+    setUpstream: boolean,
+  ): Promise<void> {
+    const remote = validateGitRef(remoteName);
+    const local = validateGitRef(localBranchName);
+    const remoteBranch = validateGitRef(remoteBranchName);
+    await this.runGit(
+      [
+        'push',
+        ...(setUpstream ? ['-u'] : []),
+        '--',
+        remote,
+        `refs/heads/${local}:refs/heads/${remoteBranch}`,
+      ],
+      repoRoot,
+      { timeoutMs: NETWORK_GIT_TIMEOUT_MS },
+    );
   }
 
   public async checkoutBranch(repoRoot: string, branchName: string): Promise<void> {
@@ -434,14 +512,79 @@ export class GitService {
     await this.runGit(['checkout', ref, '--'], repoRoot);
   }
 
-  public async createBranch(repoRoot: string, branchName: string, startPoint?: string): Promise<void> {
+  public async createBranch(
+    repoRoot: string,
+    branchName: string,
+    startPoint?: string,
+    options?: CreateBranchOptions,
+  ): Promise<void> {
     const ref = validateGitRef(branchName);
-    const args = ['checkout', '-b', ref];
-    if (startPoint !== undefined) {
-      args.push(isValidCommitHash(startPoint) ? startPoint.toLowerCase() : validateGitRef(startPoint));
+    const validatedStart = startPoint === undefined
+      ? undefined
+      : isValidCommitHash(startPoint)
+        ? startPoint.toLowerCase()
+        : validateGitRef(startPoint);
+    const checkout = options?.checkout ?? true;
+
+    if (!checkout) {
+      const args = ['branch'];
+      if (validatedStart !== undefined) {
+        args.push(options?.track ? '--track' : '--no-track', ref, validatedStart);
+      } else {
+        args.push(ref);
+      }
+      await this.runGit(args, repoRoot);
+      return;
     }
-    args.push('--');
-    await this.runGit(args, repoRoot);
+
+    const args = ['checkout', '-b', ref];
+    if (validatedStart !== undefined) {
+      if (options?.track !== undefined) {
+        args.push(options.track ? '--track' : '--no-track', validatedStart);
+      } else {
+        args.push(validatedStart, '--');
+      }
+    } else {
+      args.push('--');
+    }
+    await this.runGit(args, repoRoot, { timeoutMs: WORKTREE_GIT_TIMEOUT_MS });
+  }
+
+  public async hasWorkingTreeChanges(repoRoot: string): Promise<boolean> {
+    return (await this.runGit(['status', '--porcelain=v1'], repoRoot)).trim().length > 0;
+  }
+
+  public async resolveCommitHash(repoRoot: string, ref: string): Promise<string | null> {
+    const validated = ref === 'HEAD'
+      ? 'HEAD'
+      : isValidCommitHash(ref)
+        ? ref.toLowerCase()
+        : validateGitRef(ref);
+    try {
+      const hash = (await this.runGit(['rev-parse', '--verify', `${validated}^{commit}`], repoRoot)).trim().toLowerCase();
+      return isValidCommitHash(hash) ? hash : null;
+    } catch {
+      return null;
+    }
+  }
+
+  public async stashChanges(repoRoot: string, message: string): Promise<void> {
+    const safeMessage = message.replace(/[\x00-\x1f\x7f]+/g, ' ').trim() || 'Auto-stash';
+    await this.runGit(['stash', 'push', '-u', '-m', safeMessage], repoRoot, { timeoutMs: WORKTREE_GIT_TIMEOUT_MS });
+  }
+
+  public async discardWorkingTreeChanges(repoRoot: string): Promise<void> {
+    await this.runGit(['reset', '--hard', 'HEAD'], repoRoot, { timeoutMs: WORKTREE_GIT_TIMEOUT_MS });
+    await this.runGit(['clean', '-fd'], repoRoot, { timeoutMs: WORKTREE_GIT_TIMEOUT_MS });
+  }
+
+  public async renameLocalBranch(repoRoot: string, oldName: string, newName: string): Promise<void> {
+    const oldRef = validateGitRef(oldName);
+    const newRef = validateGitRef(newName);
+    if (oldRef === newRef) {
+      throw new Error('New branch name must be different from the current name.');
+    }
+    await this.runGit(['branch', '-m', '--', oldRef, newRef], repoRoot);
   }
 
   /** `--no-edit` keeps Git from opening an editor for the merge message (there is no terminal to host it). */
@@ -490,6 +633,70 @@ export class GitService {
     await this.runGit(['branch', force ? '-D' : '-d', ref], repoRoot);
   }
 
+  public async unsetBranchUpstream(repoRoot: string, branchName: string): Promise<void> {
+    const branch = validateGitRef(branchName);
+    await this.runGit(['branch', '--unset-upstream', branch], repoRoot);
+  }
+
+  public async addRemote(repoRoot: string, remoteName: string, remoteUrl: string): Promise<void> {
+    const remote = validateGitRef(remoteName);
+    const url = remoteUrl.trim();
+    const destinationKind = classifyRemoteDestination(url).kind;
+    if (
+      url.length === 0 ||
+      url.startsWith('-') ||
+      /[\x00-\x1f\x7f]/.test(url) ||
+      (/\s/.test(url) && destinationKind !== 'localPath') ||
+      /^ext::/i.test(url)
+    ) {
+      throw new Error('Enter a safe remote URL or path without whitespace, control characters, or ext:: transport.');
+    }
+    await this.runGit(['remote', 'add', '--', remote, url], repoRoot);
+  }
+
+  public async initBareRepository(targetDir: string, initialBranch?: string): Promise<void> {
+    const target = targetDir.trim();
+    if (target.length === 0 || /[\x00-\x1f\x7f]/.test(target)) {
+      throw new Error('Bare repository path must not be empty or contain control characters.');
+    }
+    const branch = initialBranch === undefined ? undefined : validateGitRef(initialBranch);
+    await this.assertBareTargetIsUnused(target);
+    await fs.promises.mkdir(target, { recursive: true });
+    await this.assertBareTargetIsUnused(target);
+    await this.runGit(
+      ['init', '--bare', ...(branch === undefined ? [] : [`--initial-branch=${branch}`])],
+      target,
+    );
+  }
+
+  private async assertBareTargetIsUnused(targetDir: string): Promise<void> {
+    for (const marker of ['.git', 'HEAD']) {
+      try {
+        await fs.promises.lstat(path.join(targetDir, marker));
+        throw new Error(`Refusing to overwrite an existing repository at "${targetDir}".`);
+      } catch (err) {
+        if (err instanceof Error && err.message.startsWith('Refusing to overwrite')) {
+          throw err;
+        }
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw err;
+        }
+      }
+    }
+  }
+
+  public async getRemoteRawUrl(repoRoot: string, remoteName: string): Promise<string | null> {
+    const remote = validateGitRef(remoteName);
+    try {
+      return (await this.runGit(['remote', 'get-url', '--', remote], repoRoot)).trim() || null;
+    } catch (err) {
+      if (err instanceof GitExecutionError && err.code === 'COMMAND_FAILED') {
+        return null;
+      }
+      throw err;
+    }
+  }
+
   /** Creates `localBranchName` tracking `remoteBranchName` (e.g. `origin/main`) and checks it out. */
   public async checkoutRemoteBranch(repoRoot: string, remoteBranchName: string, localBranchName: string): Promise<void> {
     const remote = validateGitRef(remoteBranchName);
@@ -510,6 +717,32 @@ export class GitService {
       }
     }
     return findGitHubRemoteInVerbose(await this.runGit(['remote', '-v'], repoRoot));
+  }
+
+  public async getRemoteUrl(repoRoot: string, preferredRemote?: string): Promise<string | null> {
+    if (preferredRemote !== undefined) {
+      return this.getRemoteRawUrl(repoRoot, preferredRemote);
+    }
+
+    try {
+      const originUrl = (await this.runGit(['remote', 'get-url', 'origin'], repoRoot)).trim();
+      if (originUrl && parseRemoteHostInfo(originUrl) !== null) {
+        return originUrl;
+      }
+    } catch (err) {
+      if (!(err instanceof GitExecutionError && err.code === 'COMMAND_FAILED')) {
+        throw err;
+      }
+    }
+
+    const output = await this.runGit(['remote', '-v'], repoRoot);
+    const urls = output
+      .split(/\r?\n/)
+      .map((line) => line.trim().split(/\s+/))
+      .filter((parts) => parts.length >= 2)
+      .map(([name, url]) => ({ name: name ?? '', url: url ?? '' }))
+      .filter((candidate) => parseRemoteHostInfo(candidate.url) !== null);
+    return (urls.find((candidate) => candidate.name === 'origin') ?? urls[0])?.url ?? null;
   }
 
   /** `branch` is null when HEAD is detached; `hash` is null on an unborn branch. */

@@ -11,6 +11,8 @@ export type MenuActionId =
   | 'rebase'
   | 'pull'
   | 'push'
+  | 'pushAndOpenPr'
+  | 'createPrInBrowser'
   | 'fetch'
   | 'fetchTracked'
   | 'newBranch'
@@ -19,6 +21,9 @@ export type MenuActionId =
   | 'toggleFolderCounts'
   | 'toggleTrackingOrder'
   | 'createBranchHere'
+  | 'renameBranch'
+  | 'untrackBranch'
+  | 'publishRepository'
   | 'isolate'
   | 'deleteBranch'
   | 'cherryPick'
@@ -28,6 +33,9 @@ export type MenuActionId =
   | 'resetHard'
   | 'copyHash'
   | 'openGitGraph'
+  | 'openRepoInBrowser'
+  | 'openBranchInBrowser'
+  | 'openCommitInBrowser'
   | 'openGitHub';
 
 export type MenuEntry =
@@ -100,6 +108,9 @@ export function buildRefMenu(snapshot: RepoSnapshot, state: ExplorerUiState, tar
   );
 
   if (target.kind === 'remote') {
+    const remoteWebReason = state.integrations.remoteWebUrl
+      ? undefined
+      : 'This repository has no supported remote web URL.';
     return [
       item('checkoutRemote', 'Check Out as Local Tracking Branch\u2026', firstReason(busy)),
       SEPARATOR,
@@ -112,12 +123,19 @@ export function buildRefMenu(snapshot: RepoSnapshot, state: ExplorerUiState, tar
       isolate,
       SEPARATOR,
       item('fetch', 'Fetch', firstReason(busy)),
+      SEPARATOR,
+      item('createPrInBrowser', 'Create Pull Request in Browser', remoteWebReason),
+      item('openBranchInBrowser', 'Open Branch in Browser', remoteWebReason),
     ];
   }
 
   const branch = target.branch;
-  const notCurrent = !isCheckedOut && 'Check out this branch first.';
   const hasUpstream = branch?.upstream != null && branch.upstream !== '';
+  const trackedWebReason = firstReason(
+    !hasUpstream && 'No upstream branch is configured.',
+    branch?.upstreamGone === true && `Upstream ${branch.upstream ?? ''} no longer exists on the remote.`,
+    !state.integrations.remoteWebUrl && 'This repository has no supported remote web URL.',
+  );
   return [
     item('checkout', 'Check Out', firstReason(busy, isCheckedOut && 'Already checked out.')),
     SEPARATOR,
@@ -126,11 +144,25 @@ export function buildRefMenu(snapshot: RepoSnapshot, state: ExplorerUiState, tar
     SEPARATOR,
     ...resetEntries,
     SEPARATOR,
-    item('pull', 'Pull', firstReason(busy, notCurrent, !hasUpstream && 'No upstream branch is configured.')),
-    item('push', hasUpstream ? 'Push' : 'Publish Branch', firstReason(busy, notCurrent)),
+    item('pull', 'Pull', firstReason(busy, !isCheckedOut && 'Check out this branch first.', !hasUpstream && 'No upstream branch is configured.')),
+    item('push', hasUpstream ? 'Push' : 'Publish Branch', firstReason(busy)),
+    item(
+      'pushAndOpenPr',
+      'Push and Open PR in Browser',
+      firstReason(busy, !state.integrations.remoteWebUrl && 'This repository has no supported remote web URL.'),
+    ),
     item('fetch', 'Fetch', firstReason(busy)),
     SEPARATOR,
+    item('createPrInBrowser', 'Create Pull Request in Browser', trackedWebReason),
+    item('openBranchInBrowser', 'Open Branch in Browser', trackedWebReason),
+    SEPARATOR,
     createBranch,
+    item('renameBranch', 'Rename Branch\u2026', firstReason(busy)),
+    item(
+      'untrackBranch',
+      'Untrack Remote Branch',
+      firstReason(busy, !hasUpstream && 'Branch is not tracking a remote branch.'),
+    ),
     isolate,
     SEPARATOR,
     item(
@@ -148,6 +180,7 @@ export function buildRepoMenu(
   showCheckedOutBadge = true,
   showFolderCounts = true,
   trackingOrder: TrackingIndicatorOrder = 'vscode',
+  hasRemotes = true,
 ): MenuEntry[] {
   const busy = state.isBusy && BUSY_REASON;
   const current = snapshot.localBranches.find((branch) => branch.isCurrent);
@@ -161,11 +194,27 @@ export function buildRepoMenu(
     current?.upstreamGone === true && `Upstream ${current.upstream ?? ''} no longer exists on the remote.`,
   );
   const push = firstReason(busy, noBranch, pullPushDisabledReason('push', snapshot.isDetachedHead, current?.upstream ?? null));
+  const webReason = firstReason(
+    busy,
+    snapshot.isDetachedHead && DETACHED_REASON,
+    noBranch,
+    !state.integrations.remoteWebUrl && 'This repository has no supported remote web URL.',
+  );
 
   return [
+    ...(!hasRemotes
+      ? [item('publishRepository', 'Publish Repository / Add Remote\u2026', firstReason(busy)), SEPARATOR]
+      : []),
     item('fetchTracked', 'Fetch', firstReason(busy, nothingToFetch && 'No local branch tracks a remote branch.')),
     item('pull', 'Pull', pull),
     item('push', current?.upstream ? 'Push' : 'Publish Branch', push),
+    item('pushAndOpenPr', 'Push and Open PR in Browser', webReason),
+    item('createPrInBrowser', 'Create Pull Request in Browser', webReason),
+    item(
+      'openRepoInBrowser',
+      'Open Repository in Browser',
+      firstReason(!state.integrations.remoteWebUrl && 'This repository has no supported remote web URL.'),
+    ),
     SEPARATOR,
     item('newBranch', 'New Branch\u2026', firstReason(busy)),
     SEPARATOR,
@@ -217,11 +266,19 @@ export function buildCommitMenu(snapshot: RepoSnapshot, state: ExplorerUiState, 
     item('resetHard', `Reset ${currentLabel} Here — Delete Changes (--hard)…`, resetReason),
     SEPARATOR,
     item('openGitGraph', 'Open in Git Graph', state.integrations.gitGraphAvailable ? undefined : 'The Git Graph extension is not installed.'),
-    item('openGitHub', 'Open on GitHub', state.integrations.githubRemoteUrl !== null ? undefined : 'This repository has no GitHub remote.'),
+    item(
+      'openCommitInBrowser',
+      state.integrations.remoteProviderName
+        ? `Open Commit on ${state.integrations.remoteProviderName}`
+        : 'Open Commit in Browser',
+      state.integrations.remoteWebUrl || state.integrations.githubRemoteUrl
+        ? undefined
+        : 'This repository has no supported remote web URL.',
+    ),
   ];
 }
 
-/** Keeps a menu of `width` x `height` fully inside the viewport, preferring the pointer position. */
+/** Keeps a menu of `width` x `height` inside an 8px viewport gutter, preferring the pointer position. */
 export function clampMenuPosition(
   x: number,
   y: number,
@@ -230,6 +287,10 @@ export function clampMenuPosition(
   viewportWidth: number,
   viewportHeight: number,
 ): { left: number; top: number } {
-  const clamp = (value: number, size: number, limit: number): number => Math.max(0, Math.min(value, limit - size));
-  return { left: clamp(x, width, viewportWidth), top: clamp(y, height, viewportHeight) };
+  const left = Math.max(8, Math.min(x, Math.max(8, viewportWidth - width - 8)));
+  const top =
+    y + height > viewportHeight - 8
+      ? Math.max(8, viewportHeight - height - 8)
+      : Math.max(8, y);
+  return { left, top };
 }

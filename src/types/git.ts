@@ -1,3 +1,5 @@
+import type { RemoteProvider } from '../git/remoteUrlBuilder';
+
 export interface BranchInfo {
   /** Short name, e.g. `featurebranch3` (local) or `origin/featurebranch3` (remote). */
   name: string;
@@ -21,6 +23,9 @@ export interface BranchInfo {
 export interface RemoteGroup {
   remoteName: string;
   branches: BranchInfo[];
+  url?: string;
+  destinationKind?: 'hosted' | 'localPath' | 'other';
+  providerName?: string;
 }
 
 export interface TagInfo {
@@ -70,6 +75,10 @@ export interface ExternalIntegrationsInfo {
   gitGraphExtensionId: string | null;
   /** Normalized `https://github.com/<owner>/<repo>` URL for `origin`, if it is hosted on GitHub. */
   githubRemoteUrl: string | null;
+  /** Normalized repository URL for any supported hosting provider. */
+  remoteWebUrl?: string | null;
+  remoteProvider?: RemoteProvider | null;
+  remoteProviderName?: string | null;
 }
 
 export interface RepoSnapshot {
@@ -79,6 +88,8 @@ export interface RepoSnapshot {
   currentBranch: string;
   isDetachedHead: boolean;
   localBranches: BranchInfo[];
+  /** Configured Git remotes, including remotes that have no fetched branch refs yet. */
+  remotes?: string[];
   remoteGroups: RemoteGroup[];
   tags: TagInfo[];
   commits: CommitNode[];

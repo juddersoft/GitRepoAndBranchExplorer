@@ -2,6 +2,7 @@ import type { CommitNode } from '../../types/git';
 import type { ExtensionToWebviewMessage, GitAction } from '../../types/messages';
 import { isExtensionToWebviewMessage } from '../../types/messages';
 import { ContextMenu } from './ContextMenu';
+import { CreateBranchModal } from './CreateBranchModal';
 import type { StoredColumnWidths } from './columnResize';
 import { sanitizeStoredColumnWidths } from './columnResize';
 import type { MenuActionId } from './contextMenuModel';
@@ -92,7 +93,10 @@ function runCommitMenuAction(id: MenuActionId, commit: CommitNode): void {
       vscode.postMessage({ type: 'copyCommitHash', payload: { hash: commit.hash } });
       break;
     case 'createBranchHere':
-      vscode.postMessage({ type: 'createBranchAtRef', payload: { startPoint: commit.hash } });
+      vscode.postMessage({
+        type: 'openCreateBranchDialog',
+        payload: { startPoint: commit.hash, sourceKind: 'commit' },
+      });
       break;
     case 'cherryPick':
     case 'revert':
@@ -104,8 +108,8 @@ function runCommitMenuAction(id: MenuActionId, commit: CommitNode): void {
     case 'openGitGraph':
       vscode.postMessage({ type: 'openInGitGraph' });
       break;
-    case 'openGitHub':
-      vscode.postMessage({ type: 'openCommitOnGitHub', payload: { hash: commit.hash } });
+    case 'openCommitInBrowser':
+      postGitAction('openCommitInBrowser', commit.hash);
       break;
     default:
       break;
@@ -119,7 +123,13 @@ function showCommitContextMenu(commit: CommitNode, x: number, y: number): void {
 }
 
 const historyPane = new HistoryPane({
-  onGitAction: (action) => postGitAction(action),
+  onGitAction: (action) => {
+    if (action === 'createBranch') {
+      vscode.postMessage({ type: 'openCreateBranchDialog', payload: { sourceKind: 'head' } });
+    } else {
+      postGitAction(action);
+    }
+  },
   onRefresh: requestRefresh,
   onToggleBadgeKind: (kind) => {
     const key = BADGE_STATE_KEYS[kind];
@@ -148,7 +158,7 @@ const historyPane = new HistoryPane({
     }),
   onOpenFile: (file) => vscode.postMessage({ type: 'openFile', payload: file }),
   onOpenInGitGraph: () => vscode.postMessage({ type: 'openInGitGraph' }),
-  onOpenCommitOnGitHub: (hash) => vscode.postMessage({ type: 'openCommitOnGitHub', payload: { hash } }),
+  onOpenCommitInBrowser: (hash) => postGitAction('openCommitInBrowser', hash),
   onSignInGitHub: () => vscode.postMessage({ type: 'signInGitHub' }),
   onLoadMoreCommits: () => {
     setState({ isLoadingMore: true });
@@ -285,6 +295,14 @@ function handleMessage(message: ExtensionToWebviewMessage): void {
       break;
     case 'revealCommit': {
       applyRevealCommit(message.payload.hash, message.payload.outsideGraph === true);
+      break;
+    }
+    case 'showCreateBranchDialog': {
+      const modal = new CreateBranchModal(
+        message.payload,
+        (payload) => vscode.postMessage({ type: 'submitCreateBranch', payload }),
+      );
+      modal.open();
       break;
     }
   }

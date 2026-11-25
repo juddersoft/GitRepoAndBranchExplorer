@@ -90,7 +90,7 @@ const ICONS = {
 } satisfies Record<string, Shape[]>;
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
-type ColoredIconName = 'repo' | 'branch' | 'remote' | 'folder' | 'folderOpen' | 'check' | 'tag';
+type ColoredIconName = 'repo' | 'branch' | 'remote' | 'localDrive' | 'folder' | 'folderOpen' | 'check' | 'tag';
 export type IconName = keyof typeof ICONS | ColoredIconName;
 
 type SvgAttributes = Record<string, string | number>;
@@ -128,6 +128,15 @@ const COLORED_ICONS: Record<ColoredIconName, (svg: SVGSVGElement) => void> = {
     appendSvgShape(svg, 'path', { d: 'M3.5 13.2a3 3 0 0 1-.3-6 4.5 4.5 0 0 1 8.4-.9 3.5 3.5 0 0 1 .8 6.9z', fill: '#3B82C4' });
     appendSvgShape(svg, 'path', { d: 'M3.7 12.2a2.5 2.5 0 0 1-.2-5 4 4 0 0 1 7.5-.7 3 3 0 0 1 .8 5.7z', fill: '#7CC4FA' });
     appendSvgShape(svg, 'path', { d: 'M4.1 7.7a2.9 2.9 0 0 1 5.6-1.1 2.1 2.1 0 0 1 2.9 1.8 2.3 2.3 0 0 0-1.7-.7 4 4 0 0 0-6.8 0z', fill: '#D8EEFF' });
+  },
+  localDrive: (svg) => {
+    appendSvgShape(svg, 'rect', { x: 2, y: 2, width: 12, height: 11.5, rx: 1.4, fill: '#526071' });
+    appendSvgShape(svg, 'path', { d: 'M3 3h10v2.3H3z', fill: '#8EA1B5' });
+    appendSvgShape(svg, 'path', { d: 'M3 6.2h10v6.3H3z', fill: '#6E7E8F' });
+    appendSvgShape(svg, 'path', { d: 'M3.7 6.7h8.6', fill: 'none', stroke: '#BAC6D1', 'stroke-width': 0.7 });
+    appendSvgShape(svg, 'circle', { cx: 10.8, cy: 10.3, r: 0.85, fill: '#36C77D' });
+    appendSvgShape(svg, 'circle', { cx: 8.5, cy: 10.3, r: 0.7, fill: '#F5B942' });
+    appendSvgShape(svg, 'path', { d: 'M4 14.2h8', fill: 'none', stroke: '#3B4654', 'stroke-width': 1.2, 'stroke-linecap': 'round' });
   },
   branch: (svg) => {
     appendSvgShape(svg, 'path', { d: 'M4.5 5v6M4.5 10.2c0-2.5 6-1.5 6-5.1', fill: 'none', stroke: '#6CB6FF', 'stroke-width': 1.8, 'stroke-linecap': 'round' });
