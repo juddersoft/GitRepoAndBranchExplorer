@@ -1,13 +1,68 @@
 import type { SyncStatePayload, TrackingIndicatorOrder } from '../../types/messages';
-import type { BranchInfo, CommitDetails, CommitNode, ExternalIntegrationsInfo, RefBadge, RepoSnapshot, TagInfo } from '../../types/git';
+import type { BranchInfo, CommitDetails, CommitNode, ExternalIntegrationsInfo, RefBadge, RepoSnapshot, TagInfo, WorkspaceRepoInfo } from '../../types/git';
 import { collectAncestorFolderIds } from './branchFolderTree';
 
 export const NODE_BRANCHES = 'branches';
 export const NODE_TAGS = 'tags';
 export const MAX_CACHED_COMMIT_DETAILS = 200;
 
+export function normalizeRepoKey(repoRoot: string): string {
+  let normalized = repoRoot.replace(/\\/g, '/');
+  while (normalized.length > 1 && normalized.endsWith('/') && !/^[A-Za-z]:\/$/.test(normalized)) {
+    normalized = normalized.slice(0, -1);
+  }
+  return normalized.replace(/^[A-Z](?=:\/)/, (drive) => drive.toLowerCase());
+}
+
+export function repoNodeKey(repoRoot: string): string {
+  return `repo:${normalizeRepoKey(repoRoot)}`;
+}
+
+export function normalizeTreeNodeKey(key: string): string {
+  return key.startsWith('repo:') ? repoNodeKey(key.slice('repo:'.length)) : key;
+}
+
+function normalizeTreeNodeKeys(keys: ReadonlySet<string>): Set<string> {
+  return new Set([...keys].map(normalizeTreeNodeKey));
+}
+
 export function remoteNodeKey(remoteName: string): string {
   return `remote:${remoteName}`;
+}
+
+export function reconcileActiveRepoExpansion(
+  expandedNodes: ReadonlySet<string>,
+  collapsedRepoNodes: ReadonlySet<string>,
+  activeRepoRoot: string | null,
+  activeChanged: boolean,
+): Set<string> {
+  const next = normalizeTreeNodeKeys(expandedNodes);
+  if (!activeRepoRoot || !activeChanged) {
+    return next;
+  }
+  const key = repoNodeKey(activeRepoRoot);
+  if (!normalizeTreeNodeKeys(collapsedRepoNodes).has(key)) {
+    next.add(key);
+  }
+  return next;
+}
+
+export function toggleNodeExpansion(
+  expandedNodes: ReadonlySet<string>,
+  collapsedRepoNodes: ReadonlySet<string>,
+  key: string,
+): Pick<ExplorerUiState, 'expandedNodes' | 'collapsedRepoNodes'> {
+  const normalizedKey = normalizeTreeNodeKey(key);
+  const expanded = toggleSetMember(normalizeTreeNodeKeys(expandedNodes), normalizedKey);
+  const collapsed = normalizeTreeNodeKeys(collapsedRepoNodes);
+  if (normalizedKey.startsWith('repo:')) {
+    if (expanded.has(normalizedKey)) {
+      collapsed.delete(normalizedKey);
+    } else {
+      collapsed.add(normalizedKey);
+    }
+  }
+  return { expandedNodes: expanded, collapsedRepoNodes: collapsed };
 }
 
 export type RefKind = 'local' | 'remote' | 'tag';
@@ -134,6 +189,8 @@ export type BadgeKindToggle = 'local' | 'remote' | 'tag';
 
 export interface ExplorerUiState {
   snapshot: RepoSnapshot | null;
+  workspaceRepos: WorkspaceRepoInfo[];
+  activeRepoRoot: string | null;
   errorMessage: string | null;
   isLoading: boolean;
   /** True while the next older-commit page is being fetched. */
@@ -159,6 +216,8 @@ export interface ExplorerUiState {
   showTagBadges: boolean;
   selectedCommitHash: string | null;
   expandedNodes: Set<string>;
+  /** Repository roots the user explicitly collapsed, retained across repository switches. */
+  collapsedRepoNodes: Set<string>;
   /** Commit message bodies and changed files, keyed by commit hash. */
   commitDetails: Map<string, CommitDetails>;
   integrations: ExternalIntegrationsInfo;
@@ -170,6 +229,8 @@ export interface ExplorerUiState {
 export function createInitialState(): ExplorerUiState {
   return {
     snapshot: null,
+    workspaceRepos: [],
+    activeRepoRoot: null,
     errorMessage: null,
     isLoading: true,
     isLoadingMore: false,
@@ -187,6 +248,7 @@ export function createInitialState(): ExplorerUiState {
     showTagBadges: true,
     selectedCommitHash: null,
     expandedNodes: new Set([NODE_BRANCHES]),
+    collapsedRepoNodes: new Set(),
     commitDetails: new Map(),
     integrations: {
       gitGraphAvailable: false,
@@ -455,7 +517,12 @@ export function reconcileStateWithSnapshot(
   const pinned = new Set([...state.pinnedBranchFullNames].filter((name) => fullNames.has(name)));
   const selectedRef = findRefTarget(snapshot, state.selectedBranchFullName);
   const selectedExists = snapshot.commits.some((c) => c.hash === state.selectedCommitHash);
-  const expandedNodes = new Set(state.expandedNodes);
+  const expandedNodes = normalizeTreeNodeKeys(state.expandedNodes);
+  const collapsedRepoNodes = normalizeTreeNodeKeys(state.collapsedRepoNodes);
+  const repositoryKey = repoNodeKey(snapshot.repoRoot);
+  if (!collapsedRepoNodes.has(repositoryKey)) {
+    expandedNodes.add(repositoryKey);
+  }
   for (const group of snapshot.remoteGroups) {
     if (!knownRemoteNames.has(group.remoteName)) {
       expandedNodes.add(remoteNodeKey(group.remoteName));
@@ -485,5 +552,6 @@ export function reconcileStateWithSnapshot(
     ...selectRefPatch(selectedRef),
     selectedCommitHash: selectedExists ? state.selectedCommitHash : null,
     expandedNodes,
+    collapsedRepoNodes,
   };
 }

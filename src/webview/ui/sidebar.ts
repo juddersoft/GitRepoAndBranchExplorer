@@ -3,16 +3,20 @@ import { isExtensionToWebviewMessage } from '../../types/messages';
 import { BranchTree } from './BranchTree';
 import { ContextMenu } from './ContextMenu';
 import type { MenuActionId } from './contextMenuModel';
-import { buildRefMenu, buildRepoMenu } from './contextMenuModel';
+import { buildRefMenu, buildRepoMenu, buildSettingsMenu } from './contextMenuModel';
 import { el } from './dom';
 import type { ExplorerUiState, RefTarget } from './state';
 import {
   createInitialState,
+  normalizeRepoKey,
   normalizeSelection,
+  normalizeTreeNodeKey,
   reconcileStateWithSnapshot,
+  reconcileActiveRepoExpansion,
   selectionFromState,
   selectionPatch,
   selectRefPatch,
+  toggleNodeExpansion,
   toggleSetMember,
 } from './state';
 import { vscode } from './vscodeApi';
@@ -22,20 +26,32 @@ import { vscode } from './vscodeApi';
  * status and the snapshot are kept in step with the editor timeline by the extension host.
  */
 
-function restoredExpandedNodes(): { loaded: boolean; nodes: Set<string> } {
+function restoredExpandedNodes(): { loaded: boolean; nodes: Set<string>; collapsedRepoNodes: Set<string> } {
   const saved = vscode.getState();
   if (typeof saved !== 'object' || saved === null || !('expandedNodes' in saved)) {
-    return { loaded: false, nodes: createInitialState().expandedNodes };
+    const initial = createInitialState();
+    return { loaded: false, nodes: initial.expandedNodes, collapsedRepoNodes: initial.collapsedRepoNodes };
   }
   const expandedNodes = saved.expandedNodes;
   if (!Array.isArray(expandedNodes) || !expandedNodes.every((node): node is string => typeof node === 'string')) {
-    return { loaded: false, nodes: createInitialState().expandedNodes };
+    const initial = createInitialState();
+    return { loaded: false, nodes: initial.expandedNodes, collapsedRepoNodes: initial.collapsedRepoNodes };
   }
-  return { loaded: true, nodes: new Set(expandedNodes) };
+  const collapsedRepoNodes =
+    'collapsedRepoNodes' in saved &&
+    Array.isArray(saved.collapsedRepoNodes) &&
+    saved.collapsedRepoNodes.every((node): node is string => typeof node === 'string')
+      ? new Set(saved.collapsedRepoNodes.map(normalizeTreeNodeKey))
+      : new Set<string>();
+  return { loaded: true, nodes: new Set(expandedNodes.map(normalizeTreeNodeKey)), collapsedRepoNodes };
 }
 
 const restoredState = restoredExpandedNodes();
-let state: ExplorerUiState = { ...createInitialState(), expandedNodes: restoredState.nodes };
+let state: ExplorerUiState = {
+  ...createInitialState(),
+  expandedNodes: restoredState.nodes,
+  collapsedRepoNodes: restoredState.collapsedRepoNodes,
+};
 const knownRemoteNames = new Set<string>();
 const contextMenu = new ContextMenu();
 
@@ -128,6 +144,13 @@ function runRepoMenuAction(id: MenuActionId): void {
     case 'refresh':
       vscode.postMessage({ type: 'requestRefresh' });
       break;
+    default:
+      break;
+  }
+}
+
+function runSettingsMenuAction(id: MenuActionId): void {
+  switch (id) {
     case 'toggleCheckedOutBadge': {
       const show = !state.showCheckedOutBadge;
       setState({ showCheckedOutBadge: show });
@@ -160,14 +183,24 @@ function showRepoContextMenu(x: number, y: number): void {
       buildRepoMenu(
         state.snapshot,
         state,
-        state.showCheckedOutBadge,
-        state.showFolderCounts,
-        state.trackingOrder,
         (state.snapshot.remotes?.length ?? 0) > 0 || state.snapshot.remoteGroups.length > 0,
       ),
       runRepoMenuAction,
     );
   }
+}
+
+function showSettingsMenu(x: number, y: number): void {
+  contextMenu.show(
+    x,
+    y,
+    buildSettingsMenu({
+      showCheckedOutBadge: state.showCheckedOutBadge,
+      showFolderCounts: state.showFolderCounts,
+      trackingOrder: state.trackingOrder,
+    }),
+    runSettingsMenuAction,
+  );
 }
 
 function showRefContextMenu(target: RefTarget, x: number, y: number): void {
@@ -180,15 +213,22 @@ function showRefContextMenu(target: RefTarget, x: number, y: number): void {
 const branchTree = new BranchTree({
   onFilterChange: (text) => setState({ branchFilterText: text }),
   onToggleNode: (key) => {
-    const expandedNodes = toggleSetMember(state.expandedNodes, key);
-    setState({ expandedNodes });
-    vscode.setState({ expandedNodes: [...expandedNodes] });
+    const expansion = toggleNodeExpansion(state.expandedNodes, state.collapsedRepoNodes, key);
+    setState(expansion);
+    vscode.setState({
+      expandedNodes: [...expansion.expandedNodes],
+      collapsedRepoNodes: [...expansion.collapsedRepoNodes],
+    });
   },
   onTogglePin: (fullName) => changeSelection({ pinnedBranchFullNames: toggleSetMember(state.pinnedBranchFullNames, fullName) }),
   onCheckout: (branch) => vscode.postMessage({ type: 'checkoutBranch', payload: { branchName: branch.name } }),
   onSelectRef: selectRef,
   onContextMenu: showRefContextMenu,
   onRepoContextMenu: showRepoContextMenu,
+  onSelectRepository: (repoRoot) => {
+    vscode.postMessage({ type: 'selectRepository', payload: { repoRoot } });
+  },
+  onSettingsMenu: showSettingsMenu,
   onOpenTimeline: () => vscode.postMessage({ type: 'openRepositoryPanel' }),
 });
 
@@ -210,9 +250,50 @@ function handleMessage(message: ExtensionToWebviewMessage): void {
       break;
     case 'repoSnapshot':
       state = reconcileStateWithSnapshot(state, message.payload, knownRemoteNames, restoredState.loaded);
+      state = {
+        ...state,
+        activeRepoRoot: message.payload.repoRoot,
+        expandedNodes: reconcileActiveRepoExpansion(
+          state.expandedNodes,
+          state.collapsedRepoNodes,
+          message.payload.repoRoot,
+          true,
+        ),
+      };
       message.payload.remoteGroups.forEach((group) => knownRemoteNames.add(group.remoteName));
+      vscode.setState({
+        expandedNodes: [...state.expandedNodes],
+        collapsedRepoNodes: [...state.collapsedRepoNodes],
+      });
       render();
       break;
+    case 'workspaceRepos': {
+      const activeChanged =
+        message.payload.activeRepoRoot !== null &&
+        (state.activeRepoRoot === null ||
+          normalizeRepoKey(message.payload.activeRepoRoot) !== normalizeRepoKey(state.activeRepoRoot));
+      const activeRepo = message.payload.activeRepoRoot === null
+        ? undefined
+        : message.payload.repos.find(
+            (repo) => normalizeRepoKey(repo.repoRoot) === normalizeRepoKey(message.payload.activeRepoRoot!),
+          );
+      const expandedNodes = reconcileActiveRepoExpansion(
+        state.expandedNodes,
+        state.collapsedRepoNodes,
+        activeRepo?.repoRoot ?? message.payload.activeRepoRoot,
+        activeChanged,
+      );
+      setState({
+        workspaceRepos: message.payload.repos,
+        activeRepoRoot: activeRepo?.repoRoot ?? message.payload.activeRepoRoot,
+        expandedNodes,
+      });
+      vscode.setState({
+        expandedNodes: [...expandedNodes],
+        collapsedRepoNodes: [...state.collapsedRepoNodes],
+      });
+      break;
+    }
     case 'repoError':
       setState({ snapshot: null, errorMessage: message.payload.message, isLoading: false });
       break;

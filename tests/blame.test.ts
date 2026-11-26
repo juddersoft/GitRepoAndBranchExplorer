@@ -32,12 +32,27 @@ import {
   computeAgeBucket,
   formatGutterLabel,
 } from '../src/blame/blameGutter';
+import { resolveBlameRepository } from '../src/blame/blameRepoResolution';
 
 const SHA1 = 'ABCDEF0123456789ABCDEF0123456789ABCDEF01';
 const SHA1_2 = '1234567890ABCDEF1234567890ABCDEF12345678';
 const SHA256 = 'A'.repeat(64);
 const ZERO1 = '0'.repeat(40);
 const ZERO256 = '0'.repeat(64);
+
+describe('blame repository resolution', () => {
+  it('uses the document owning repository rather than the active sidebar repository', () => {
+    const requested: string[] = [];
+    const coordinator = {
+      getRepoRootForFile(filePath: string): string | null {
+        requested.push(filePath);
+        return '/repos/editor-repo';
+      },
+    };
+    expect(resolveBlameRepository(coordinator, '/repos/editor-repo/src/file.ts')).toBe('/repos/editor-repo');
+    expect(requested).toEqual(['/repos/editor-repo/src/file.ts']);
+  });
+});
 
 function lineMap(entries: Array<[number, Partial<BlameLineInfo>]>): FileBlameMap {
   return new Map(entries.map(([lineNumber, value]) => [

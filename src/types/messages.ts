@@ -1,4 +1,11 @@
-import type { ChangedFileStatus, CommitDetails, CommitNode, ExternalIntegrationsInfo, RepoSnapshot } from './git';
+import type {
+  ChangedFileStatus,
+  CommitDetails,
+  CommitNode,
+  ExternalIntegrationsInfo,
+  RepoSnapshot,
+  WorkspaceRepoInfo,
+} from './git';
 import type { CreateBranchDialogRequest, CreateBranchSourceKind } from '../webview/ui/branchCreateModel';
 
 export type TrackingIndicatorOrder = 'vscode' | 'visualStudio';
@@ -104,6 +111,7 @@ export type WebviewToExtensionMessage =
   | { type: 'webviewReady' }
   | { type: 'openRepositoryPanel' }
   | { type: 'requestRefresh' }
+  | { type: 'selectRepository'; payload: { repoRoot: string } }
   | { type: 'loadMoreCommits' }
   | { type: 'syncState'; payload: SyncStatePayload }
   | { type: 'checkoutBranch'; payload: { branchName: string } }
@@ -177,6 +185,7 @@ export interface RepoErrorPayload {
 export type ExtensionToWebviewMessage =
   | { type: 'initState'; payload: InitStatePayload }
   | { type: 'repoSnapshot'; payload: RepoSnapshot }
+  | { type: 'workspaceRepos'; payload: { repos: WorkspaceRepoInfo[]; activeRepoRoot: string | null } }
   | { type: 'commitsAppended'; payload: { commits: CommitNode[]; hasMoreCommits: boolean } }
   | { type: 'repoError'; payload: RepoErrorPayload }
   | { type: 'commitDetails'; payload: CommitDetails }
@@ -304,6 +313,13 @@ export function isWebviewToExtensionMessage(value: unknown): value is WebviewToE
     case 'checkoutBranch': {
       const branchName = payload === null ? undefined : ownField(payload, 'branchName');
       return isSafeRefArgument(branchName);
+    }
+    case 'selectRepository': {
+      if (payload === null || !hasOnlyFields(payload, ['repoRoot'])) {
+        return false;
+      }
+      const repoRoot = ownField(payload, 'repoRoot');
+      return typeof repoRoot === 'string' && repoRoot.trim().length > 0 && !/[\x00-\x1f\x7f]/.test(repoRoot);
     }
     case 'syncState':
       return isSyncStatePayload(payload);
@@ -436,6 +452,12 @@ export function isExtensionToWebviewMessage(value: unknown): value is ExtensionT
       );
     case 'repoSnapshot':
       return isRepoSnapshotShape(payload);
+    case 'workspaceRepos':
+      return (
+        Array.isArray(payload.repos) &&
+        payload.repos.every(isWorkspaceRepoInfoShape) &&
+        (payload.activeRepoRoot === null || typeof payload.activeRepoRoot === 'string')
+      );
     case 'commitsAppended':
       return (
         Array.isArray(payload.commits) &&
@@ -501,4 +523,19 @@ export function isExtensionToWebviewMessage(value: unknown): value is ExtensionT
     default:
       return false;
   }
+}
+
+function isWorkspaceRepoInfoShape(value: unknown): value is WorkspaceRepoInfo {
+  return (
+    isSafeRecord(value) &&
+    hasOnlyFields(value, ['repoRoot', 'repoName', 'commonDir', 'currentBranch', 'isDetachedHead']) &&
+    typeof ownField(value, 'repoRoot') === 'string' &&
+    ownField(value, 'repoRoot') !== '' &&
+    typeof ownField(value, 'repoName') === 'string' &&
+    ownField(value, 'repoName') !== '' &&
+    typeof ownField(value, 'commonDir') === 'string' &&
+    ownField(value, 'commonDir') !== '' &&
+    (ownField(value, 'currentBranch') === undefined || typeof ownField(value, 'currentBranch') === 'string') &&
+    (ownField(value, 'isDetachedHead') === undefined || typeof ownField(value, 'isDetachedHead') === 'boolean')
+  );
 }

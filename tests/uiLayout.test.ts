@@ -7,12 +7,36 @@ import {
   sanitizeStoredColumnWidths,
 } from '../src/webview/ui/columnResize';
 import { computeCheckedOutPillLayout, MIN_READABLE_PILL_SCALE } from '../src/webview/ui/pillLayout';
-import { getTrackingOrderSequence } from '../src/webview/ui/BranchTree';
+import { getRepoNodeKeyboardAction, getTrackingOrderSequence } from '../src/webview/ui/BranchTree';
+import { reconcileActiveRepoExpansion } from '../src/webview/ui/state';
 
 describe('tracking indicator order', () => {
   it('uses incoming then outgoing for VS Code and outgoing then incoming for Visual Studio', () => {
     expect(getTrackingOrderSequence('vscode')).toEqual(['down', 'up']);
     expect(getTrackingOrderSequence('visualStudio')).toEqual(['up', 'down']);
+  });
+
+  describe('repository tree accessibility and expansion', () => {
+    it('toggles active repositories and selects inactive repositories with Enter or Space', () => {
+      expect(getRepoNodeKeyboardAction('Enter', true)).toBe('toggle');
+      expect(getRepoNodeKeyboardAction(' ', true)).toBe('toggle');
+      expect(getRepoNodeKeyboardAction('Enter', false)).toBe('select');
+      expect(getRepoNodeKeyboardAction(' ', false)).toBe('select');
+    });
+
+    it('opens the active repository menu from ContextMenu and Shift+F10 only', () => {
+      expect(getRepoNodeKeyboardAction('ContextMenu', true)).toBe('menu');
+      expect(getRepoNodeKeyboardAction('F10', true, true)).toBe('menu');
+      expect(getRepoNodeKeyboardAction('F10', true, false)).toBeNull();
+      expect(getRepoNodeKeyboardAction('ContextMenu', false)).toBeNull();
+    });
+
+    it('expands a newly active repository unless it was explicitly collapsed', () => {
+      const key = 'repo:/repos/b';
+      expect(reconcileActiveRepoExpansion(new Set(), new Set(), '/repos/b', true).has(key)).toBe(true);
+      expect(reconcileActiveRepoExpansion(new Set(), new Set([key]), '/repos/b', true).has(key)).toBe(false);
+      expect(reconcileActiveRepoExpansion(new Set(), new Set(), '/repos/b', false).has(key)).toBe(false);
+    });
   });
 });
 

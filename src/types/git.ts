@@ -81,6 +81,14 @@ export interface ExternalIntegrationsInfo {
   remoteProviderName?: string | null;
 }
 
+export interface WorkspaceRepoInfo {
+  repoRoot: string;
+  repoName: string;
+  commonDir: string;
+  currentBranch?: string;
+  isDetachedHead?: boolean;
+}
+
 export interface RepoSnapshot {
   repoName: string;
   repoRoot: string;

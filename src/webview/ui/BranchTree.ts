@@ -10,7 +10,9 @@ import {
   filterTags,
   NODE_BRANCHES,
   NODE_TAGS,
+  normalizeRepoKey,
   remoteNodeKey,
+  repoNodeKey,
   tagRefTarget,
   trackingSummary,
 } from './state';
@@ -25,18 +27,32 @@ export interface BranchTreeCallbacks {
   onContextMenu(target: RefTarget, x: number, y: number): void;
   /** Right-click / Shift+F10 / Menu key on the repository row. */
   onRepoContextMenu(x: number, y: number): void;
+  onSelectRepository(repoRoot: string): void;
+  onSettingsMenu(x: number, y: number): void;
   /** Reopens the editor timeline tab (for when it was closed while the tree is still showing). */
   onOpenTimeline(): void;
-}
-
-function repoTitle(snapshot: RepoSnapshot): string {
-  return `${snapshot.repoName} (${snapshot.currentBranch})`;
 }
 
 export function getTrackingOrderSequence(
   order: TrackingIndicatorOrder,
 ): readonly ['down', 'up'] | readonly ['up', 'down'] {
   return order === 'visualStudio' ? ['up', 'down'] : ['down', 'up'];
+}
+
+export type RepoNodeKeyboardAction = 'toggle' | 'select' | 'menu';
+
+export function getRepoNodeKeyboardAction(
+  key: string,
+  active: boolean,
+  shiftKey = false,
+): RepoNodeKeyboardAction | null {
+  if (key === 'Enter' || key === ' ') {
+    return active ? 'toggle' : 'select';
+  }
+  if (active && (key === 'ContextMenu' || (key === 'F10' && shiftKey))) {
+    return 'menu';
+  }
+  return null;
 }
 
 /** Explicit ahead/behind indicator, ordered for VS Code or Visual Studio. */
@@ -89,9 +105,8 @@ function applyBadgeScale(badge: HTMLElement, scale: number): void {
 export class BranchTree {
   public readonly element: HTMLElement;
 
-  private readonly titleEl: HTMLElement;
-  private readonly repoRow: HTMLElement;
   private readonly busyEl: HTMLElement;
+  private readonly graphButton: HTMLButtonElement;
   private readonly search: ReturnType<typeof createSearchBox>;
   private readonly treeEl: HTMLUListElement;
   private readonly treeScroll: HTMLElement;
@@ -101,31 +116,23 @@ export class BranchTree {
   private lastState: ExplorerUiState | undefined;
 
   constructor(private readonly callbacks: BranchTreeCallbacks) {
-    this.titleEl = el('span', { className: 'sidebar-title', text: 'Loading\u2026' });
-    const openTimeline = button({
+    const settings = button({
+      className: 'icon-button',
+      label: 'Explorer Display Settings',
+      title: 'Display Settings',
+      icon: 'settings',
+    });
+    settings.addEventListener('click', () => {
+      const rect = settings.getBoundingClientRect();
+      callbacks.onSettingsMenu(rect.left, rect.bottom);
+    });
+    this.graphButton = button({
       className: 'icon-button',
       label: 'Open history timeline',
       title: 'Open the commit history and graph in the editor area',
       icon: 'graph',
     });
-    openTimeline.addEventListener('click', () => callbacks.onOpenTimeline());
-
-    this.repoRow = el('div', { className: 'repo-row', attrs: { role: 'button', tabindex: '0', 'aria-haspopup': 'menu' } }, [
-      icon('repo'),
-      this.titleEl,
-    ]);
-    this.repoRow.addEventListener('contextmenu', (event) => {
-      event.preventDefault();
-      callbacks.onRepoContextMenu(event.clientX, event.clientY);
-    });
-    this.repoRow.addEventListener('keydown', (event) => {
-      const opensMenu = event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey) || event.key === 'Enter' || event.key === ' ';
-      if (opensMenu) {
-        event.preventDefault();
-        const rect = this.repoRow.getBoundingClientRect();
-        callbacks.onRepoContextMenu(rect.left + 24, rect.bottom);
-      }
-    });
+    this.graphButton.addEventListener('click', () => callbacks.onOpenTimeline());
 
     this.search = createSearchBox('Filter', (value) => callbacks.onFilterChange(value));
     this.busyEl = el('div', { className: 'sidebar-status busy-indicator', attrs: { role: 'status', 'aria-live': 'polite' } });
@@ -136,9 +143,11 @@ export class BranchTree {
     this.treeScroll = el('div', { className: 'tree-scroll' }, [this.treeEl]);
 
     this.element = el('aside', { className: 'pane pane-left', attrs: { 'aria-label': 'Branch explorer' } }, [
-      el('div', { className: 'sidebar-header' }, [el('span', { className: 'sidebar-heading', text: 'Repos:' }), openTimeline]),
-      this.repoRow,
+      el('div', { className: 'sidebar-utility-bar' }, [settings, this.graphButton]),
       el('div', { className: 'sidebar-filter' }, [this.search.element]),
+      el('div', { className: 'sidebar-header' }, [
+        el('span', { className: 'sidebar-heading', text: 'Repos:' }),
+      ]),
       this.busyEl,
       this.treeScroll,
     ]);
@@ -166,22 +175,17 @@ export class BranchTree {
   public update(state: ExplorerUiState): void {
     this.lastState = state;
     this.trackingOrder = state.trackingOrder;
-    const { snapshot } = state;
-    const title = snapshot ? repoTitle(snapshot) : state.errorMessage ? 'No repository' : 'Loading\u2026';
-    this.titleEl.textContent = title;
-    this.repoRow.title = snapshot ? `${snapshot.repoRoot}\nRight-click for repository actions` : '';
-    this.repoRow.setAttribute('aria-label', snapshot ? `Repository ${title}, press Enter for actions` : title);
-    this.repoRow.setAttribute('aria-disabled', String(!snapshot));
+    this.graphButton.hidden = false;
     this.search.sync(state.branchFilterText);
     this.busyEl.hidden = !state.isBusy;
     this.busyEl.textContent = state.isBusy ? state.busyMessage ?? 'Working\u2026' : '';
     this.refTargets = new Map();
 
     rebuildPreservingFocus(this.treeEl, () => {
-      if (!snapshot) {
+      if (state.workspaceRepos.length === 0 && !state.snapshot) {
         return [this.placeholder(state.errorMessage ? 'Unavailable' : 'Loading\u2026', 0)];
       }
-      return [this.renderBranchesNode(snapshot, state), ...this.renderTagsNode(snapshot, state)];
+      return this.renderRepositories(state);
     });
 
     // Roving tabindex: the focused item (or the first one) is the single tab stop.
@@ -195,6 +199,87 @@ export class BranchTree {
     }
     this.layoutCheckedOutBadges();
     requestAnimationFrame(() => this.layoutCheckedOutBadges());
+  }
+
+  private renderRepositories(state: ExplorerUiState): HTMLLIElement[] {
+    const snapshotRepos = state.snapshot
+      ? [{
+          repoRoot: state.snapshot.repoRoot,
+          repoName: state.snapshot.repoName,
+          commonDir: state.snapshot.repoRoot,
+          currentBranch: state.snapshot.currentBranch,
+          isDetachedHead: state.snapshot.isDetachedHead,
+        }]
+      : [];
+    const repos = state.workspaceRepos.length > 0 ? state.workspaceRepos : snapshotRepos;
+    const activeRoot = state.activeRepoRoot ?? state.snapshot?.repoRoot ?? null;
+    return repos.map((repo) => {
+        const active = activeRoot !== null && normalizeRepoKey(activeRoot) === normalizeRepoKey(repo.repoRoot);
+        const repoKey = repoNodeKey(repo.repoRoot);
+        const open = active && state.expandedNodes.has(repoKey);
+        const label = active
+          ? `${repo.repoName} (${repo.currentBranch ?? state.snapshot?.currentBranch ?? 'HEAD'})`
+          : `${repo.repoName}${repo.currentBranch ? ` (${repo.currentBranch})` : ''}`;
+        const row = el(
+          'div',
+          {
+            className: active ? 'tree-row repo-node-row active-repo' : 'tree-row repo-node-row',
+            title: `${repo.repoRoot}${active ? '\nRight-click for repository actions' : '\nSelect to open this repository'}`,
+          },
+          [
+            icon(open ? 'chevronDown' : 'chevronRight', 'icon twisty'),
+            icon('repo'),
+            el('span', { className: 'tree-label', text: label }),
+          ],
+        );
+        this.setTreeDepth(row, 0);
+        row.addEventListener('click', () => {
+          if (active) {
+            this.callbacks.onToggleNode(repoKey);
+          } else {
+            this.callbacks.onSelectRepository(repo.repoRoot);
+          }
+        });
+        row.addEventListener('contextmenu', (event) => {
+          event.preventDefault();
+          if (active) {
+            this.callbacks.onRepoContextMenu(event.clientX, event.clientY);
+          }
+        });
+        const item = el(
+          'li',
+          {
+            className: 'tree-node repo-tree-node',
+            attrs: {
+              role: 'treeitem',
+              'aria-expanded': String(active ? open : false),
+              'aria-level': '1',
+              'aria-current': String(active),
+              'aria-label': `Repository ${label}`,
+              'aria-haspopup': active ? 'menu' : 'false',
+              tabindex: '-1',
+              'data-focus-key': repoKey,
+              'data-node-key': repoKey,
+              ...(active ? {} : { 'data-repo-root': repo.repoRoot }),
+            },
+          },
+          [row],
+        );
+        if (
+          active &&
+          open &&
+          state.snapshot &&
+          normalizeRepoKey(state.snapshot.repoRoot) === normalizeRepoKey(repo.repoRoot)
+        ) {
+          item.append(
+            el('ul', { className: 'tree', attrs: { role: 'group' } }, [
+              this.renderBranchesNode(state.snapshot, state),
+              ...this.renderTagsNode(state.snapshot, state),
+            ]),
+          );
+        }
+        return item;
+    });
   }
 
   /**
@@ -262,8 +347,8 @@ export class BranchTree {
     const locals = filterBranches(snapshot.localBranches, state.branchFilterText);
     const localItems =
       locals.length > 0
-        ? this.renderBranchNodes(buildBranchFolderTree(locals, 'local'), 1, state, filtering)
-        : [this.placeholder(filtering ? 'No matching branches' : `${snapshot.currentBranch} (no commits yet)`, 1)];
+        ? this.renderBranchNodes(buildBranchFolderTree(locals, 'local'), 2, state, filtering)
+        : [this.placeholder(filtering ? 'No matching branches' : `${snapshot.currentBranch} (no commits yet)`, 2)];
 
     const remoteNodes = snapshot.remoteGroups
       .map((group) => this.renderRemote(group, state, filtering, isOpen))
@@ -273,7 +358,7 @@ export class BranchTree {
       key: NODE_BRANCHES,
       label: 'Branches',
       iconName: null,
-      depth: 0,
+      depth: 1,
       open: isOpen(NODE_BRANCHES),
       children: [...localItems, ...remoteNodes],
     });
@@ -349,9 +434,9 @@ export class BranchTree {
         key: NODE_TAGS,
         label: 'Tags',
         iconName: null,
-        depth: 0,
+        depth: 1,
         open: filtering || state.expandedNodes.has(NODE_TAGS),
-        children: tags.map((tag) => this.renderTag(tag, state)),
+        children: tags.map((tag) => this.renderTag(tag, state, 2)),
       }),
     ];
   }
@@ -379,11 +464,11 @@ export class BranchTree {
       iconName: local ? 'localDrive' : 'remote',
       ...(title === undefined ? {} : { title }),
       ...(local ? { labelSuffix: '(local)' } : {}),
-      depth: 1,
+      depth: 2,
       open: isOpen(key),
       children: this.renderBranchNodes(
         buildBranchFolderTree(branches, `remote:${group.remoteName}`, `${group.remoteName}/`),
-        2,
+        3,
         state,
         filtering,
       ),
@@ -533,7 +618,7 @@ export class BranchTree {
     );
   }
 
-  private renderTag(tag: TagInfo, state: ExplorerUiState): HTMLLIElement {
+  private renderTag(tag: TagInfo, state: ExplorerUiState, depth = 1): HTMLLIElement {
     const target = tagRefTarget(tag);
     const selected = state.selectedBranchFullName === tag.fullName;
     const row = el(
@@ -544,7 +629,7 @@ export class BranchTree {
       },
       [el('span', { className: 'twisty-spacer' }), icon('tag'), el('span', { className: 'tree-label', text: tag.name })],
     );
-    this.setTreeDepth(row, 1);
+    this.setTreeDepth(row, depth);
     this.wireRefRow(row, target);
 
     return el(
@@ -553,7 +638,7 @@ export class BranchTree {
         className: selected ? 'tree-node tree-tag selected-ref' : 'tree-node tree-tag',
         attrs: {
           role: 'treeitem',
-          'aria-level': '2',
+          'aria-level': String(depth + 1),
           'aria-label': `${tag.name}, tag${selected ? ', selected' : ''}`,
           'aria-selected': String(selected),
           tabindex: '-1',
@@ -594,6 +679,8 @@ export class BranchTree {
     const items = Array.from(this.treeEl.querySelectorAll<HTMLElement>('[role="treeitem"]'));
     const index = items.indexOf(target);
     const nodeKey = target.dataset.nodeKey;
+    const repoRoot = target.dataset.repoRoot;
+    const isRepoNode = nodeKey?.startsWith('repo:') === true;
     const fullName = target.dataset.fullName;
     const ref = fullName ? this.refTargets.get(fullName) : undefined;
     const expanded = target.getAttribute('aria-expanded') === 'true';
@@ -605,6 +692,22 @@ export class BranchTree {
         next.focus();
       }
     };
+
+    if (isRepoNode) {
+      const action = getRepoNodeKeyboardAction(event.key, repoRoot === undefined, event.shiftKey);
+      if (action) {
+        if (action === 'select' && repoRoot) {
+          this.callbacks.onSelectRepository(repoRoot);
+        } else if (action === 'toggle' && nodeKey) {
+          this.callbacks.onToggleNode(nodeKey);
+        } else if (action === 'menu') {
+          const rect = target.getBoundingClientRect();
+          this.callbacks.onRepoContextMenu(rect.left + 24, rect.bottom);
+        }
+        event.preventDefault();
+        return;
+      }
+    }
 
     switch (event.key) {
       case 'ArrowDown':
@@ -620,19 +723,21 @@ export class BranchTree {
         focusItem(items[items.length - 1]);
         break;
       case 'ArrowRight':
-        if (nodeKey && !expanded) {
+        if (nodeKey && !expanded && !repoRoot) {
           this.callbacks.onToggleNode(nodeKey);
         }
         break;
       case 'ArrowLeft':
-        if (nodeKey && expanded) {
+        if (nodeKey && expanded && !repoRoot) {
           this.callbacks.onToggleNode(nodeKey);
         } else {
           focusItem(target.parentElement?.closest<HTMLElement>('[role="treeitem"]') ?? undefined);
         }
         break;
       case 'Enter':
-        if (nodeKey) {
+        if (repoRoot) {
+          this.callbacks.onSelectRepository(repoRoot);
+        } else if (nodeKey) {
           this.callbacks.onToggleNode(nodeKey);
         } else if (ref) {
           if (ref.kind === 'local' && ref.branch?.isCurrent === false) {
@@ -643,7 +748,9 @@ export class BranchTree {
         }
         break;
       case ' ':
-        if (nodeKey) {
+        if (repoRoot) {
+          this.callbacks.onSelectRepository(repoRoot);
+        } else if (nodeKey) {
           this.callbacks.onToggleNode(nodeKey);
         } else if (ref) {
           if (ref.kind === 'tag') {

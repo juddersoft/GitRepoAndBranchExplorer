@@ -403,6 +403,15 @@ button {
   padding: 0 4px 0 8px;
 }
 
+.sidebar-utility-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+  min-height: 28px;
+  padding: 2px 4px 0 8px;
+}
+
 .sidebar-heading {
   flex: 1;
   min-width: 0;
@@ -443,7 +452,7 @@ button {
 }
 
 .sidebar-filter {
-  padding: 6px 8px;
+  padding: 2px 8px 6px;
 }
 
 .tree-scroll {
@@ -486,6 +495,19 @@ button {
 
 .tree-row.depth-0 {
   font-weight: 600;
+}
+
+.repo-node-row {
+  font-weight: 600;
+}
+
+.repo-tree-node > .active-repo {
+  color: var(--vscode-list-activeSelectionForeground, inherit);
+  background-color: var(--vscode-list-inactiveSelectionBackground, var(--vscode-list-hoverBackground));
+}
+
+.repo-tree-node > .active-repo:hover {
+  background-color: var(--vscode-list-activeSelectionBackground, var(--vscode-list-hoverBackground));
 }
 
 .tree-row.placeholder {

@@ -52,6 +52,8 @@ const mocks = vi.hoisted(() => ({
   trustGrantedListeners: [] as Array<() => void>,
   getCommands: vi.fn(),
   executeCommand: vi.fn(),
+  discoverWorkspaceRepositories: vi.fn(),
+  createFileSystemWatcher: vi.fn(),
 }));
 
 vi.mock('vscode', () => {
@@ -73,12 +75,9 @@ vi.mock('vscode', () => {
         mocks.trustGrantedListeners.push(listener);
         return disposable;
       },
-      createFileSystemWatcher: () => ({
-        onDidCreate: () => disposable,
-        onDidChange: () => disposable,
-        onDidDelete: () => disposable,
-        dispose: (): void => undefined,
-      }),
+      onDidChangeConfiguration: () => disposable,
+      getConfiguration: () => ({ get: (_key: string, fallback: string) => fallback }),
+      createFileSystemWatcher: mocks.createFileSystemWatcher,
     },
     extensions: { onDidChange: () => disposable },
     window: {
@@ -101,7 +100,12 @@ vi.mock('vscode', () => {
       executeCommand: mocks.executeCommand,
     },
     ProgressLocation: { Notification: 15 },
-    RelativePattern: class {},
+    RelativePattern: class {
+      constructor(
+        public readonly base: string,
+        public readonly pattern: string,
+      ) {}
+    },
   };
 });
 
@@ -152,6 +156,14 @@ vi.mock('../src/github/githubService', () => ({
 vi.mock('../src/git/gitDiffProvider', () => ({
   openCommitFileDiff: mocks.openCommitFileDiff,
   buildShowUri: mocks.buildShowUri,
+  normalizeRepoRootPath: (root: string) => root.replace(/[\\/]+$/, '').toLowerCase(),
+}));
+vi.mock('../src/git/repoDiscovery', () => ({
+  canonicalizeRepoPath: (root: string) => {
+    const trimmed = root.replace(/[\\/]+$/, '');
+    return /^[A-Za-z]:/.test(trimmed) ? trimmed.toLowerCase().replace(/\//g, '\\') : trimmed;
+  },
+  discoverWorkspaceRepositories: mocks.discoverWorkspaceRepositories,
 }));
 vi.mock('../src/git/gitGraphInterop', () => ({ findGitGraphExtensionId: () => null, openInGitGraph: vi.fn() }));
 
@@ -248,6 +260,19 @@ describe('RepoCoordinator', () => {
     mocks.isTrusted = true;
     mocks.trustGrantedListeners.length = 0;
     mocks.getRepoSnapshot.mockImplementation(async () => MAIN_AND_FEATURE());
+    mocks.createFileSystemWatcher.mockImplementation(() => ({
+      onDidCreate: () => ({ dispose: (): void => undefined }),
+      onDidChange: () => ({ dispose: (): void => undefined }),
+      onDidDelete: () => ({ dispose: (): void => undefined }),
+      dispose: vi.fn(),
+    }));
+    mocks.discoverWorkspaceRepositories.mockResolvedValue([{
+      repoRoot: '/repo',
+      repoName: 'repo',
+      commonDir: '/repo/.git',
+      currentBranch: 'main',
+      isDetachedHead: false,
+    }]);
     mocks.getCommitPage.mockResolvedValue({ commits: [], hasMoreCommits: false });
     mocks.getCommitDetails.mockResolvedValue({ hash: sha('d'), body: 'details', files: [] });
     mocks.getGitHubRemoteUrl.mockResolvedValue(null);
@@ -313,6 +338,120 @@ describe('RepoCoordinator', () => {
     coordinator.attach(editor);
     coordinator.handleMessage('editor', { type: 'webviewReady' });
   }
+
+  it('switches only to discovered repositories and resets repo-scoped selection', async () => {
+    const diffProvider = {
+      setAllowedRepoRoots: vi.fn(),
+      clearAllowedRepoRoots: vi.fn(),
+    };
+    mocks.discoverWorkspaceRepositories.mockResolvedValue([
+      { repoRoot: '/repo', repoName: 'repo', commonDir: '/repo/.git', currentBranch: 'main' },
+      { repoRoot: '/other', repoName: 'other', commonDir: '/other/.git', currentBranch: 'dev' },
+    ]);
+    mocks.getRepoSnapshot.mockImplementation(async (root: string) => ({
+      ...MAIN_AND_FEATURE(),
+      repoRoot: root,
+      repoName: path.basename(root),
+    }));
+    coordinator = new RepoCoordinator(host, diffProvider as never);
+    sidebar = fakeSurface('sidebar');
+    await openBoth();
+    coordinator.handleMessage('sidebar', {
+      type: 'syncState',
+      payload: selection('refs/heads/feature', 'feature', ['refs/heads/main']),
+    });
+
+    mocks.getRepoSnapshot.mockClear();
+    mocks.discoverWorkspaceRepositories.mockClear();
+    coordinator.handleMessage('sidebar', {
+      type: 'selectRepository',
+      payload: { repoRoot: '/repo-evil' },
+    });
+    expect(mocks.getRepoSnapshot).not.toHaveBeenCalled();
+    expect(mocks.discoverWorkspaceRepositories).not.toHaveBeenCalled();
+    expect(mocks.fetchAll).not.toHaveBeenCalled();
+
+    coordinator.handleMessage('sidebar', {
+      type: 'selectRepository',
+      payload: { repoRoot: '/other' },
+    });
+    await vi.waitFor(() => expect(coordinator.getActiveRepoRoot()).toBe('/other'));
+    expect(mocks.getRepoSnapshot).toHaveBeenLastCalledWith('/other');
+    expect(sidebar.ofType('syncState').at(-1)).toMatchObject({
+      payload: { selectedBranchFullName: null, selectedBranchRef: null, pinnedBranchFullNames: [] },
+    });
+    expect([...diffProvider.setAllowedRepoRoots.mock.calls.at(-1)?.[0] as Iterable<string>]).toEqual([
+      '/repo',
+      '/other',
+    ]);
+    expect(mocks.createFileSystemWatcher.mock.calls.map((call) => call[0]?.base)).toEqual([
+      '/repo',
+      '/other',
+    ]);
+  });
+
+  it('reuses the exact discovered root when Git returns a differently formatted Windows path', async () => {
+    const discoveredRoot = String.raw`F:\Syncthing\Projects\Repo`;
+    mocks.discoverWorkspaceRepositories.mockResolvedValue([
+      {
+        repoRoot: discoveredRoot,
+        repoName: 'Repo',
+        commonDir: String.raw`F:\Syncthing\Projects\Repo\.git`,
+        currentBranch: 'main',
+      },
+    ]);
+    mocks.getRepoSnapshot.mockResolvedValue({
+      ...MAIN_AND_FEATURE(),
+      repoRoot: 'f:/Syncthing/Projects/Repo',
+      repoName: 'Repo',
+    });
+
+    await openBoth();
+
+    expect(sidebar.ofType('workspaceRepos').at(-1)).toMatchObject({
+      payload: { activeRepoRoot: discoveredRoot },
+    });
+    expect(sidebar.ofType('repoSnapshot').at(-1)).toMatchObject({
+      payload: { repoRoot: discoveredRoot },
+    });
+    expect(coordinator.getActiveRepoRoot()).toBe(discoveredRoot);
+  });
+
+  it('finds the longest owning repository for file blame and resolves its remote', async () => {
+    mocks.discoverWorkspaceRepositories.mockResolvedValue([
+      { repoRoot: '/work', repoName: 'work', commonDir: '/work/.git' },
+      { repoRoot: '/work/child', repoName: 'child', commonDir: '/work/child/.git' },
+    ]);
+    mocks.getRepoSnapshot.mockImplementation(async () => ({ ...MAIN_AND_FEATURE(), repoRoot: '/work' }));
+    mocks.getGitHubRemoteUrl.mockImplementation(async (root: string) =>
+      root === '/work/child' ? 'https://github.com/example/child' : 'https://github.com/example/work',
+    );
+    await openBoth();
+
+    expect(coordinator.getRepoRootForFile('/work/child/src/file.ts')).toBe('/work/child');
+    expect(coordinator.getRepoRootForFile('/work-sibling/file.ts')).toBeNull();
+    await expect(coordinator.getGithubRemoteUrlForRepo('/work/child')).resolves.toBe(
+      'https://github.com/example/child',
+    );
+  });
+
+  it('matches the longest Windows repository root case-insensitively without sibling collisions', async () => {
+    mocks.discoverWorkspaceRepositories.mockResolvedValue([
+      { repoRoot: 'C:\\Repos\\App', repoName: 'App', commonDir: 'C:\\Repos\\App\\.git' },
+      { repoRoot: 'C:\\Repos\\App\\Nested', repoName: 'Nested', commonDir: 'C:\\Repos\\App\\Nested\\.git' },
+    ]);
+    mocks.getRepoSnapshot.mockImplementation(async () => ({
+      ...MAIN_AND_FEATURE(),
+      repoRoot: 'C:\\Repos\\App',
+      repoName: 'App',
+    }));
+    await openBoth();
+
+    expect(coordinator.getRepoRootForFile('c:\\repos\\APP\\nested\\src\\file.ts')).toBe(
+      'C:\\Repos\\App\\Nested',
+    );
+    expect(coordinator.getRepoRootForFile('C:\\REPOS\\app-evil\\file.ts')).toBeNull();
+  });
 
   it('loads more commits single-flight and broadcasts only deduplicated appends', async () => {
     const snapshot = MAIN_AND_FEATURE();
@@ -645,7 +784,7 @@ describe('RepoCoordinator', () => {
     await openBoth();
     expect(mocks.getRepoSnapshot).toHaveBeenCalledTimes(1);
     for (const surface of [sidebar, editor]) {
-      expect(surface.messages.map((m) => m.type).slice(0, 2)).toEqual(['initState', 'repoSnapshot']);
+      expect(surface.messages.map((m) => m.type).slice(0, 3)).toEqual(['initState', 'workspaceRepos', 'repoSnapshot']);
     }
     expect(sidebar.ofType('repoSnapshot')[0]).toEqual(editor.ofType('repoSnapshot')[0]);
     expect(host.onCurrentBranchChange).toHaveBeenCalledWith('main');
@@ -657,6 +796,7 @@ describe('RepoCoordinator', () => {
     coordinator.handleMessage('sidebar', { type: 'webviewReady' });
 
     expect(mocks.getRepoSnapshot).not.toHaveBeenCalled();
+    expect(mocks.discoverWorkspaceRepositories).not.toHaveBeenCalled();
     expect(sidebar.ofType('repoError')).toContainEqual({
       type: 'repoError',
       payload: { code: 'UNTRUSTED_WORKSPACE', message: expect.stringContaining('Trust this workspace') },
@@ -667,6 +807,25 @@ describe('RepoCoordinator', () => {
       listener();
     }
     await vi.waitFor(() => expect(mocks.getRepoSnapshot).toHaveBeenCalledTimes(1));
+  });
+
+  it('authorizes diffs for every discovered repository', async () => {
+    const diffProvider = {
+      setAllowedRepoRoots: vi.fn(),
+      clearAllowedRepoRoots: vi.fn(),
+    };
+    mocks.discoverWorkspaceRepositories.mockResolvedValue([
+      { repoRoot: '/repo', repoName: 'repo', commonDir: '/repo/.git' },
+      { repoRoot: '/other', repoName: 'other', commonDir: '/other/.git' },
+    ]);
+    coordinator = new RepoCoordinator(host, diffProvider as never);
+    coordinator.attach(sidebar);
+    coordinator.handleMessage('sidebar', { type: 'webviewReady' });
+    await vi.waitFor(() => expect(diffProvider.setAllowedRepoRoots).toHaveBeenCalledTimes(1));
+    expect([...diffProvider.setAllowedRepoRoots.mock.calls[0]?.[0] as Iterable<string>]).toEqual([
+      '/repo',
+      '/other',
+    ]);
   });
 
   it('blocks every refresh, mutation, detail and diff request while untrusted and clears diff authorization', async () => {
@@ -900,7 +1059,7 @@ describe('RepoCoordinator', () => {
     coordinator.attach(editor);
     coordinator.handleMessage('editor', { type: 'webviewReady' });
 
-    expect(editor.messages.map((m) => m.type)).toEqual(['initState', 'repoSnapshot', 'syncState', 'integrationsInfo']);
+    expect(editor.messages.map((m) => m.type)).toEqual(['initState', 'workspaceRepos', 'repoSnapshot', 'syncState', 'integrationsInfo']);
     expect(editor.ofType('syncState')[0]).toEqual({ type: 'syncState', payload: picked });
     // The cached snapshot is replayed instead of re-running Git.
     expect(mocks.getRepoSnapshot).toHaveBeenCalledTimes(1);

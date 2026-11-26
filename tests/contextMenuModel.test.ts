@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { BranchInfo, CommitNode, RepoSnapshot } from '../src/types/git';
-import { buildCommitMenu, buildRefMenu, buildRepoMenu, clampMenuPosition, pullPushDisabledReason } from '../src/webview/ui/contextMenuModel';
+import { buildCommitMenu, buildRefMenu, buildRepoMenu, buildSettingsMenu, clampMenuPosition, pullPushDisabledReason } from '../src/webview/ui/contextMenuModel';
 import type { MenuActionId, MenuEntry } from '../src/webview/ui/contextMenuModel';
 import type { ExplorerUiState } from '../src/webview/ui/state';
 import { branchRefTarget, createInitialState, tagRefTarget } from '../src/webview/ui/state';
@@ -290,69 +290,76 @@ describe('buildRepoMenu', () => {
   const menuFor = (
     snap: RepoSnapshot,
     patch: Partial<ExplorerUiState> = {},
-    showCheckedOutBadge?: boolean,
-    showFolderCounts?: boolean,
-    trackingOrder?: ExplorerUiState['trackingOrder'],
   ): MenuEntry[] => buildRepoMenu(
     snap,
     state({ snapshot: snap, ...patch }),
-    showCheckedOutBadge,
-    showFolderCounts,
-    trackingOrder,
   );
 
   it('offers Publish Repository for a local-only repository', () => {
-    const menu = buildRepoMenu(snapshot, state(), true, true, 'vscode', false);
+    const menu = buildRepoMenu(snapshot, state(), false);
     expect(item(menu, 'publishRepository')).toMatchObject({
       enabled: true,
       label: 'Publish Repository / Add Remote…',
     });
   });
 
-  it('offers Fetch, Pull, Push, New Branch, preference toggles and Refresh', () => {
+  it('offers only repository-scoped actions', () => {
     const menu = menuFor(snapshot);
     expect(ids(menu)).toEqual([
       'fetchTracked', 'pull', 'push', 'pushAndOpenPr', 'createPrInBrowser', 'openRepoInBrowser',
-      'newBranch', 'toggleCheckedOutBadge', 'toggleFolderCounts',
-      'toggleTrackingOrder', 'refresh',
+      'newBranch', 'refresh',
     ]);
     expect(enabled(menu)).toEqual([
-      'fetchTracked', 'pull', 'push', 'newBranch', 'toggleCheckedOutBadge', 'toggleFolderCounts',
-      'toggleTrackingOrder', 'refresh',
+      'fetchTracked', 'pull', 'push', 'newBranch', 'refresh',
     ]);
     expect(item(menu, 'push').label).toBe('Push');
   });
 
+  it('keeps display preferences exclusively in the settings menu', () => {
+    const settings = buildSettingsMenu({
+      showCheckedOutBadge: true,
+      showFolderCounts: true,
+      trackingOrder: 'vscode',
+    });
+    expect(ids(settings)).toEqual([
+      'toggleCheckedOutBadge',
+      'toggleFolderCounts',
+      'toggleTrackingOrder',
+    ]);
+    const repoIds = ids(menuFor(snapshot));
+    expect(repoIds).not.toContain('toggleCheckedOutBadge');
+    expect(repoIds).not.toContain('toggleFolderCounts');
+    expect(repoIds).not.toContain('toggleTrackingOrder');
+  });
+
   it('labels the badge toggle by the current preference and never disables it', () => {
-    expect(item(menuFor(snapshot, {}, true), 'toggleCheckedOutBadge')).toMatchObject({ label: 'Hide "Checked Out" Badge', enabled: true });
-    expect(item(menuFor(snapshot), 'toggleCheckedOutBadge').label).toBe('Hide "Checked Out" Badge');
-    expect(item(menuFor(snapshot, { isBusy: true }, false), 'toggleCheckedOutBadge')).toMatchObject({
+    expect(item(buildSettingsMenu({ showCheckedOutBadge: true, showFolderCounts: true, trackingOrder: 'vscode' }), 'toggleCheckedOutBadge')).toMatchObject({ label: 'Hide "Checked Out" Badge', enabled: true });
+    expect(item(buildSettingsMenu({ showCheckedOutBadge: false, showFolderCounts: true, trackingOrder: 'vscode' }), 'toggleCheckedOutBadge')).toMatchObject({
       label: 'Show "Checked Out" Badge',
       enabled: true,
     });
   });
 
   it('labels the folder count toggle by the current preference', () => {
-    expect(item(menuFor(snapshot), 'toggleFolderCounts')).toMatchObject({
+    expect(item(buildSettingsMenu({ showCheckedOutBadge: true, showFolderCounts: true, trackingOrder: 'vscode' }), 'toggleFolderCounts')).toMatchObject({
       label: 'Hide Folder Branch Counts',
       enabled: true,
     });
-    expect(item(menuFor(snapshot, { isBusy: true }, true, false), 'toggleFolderCounts')).toMatchObject({
+    expect(item(buildSettingsMenu({ showCheckedOutBadge: true, showFolderCounts: false, trackingOrder: 'vscode' }), 'toggleFolderCounts')).toMatchObject({
       label: 'Show Folder Branch Counts',
       enabled: true,
     });
   });
 
   it('labels the tracking order toggle for VS Code by default and Visual Studio when selected', () => {
-    expect(item(menuFor(snapshot), 'toggleTrackingOrder')).toMatchObject({
+    expect(item(buildSettingsMenu({ showCheckedOutBadge: true, showFolderCounts: true, trackingOrder: 'vscode' }), 'toggleTrackingOrder')).toMatchObject({
       label: 'Commit Counters: Switch to ↑ ↓ (Visual Studio)',
       enabled: true,
     });
-    expect(item(menuFor(snapshot, {}, true, true, 'visualStudio'), 'toggleTrackingOrder')).toMatchObject({
+    expect(item(buildSettingsMenu({ showCheckedOutBadge: true, showFolderCounts: true, trackingOrder: 'visualStudio' }), 'toggleTrackingOrder')).toMatchObject({
       label: 'Commit Counters: Switch to ↓ ↑ (VS Code)',
       enabled: true,
     });
-    expect(item(menuFor(snapshot, { isBusy: true }, true, true, 'visualStudio'), 'toggleTrackingOrder').enabled).toBe(true);
   });
 
   it('disables Fetch when no local branch tracks a remote, but keeps pull/push rules independent', () => {
@@ -391,9 +398,9 @@ describe('buildRepoMenu', () => {
     expect(item(menu, 'push').enabled).toBe(true);
   });
 
-  it('disables Fetch, Pull, Push and New Branch while busy, but still allows the badge toggle and Refresh', () => {
+  it('disables Fetch, Pull, Push and New Branch while busy, but still allows Refresh', () => {
     const menu = menuFor(snapshot, { isBusy: true });
-    expect(enabled(menu)).toEqual(['toggleCheckedOutBadge', 'toggleFolderCounts', 'toggleTrackingOrder', 'refresh']);
+    expect(enabled(menu)).toEqual(['refresh']);
     expect(item(menu, 'fetchTracked').reason).toMatch(/running/i);
   });
 });

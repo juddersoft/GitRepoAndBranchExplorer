@@ -2,9 +2,10 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
 import type { GitShowContentProvider } from '../git/gitDiffProvider';
-import { buildShowUri, openCommitFileDiff } from '../git/gitDiffProvider';
+import { buildShowUri, normalizeRepoRootPath, openCommitFileDiff } from '../git/gitDiffProvider';
 import { GitExecutionError, validateGitRef } from '../git/gitExecutor';
 import { findGitGraphExtensionId, openInGitGraph } from '../git/gitGraphInterop';
+import { canonicalizeRepoPath, discoverWorkspaceRepositories } from '../git/repoDiscovery';
 import { GitService, isValidCommitHash } from '../git/gitService';
 import {
   buildRemoteBranchUrl,
@@ -23,7 +24,7 @@ import type { ParsedRemoteHost } from '../git/remoteUrlBuilder';
 import type { TrackedFetchResult } from '../git/trackedFetch';
 import { describeTrackedFetch, NOTHING_TO_FETCH_MESSAGE, planTrackedFetch } from '../git/trackedFetch';
 import { GitHubService } from '../github/githubService';
-import type { BranchInfo, ExternalIntegrationsInfo, RepoSnapshot } from '../types/git';
+import type { BranchInfo, ExternalIntegrationsInfo, RepoSnapshot, WorkspaceRepoInfo } from '../types/git';
 import type {
   ActionStatusPayload,
   ExtensionToWebviewMessage,
@@ -171,6 +172,9 @@ export class RepoCoordinator implements vscode.Disposable {
     remoteProviderName: null,
   };
   private operationInProgress = false;
+  private discoveredRepos: WorkspaceRepoInfo[] = [];
+  private selectedRepoRoot: string | null = null;
+  private readonly githubRemoteByRepo = new Map<string, string | undefined>();
   private gitWatcher: vscode.FileSystemWatcher | undefined;
   private gitWatcherSubscriptions: vscode.Disposable[] = [];
   private watchedRepoRoot: string | null = null;
@@ -187,6 +191,18 @@ export class RepoCoordinator implements vscode.Disposable {
   ) {
     vscode.workspace.onDidChangeWorkspaceFolders(() => this.refreshIfAttached(), null, this.disposables);
     vscode.workspace.onDidGrantWorkspaceTrust(() => this.refreshIfAttached(), null, this.disposables);
+    vscode.workspace.onDidChangeConfiguration(
+      (event) => {
+        if (
+          event.affectsConfiguration('gitRepoAndBranchExplorer.workspaceRoot') &&
+          this.surfaces.size > 0
+        ) {
+          this.refreshIfAttached();
+        }
+      },
+      null,
+      this.disposables,
+    );
     vscode.extensions.onDidChange(
       () => {
         if (this.surfaces.size > 0 && vscode.workspace.isTrusted) {
@@ -232,6 +248,52 @@ export class RepoCoordinator implements vscode.Disposable {
     return this.integrations.githubRemoteUrl ?? undefined;
   }
 
+  public getRepoRootForFile(filePath: string): string | null {
+    const candidate = canonicalizeRepoPath(filePath);
+    const repoRoots = this.discoveredRepos
+      .map((repo) => ({ original: repo.repoRoot, canonical: canonicalizeRepoPath(repo.repoRoot) }))
+      .sort((left, right) => right.canonical.length - left.canonical.length);
+    for (const repo of repoRoots) {
+      if (this.isPathInsideRepo(repo.canonical, candidate)) {
+        return repo.original;
+      }
+    }
+    const activeRepoRoot = this.getActiveRepoRoot();
+    return activeRepoRoot && this.isPathInsideRepo(canonicalizeRepoPath(activeRepoRoot), candidate)
+      ? activeRepoRoot
+      : null;
+  }
+
+  private isPathInsideRepo(repoRoot: string, candidatePath: string): boolean {
+    const relative = path.relative(repoRoot, candidatePath);
+    return relative === '' ||
+      (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+  }
+
+  public async getGithubRemoteUrlForRepo(repoRoot: string): Promise<string | undefined> {
+    if (!vscode.workspace.isTrusted) {
+      return undefined;
+    }
+    const matchedRoot = this.discoveredRepos.find(
+      (repo) => canonicalizeRepoPath(repo.repoRoot) === canonicalizeRepoPath(repoRoot),
+    )?.repoRoot;
+    if (!matchedRoot) {
+      return undefined;
+    }
+    const key = normalizeRepoRootPath(matchedRoot);
+    if (this.githubRemoteByRepo.has(key)) {
+      return this.githubRemoteByRepo.get(key);
+    }
+    let githubRemoteUrl: string | undefined;
+    try {
+      githubRemoteUrl = await this.gitService.getGitHubRemoteUrl(matchedRoot) ?? undefined;
+    } catch {
+      githubRemoteUrl = undefined;
+    }
+    this.githubRemoteByRepo.set(key, githubRemoteUrl);
+    return githubRemoteUrl;
+  }
+
   public revealCommit(hash: string): void {
     if (!isValidCommitHash(hash)) {
       return;
@@ -256,6 +318,9 @@ export class RepoCoordinator implements vscode.Disposable {
         break;
       case 'requestRefresh':
         void this.loadRepository();
+        break;
+      case 'selectRepository':
+        this.handleSelectRepository(message.payload.repoRoot);
         break;
       case 'loadMoreCommits':
         void this.loadNextCommitPage().catch((err: unknown) => {
@@ -345,6 +410,10 @@ export class RepoCoordinator implements vscode.Disposable {
    */
   public publishInitState(): void {
     this.broadcast({ type: 'initState', payload: this.getInitState() });
+    this.broadcast({
+      type: 'workspaceRepos',
+      payload: { repos: this.discoveredRepos, activeRepoRoot: this.lastSnapshot?.repoRoot ?? null },
+    });
     if (this.lastSnapshot !== null) {
       this.broadcast({ type: 'repoSnapshot', payload: this.lastSnapshot });
     }
@@ -365,6 +434,10 @@ export class RepoCoordinator implements vscode.Disposable {
       return;
     }
     surface.post({ type: 'initState', payload: this.getInitState() });
+    surface.post({
+      type: 'workspaceRepos',
+      payload: { repos: this.discoveredRepos, activeRepoRoot: snapshot.repoRoot },
+    });
     this.host.onCurrentBranchChange(snapshot.currentBranch);
     surface.post({ type: 'repoSnapshot', payload: snapshot });
     surface.post({ type: 'syncState', payload: this.selection });
@@ -395,18 +468,48 @@ export class RepoCoordinator implements vscode.Disposable {
   }
 
   private refreshIfAttached(): void {
-    void this.loadRepository();
+    if (this.surfaces.size > 0) {
+      void this.loadRepository();
+    }
   }
 
   /** No view is showing the repository any more: stop watching it and forget the transient state. */
   private release(): void {
     this.loadSequence++;
     this.lastSnapshot = null;
+    this.discoveredRepos = [];
+    this.selectedRepoRoot = null;
+    this.githubRemoteByRepo.clear();
     this.selection = EMPTY_SELECTION;
     this.pendingCreateBranchDialog = null;
     this.gitDiffProvider?.clearAllowedRepoRoots();
     this.disposeGitWatcher();
+    this.broadcast({ type: 'workspaceRepos', payload: { repos: [], activeRepoRoot: null } });
     this.notifyRepositoryChange(null);
+  }
+
+  private handleSelectRepository(requestedRoot: string): void {
+    if (this.operationInProgress || this.status.busy || !vscode.workspace.isTrusted) {
+      return;
+    }
+    const requested = canonicalizeRepoPath(requestedRoot);
+    const repository = this.discoveredRepos.find(
+      (repo) => canonicalizeRepoPath(repo.repoRoot) === requested,
+    );
+    if (!repository) {
+      void vscode.window.showWarningMessage('That repository is not in the discovered workspace repositories.');
+      return;
+    }
+    if (
+      this.lastSnapshot &&
+      canonicalizeRepoPath(this.lastSnapshot.repoRoot) === canonicalizeRepoPath(repository.repoRoot)
+    ) {
+      return;
+    }
+    this.selection = EMPTY_SELECTION;
+    this.broadcast({ type: 'syncState', payload: this.selection });
+    this.selectedRepoRoot = repository.repoRoot;
+    void this.loadRepository();
   }
 
   private async runGitOperation(
@@ -1876,7 +1979,11 @@ export class RepoCoordinator implements vscode.Disposable {
         // Keep a GitHub result from the multi-provider resolver when available.
       }
     }
-    if (repoRoot !== this.lastSnapshot?.repoRoot) {
+    if (
+      repoRoot === undefined ||
+      this.lastSnapshot === null ||
+      canonicalizeRepoPath(repoRoot) !== canonicalizeRepoPath(this.lastSnapshot.repoRoot)
+    ) {
       return;
     }
     const gitGraphExtensionId = findGitGraphExtensionId();
@@ -1888,6 +1995,7 @@ export class RepoCoordinator implements vscode.Disposable {
       remoteProvider: remoteProvider ?? (githubRemoteUrl ? 'github' : null),
       remoteProviderName: remoteProviderName ?? (githubRemoteUrl ? 'GitHub' : null),
     };
+    this.githubRemoteByRepo.set(normalizeRepoRootPath(repoRoot ?? ''), githubRemoteUrl ?? undefined);
     this.broadcast({ type: 'integrationsInfo', payload: this.integrations });
   }
 
@@ -1903,16 +2011,33 @@ export class RepoCoordinator implements vscode.Disposable {
     const sequence = ++this.loadSequence;
     const initState = this.getInitState();
     this.broadcast({ type: 'initState', payload: initState });
-    this.gitDiffProvider?.clearAllowedRepoRoots();
 
     if (!this.ensureTrustedWorkspace()) {
       return;
     }
 
-    if (initState.workspacePath === null) {
+    const workspaceFolderPaths = vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? [];
+    const configuredWorkspaceRoot = vscode.workspace
+      .getConfiguration('gitRepoAndBranchExplorer')
+      .get<string>('workspaceRoot', '')
+      .trim();
+    this.discoveredRepos = await discoverWorkspaceRepositories(workspaceFolderPaths, configuredWorkspaceRoot);
+    if (sequence !== this.loadSequence || this.disposed) {
+      return;
+    }
+    const selected = this.selectedRepoRoot === null
+      ? undefined
+      : this.discoveredRepos.find(
+          (repo) => canonicalizeRepoPath(repo.repoRoot) === canonicalizeRepoPath(this.selectedRepoRoot!),
+        );
+    const activeRepoRoot = selected?.repoRoot ?? this.discoveredRepos[0]?.repoRoot ?? initState.workspacePath;
+    if (activeRepoRoot === null) {
       this.lastSnapshot = null;
+      this.selectedRepoRoot = null;
+      this.gitDiffProvider?.clearAllowedRepoRoots();
       this.updateGitWatcher(null);
       this.host.onCurrentBranchChange(null);
+      this.broadcast({ type: 'workspaceRepos', payload: { repos: this.discoveredRepos, activeRepoRoot: null } });
       this.broadcast({
         type: 'repoError',
         payload: { code: 'NO_WORKSPACE', message: 'Open a folder that contains a Git repository.' },
@@ -1922,17 +2047,34 @@ export class RepoCoordinator implements vscode.Disposable {
     }
 
     try {
-      const snapshot = await this.gitService.getRepoSnapshot(initState.workspacePath);
+      const rawSnapshot = await this.gitService.getRepoSnapshot(activeRepoRoot);
       // Drop results superseded by a newer refresh or disposed by extension shutdown.
       if (sequence !== this.loadSequence || this.disposed) {
         return;
       }
+      const snapshotRepo = this.discoveredRepos.find(
+        (repo) =>
+          canonicalizeRepoPath(repo.repoRoot) === canonicalizeRepoPath(rawSnapshot.repoRoot) ||
+          canonicalizeRepoPath(repo.repoRoot) === canonicalizeRepoPath(activeRepoRoot),
+      );
+      const snapshot = {
+        ...rawSnapshot,
+        repoRoot: snapshotRepo?.repoRoot ?? canonicalizeRepoPath(rawSnapshot.repoRoot),
+      };
       this.lastSnapshot = snapshot;
-      this.gitDiffProvider?.setAllowedRepoRoots([snapshot.repoRoot]);
+      this.selectedRepoRoot = snapshot.repoRoot;
+      this.gitDiffProvider?.setAllowedRepoRoots(new Set([
+        ...this.discoveredRepos.map((repo) => repo.repoRoot),
+        snapshot.repoRoot,
+      ]));
       // Each webview reconciles its own selection with the snapshot identically, so no extra sync message is needed.
       this.selection = normalizeSelection(snapshot, this.selection);
       this.updateGitWatcher(snapshot.repoRoot);
       this.host.onCurrentBranchChange(snapshot.currentBranch);
+      this.broadcast({
+        type: 'workspaceRepos',
+        payload: { repos: this.discoveredRepos, activeRepoRoot: snapshot.repoRoot },
+      });
       this.broadcast({ type: 'repoSnapshot', payload: snapshot });
       this.flushPendingRevealCommit();
       this.flushPendingCreateBranchDialog();
@@ -1946,9 +2088,11 @@ export class RepoCoordinator implements vscode.Disposable {
         return;
       }
       this.lastSnapshot = null;
+      this.selectedRepoRoot = null;
       this.gitDiffProvider?.clearAllowedRepoRoots();
       this.updateGitWatcher(null);
       this.host.onCurrentBranchChange(null);
+      this.broadcast({ type: 'workspaceRepos', payload: { repos: this.discoveredRepos, activeRepoRoot: null } });
       this.broadcast({ type: 'repoError', payload: toRepoErrorPayload(err) });
       this.notifyRepositoryChange(null);
     }
@@ -1956,7 +2100,12 @@ export class RepoCoordinator implements vscode.Disposable {
 
   /** (Re)creates the `.git` watcher only when the repository root actually changes. */
   private updateGitWatcher(repoRoot: string | null): void {
-    if (repoRoot === this.watchedRepoRoot) {
+    if (
+      (repoRoot === null && this.watchedRepoRoot === null) ||
+      (repoRoot !== null &&
+        this.watchedRepoRoot !== null &&
+        canonicalizeRepoPath(repoRoot) === canonicalizeRepoPath(this.watchedRepoRoot))
+    ) {
       return;
     }
     this.disposeGitWatcher();
@@ -2003,10 +2152,14 @@ export class RepoCoordinator implements vscode.Disposable {
   private reportUntrustedWorkspace(): void {
     this.loadSequence++;
     this.lastSnapshot = null;
+    this.discoveredRepos = [];
+    this.selectedRepoRoot = null;
+    this.githubRemoteByRepo.clear();
     this.selection = EMPTY_SELECTION;
     this.gitDiffProvider?.clearAllowedRepoRoots();
     this.updateGitWatcher(null);
     this.host.onCurrentBranchChange(null);
+    this.broadcast({ type: 'workspaceRepos', payload: { repos: [], activeRepoRoot: null } });
     this.broadcast({
       type: 'repoError',
       payload: { code: 'UNTRUSTED_WORKSPACE', message: WORKSPACE_TRUST_ERROR_MESSAGE },
@@ -2025,7 +2178,11 @@ export class RepoCoordinator implements vscode.Disposable {
     this.isLoadingMoreCommits = true;
     const loading = (async (): Promise<boolean> => {
       const page = await this.gitService.getCommitPage(snapshot.repoRoot, snapshot.commits.length);
-      if (snapshot !== this.lastSnapshot || snapshot.repoRoot !== this.lastSnapshot?.repoRoot) {
+      if (
+        this.lastSnapshot === null ||
+        snapshot !== this.lastSnapshot ||
+        canonicalizeRepoPath(snapshot.repoRoot) !== canonicalizeRepoPath(this.lastSnapshot.repoRoot)
+      ) {
         return false;
       }
       const knownHashes = new Set(snapshot.commits.map((commit) => commit.hash));

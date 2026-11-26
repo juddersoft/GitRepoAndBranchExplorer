@@ -4,6 +4,7 @@ import type { BlameLineInfo, FileBlameMap } from '../git/blameParser';
 import { formatInlineBlame } from '../git/blameParser';
 import type { GitBlameService } from '../git/gitBlameService';
 import type { RepoCoordinator } from '../webview/RepoCoordinator';
+import { resolveBlameRepository } from './blameRepoResolution';
 import {
   BLAME_HOVER_ALLOWED_COMMANDS,
   BLAME_HOVER_COMMANDS,
@@ -168,7 +169,7 @@ export class BlameController implements vscode.Disposable {
         }
       }),
       vscode.workspace.onDidSaveTextDocument((document) => {
-        const repoRoot = this.coordinator.getActiveRepoRoot();
+        const repoRoot = resolveBlameRepository(this.coordinator, document.uri.fsPath);
         const relativePath = repoRoot === null ? null : repositoryRelativePath(repoRoot, document.uri.fsPath);
         if (repoRoot !== null && relativePath !== null) {
           this.blameService.invalidateFile(repoRoot, relativePath);
@@ -287,7 +288,7 @@ export class BlameController implements vscode.Disposable {
       return;
     }
 
-    const repoRoot = this.coordinator.getActiveRepoRoot();
+    const repoRoot = resolveBlameRepository(this.coordinator, editor.document.uri.fsPath);
     const relativePath = repoRoot === null
       ? null
       : repositoryRelativePath(repoRoot, editor.document.uri.fsPath);
@@ -331,7 +332,7 @@ export class BlameController implements vscode.Disposable {
         ? uncommittedLineInfo(lineNumber, relativePath, lineText)
         : cachedInfo ?? uncommittedLineInfo(lineNumber, relativePath, lineText);
 
-    const hover = this.createHoverMarkdown(info, repoRoot, relativePath);
+    const hover = await this.createHoverMarkdown(info, repoRoot, relativePath);
     if (this.annotatedDocuments.has(editor.document.uri.toString())) {
       editor.setDecorations(this.decorationType, []);
       if (this.decoratedEditor === editor) {
@@ -368,7 +369,7 @@ export class BlameController implements vscode.Disposable {
 
     const token = ++this.gutterRenderToken;
     this.gutterRenderTokens.set(editor, token);
-    const repoRoot = this.coordinator.getActiveRepoRoot();
+    const repoRoot = resolveBlameRepository(this.coordinator, editor.document.uri.fsPath);
     const relativePath = repoRoot === null
       ? null
       : repositoryRelativePath(repoRoot, editor.document.uri.fsPath);
@@ -412,7 +413,7 @@ export class BlameController implements vscode.Disposable {
     for (const entry of entries) {
       let hover = hoverByHash.get(entry.info.hash);
       if (hover === undefined) {
-        hover = this.createHoverMarkdown(entry.info, repoRoot, relativePath);
+        hover = await this.createHoverMarkdown(entry.info, repoRoot, relativePath);
         hoverByHash.set(entry.info.hash, hover);
       }
       const line = entry.lineNumber - 1;
@@ -431,12 +432,12 @@ export class BlameController implements vscode.Disposable {
     }
   }
 
-  private createHoverMarkdown(
+  private async createHoverMarkdown(
     info: BlameLineInfo,
     repoRoot: string,
     relativePath: string,
-  ): vscode.MarkdownString {
-    const githubRemoteUrl = this.coordinator.getGithubRemoteUrl();
+  ): Promise<vscode.MarkdownString> {
+    const githubRemoteUrl = await this.coordinator.getGithubRemoteUrlForRepo(repoRoot);
     const hover = new vscode.MarkdownString(
       buildBlameHoverMarkdown({
         info,

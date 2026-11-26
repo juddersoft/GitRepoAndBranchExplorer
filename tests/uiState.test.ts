@@ -18,13 +18,16 @@ import {
   isAncestorOfHead,
   isSameSelection,
   listRefTargets,
+  normalizeRepoKey,
   normalizeSelection,
   reconcileStateWithSnapshot,
+  repoNodeKey,
   remoteNodeKey,
   selectionFromState,
   selectionPatch,
   selectRefPatch,
   summarizeRefToggles,
+  toggleNodeExpansion,
   trackingSummary,
 } from '../src/webview/ui/state';
 
@@ -257,6 +260,41 @@ describe('filterVisibleBadges', () => {
 });
 
 describe('reconcileStateWithSnapshot', () => {
+  it('normalizes mixed Windows roots while expanding and toggling the active repository', () => {
+    const workspaceRoot = 'F:\\Syncthing\\Projects\\Repo\\';
+    const snapshotRoot = 'f:/Syncthing/Projects/Repo';
+    const windowsSnapshot = { ...snapshot, repoRoot: snapshotRoot };
+    const initial = stateWith({
+      snapshot: null,
+      workspaceRepos: [{
+        repoRoot: workspaceRoot,
+        repoName: 'Repo',
+        commonDir: `${workspaceRoot}.git`,
+      }],
+      activeRepoRoot: workspaceRoot,
+    });
+
+    const expanded = reconcileStateWithSnapshot(initial, windowsSnapshot, new Set());
+    const key = repoNodeKey(workspaceRoot);
+
+    expect(normalizeRepoKey(workspaceRoot)).toBe(normalizeRepoKey(snapshotRoot));
+    expect(key).toBe('repo:f:/Syncthing/Projects/Repo');
+    expect(expanded.expandedNodes.has(key)).toBe(true);
+
+    const collapsed = toggleNodeExpansion(expanded.expandedNodes, expanded.collapsedRepoNodes, key);
+    expect(collapsed.expandedNodes.has(key)).toBe(false);
+    expect(collapsed.collapsedRepoNodes.has(key)).toBe(true);
+
+    const reopened = toggleNodeExpansion(collapsed.expandedNodes, collapsed.collapsedRepoNodes, key);
+    expect(reopened.expandedNodes.has(key)).toBe(true);
+    expect(reopened.collapsedRepoNodes.has(key)).toBe(false);
+  });
+
+  it('preserves a drive root while removing redundant trailing separators', () => {
+    expect(normalizeRepoKey('F:\\')).toBe('f:/');
+    expect(normalizeRepoKey('F:\\Syncthing\\Repo\\\\')).toBe('f:/Syncthing/Repo');
+  });
+
   it('drops stale pins and selection, and expands only newly seen remotes', () => {
     const previous = stateWith({
       snapshot: null,
@@ -317,6 +355,7 @@ describe('reconcileStateWithSnapshot', () => {
     expect(next.expandedNodes).toEqual(
       new Set([
         'branches',
+        'repo:/repo',
         remoteNodeKey('origin'),
         'folder:local:feature',
         'folder:local:feature/pdj',
@@ -350,7 +389,7 @@ describe('reconcileStateWithSnapshot', () => {
     const next = reconcileStateWithSnapshot(previous, nextSnapshot, new Set(['origin']), true);
 
     expect(next.expandedNodes).toEqual(
-      new Set(['branches', 'folder:local:feature', 'folder:local:feature/pdj']),
+      new Set(['branches', 'repo:/repo', 'folder:local:feature', 'folder:local:feature/pdj']),
     );
   });
 });

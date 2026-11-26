@@ -152,6 +152,51 @@ describe('commit pagination validation', () => {
   it('accepts loadMoreCommits without a payload', () => {
     expect(isWebviewToExtensionMessage({ type: 'loadMoreCommits' })).toBe(true);
   });
+
+  describe('repository selection validation', () => {
+    it('accepts a non-empty control-free repository path', () => {
+      expect(isWebviewToExtensionMessage({
+        type: 'selectRepository',
+        payload: { repoRoot: '/work/another repo' },
+      })).toBe(true);
+    });
+
+    it('rejects missing, empty, control-bearing and extra payload fields', () => {
+      for (const payload of [{}, { repoRoot: '' }, { repoRoot: ' \t' }, { repoRoot: 'bad\0path' }, { repoRoot: '/repo', extra: true }]) {
+        expect(isWebviewToExtensionMessage({ type: 'selectRepository', payload })).toBe(false);
+      }
+    });
+
+    it('rejects non-plain and prototype-polluted messages and payloads', () => {
+      expect(isWebviewToExtensionMessage(Object.assign(new Date(), {
+        type: 'selectRepository',
+        payload: { repoRoot: '/repo' },
+      }))).toBe(false);
+      expect(isWebviewToExtensionMessage({
+        type: 'selectRepository',
+        payload: Object.create({ repoRoot: '/repo' }),
+      })).toBe(false);
+      expect(isWebviewToExtensionMessage({
+        type: 'selectRepository',
+        payload: JSON.parse('{"repoRoot":"/repo","__proto__":{"polluted":true}}'),
+      })).toBe(false);
+      expect(isWebviewToExtensionMessage(JSON.parse(
+        '{"type":"selectRepository","payload":{"repoRoot":"/repo"},"constructor":{}}',
+      ))).toBe(false);
+    });
+
+    it('validates workspace repository broadcasts', () => {
+      const repo = { repoRoot: '/repo', repoName: 'repo', commonDir: '/repo/.git', currentBranch: 'main' };
+      expect(isExtensionToWebviewMessage({
+        type: 'workspaceRepos',
+        payload: { repos: [repo], activeRepoRoot: '/repo' },
+      })).toBe(true);
+      expect(isExtensionToWebviewMessage({
+        type: 'workspaceRepos',
+        payload: { repos: [{ ...repo, repoRoot: '' }], activeRepoRoot: null },
+      })).toBe(false);
+    });
+  });
 });
 
 describe('setShowCheckedOutBadge validation', () => {

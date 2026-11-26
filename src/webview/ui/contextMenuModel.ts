@@ -177,9 +177,6 @@ export function buildRefMenu(snapshot: RepoSnapshot, state: ExplorerUiState, tar
 export function buildRepoMenu(
   snapshot: RepoSnapshot,
   state: ExplorerUiState,
-  showCheckedOutBadge = true,
-  showFolderCounts = true,
-  trackingOrder: TrackingIndicatorOrder = 'vscode',
   hasRemotes = true,
 ): MenuEntry[] {
   const busy = state.isBusy && BUSY_REASON;
@@ -218,16 +215,24 @@ export function buildRepoMenu(
     SEPARATOR,
     item('newBranch', 'New Branch\u2026', firstReason(busy)),
     SEPARATOR,
-    item('toggleCheckedOutBadge', showCheckedOutBadge ? 'Hide "Checked Out" Badge' : 'Show "Checked Out" Badge'),
-    item('toggleFolderCounts', showFolderCounts ? 'Hide Folder Branch Counts' : 'Show Folder Branch Counts'),
+    item('refresh', 'Refresh'),
+  ];
+}
+
+export function buildSettingsMenu(options: {
+  showCheckedOutBadge: boolean;
+  showFolderCounts: boolean;
+  trackingOrder: TrackingIndicatorOrder;
+}): MenuEntry[] {
+  return [
+    item('toggleCheckedOutBadge', options.showCheckedOutBadge ? 'Hide "Checked Out" Badge' : 'Show "Checked Out" Badge'),
+    item('toggleFolderCounts', options.showFolderCounts ? 'Hide Folder Branch Counts' : 'Show Folder Branch Counts'),
     item(
       'toggleTrackingOrder',
-      trackingOrder === 'vscode'
+      options.trackingOrder === 'vscode'
         ? 'Commit Counters: Switch to ↑ ↓ (Visual Studio)'
         : 'Commit Counters: Switch to ↓ ↑ (VS Code)',
     ),
-    SEPARATOR,
-    item('refresh', 'Refresh'),
   ];
 }
 

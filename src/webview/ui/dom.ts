@@ -61,6 +61,10 @@ const ICONS = {
   fetch: [{ tag: 'path', d: 'M8 2v7M5 6l3 3 3-3M2.5 10.5v3h11v-3' }],
   pull: [{ tag: 'path', d: 'M8 2v10M4 8l4 4 4-4M3 14h10' }],
   push: [{ tag: 'path', d: 'M8 14V4M4 8l4-4 4 4M3 2h10' }],
+  settings: [
+    { tag: 'path', d: 'M6.6 1.7h2.8l.5 1.6 1.3.7 1.6-.5 1.4 2.4-1.1 1.1.1 1.5 1.2 1.1-1.4 2.4-1.6-.5-1.3.8-.5 1.7H6.8l-.6-1.7-1.3-.8-1.6.5-1.4-2.4 1.2-1.1.1-1.5-1.2-1.1L3.4 3.1l1.6.5 1.3-.7z' },
+    { tag: 'circle', cx: 8, cy: 8, r: 2.4 },
+  ],
   refresh: [{ tag: 'path', d: 'M13 8a5 5 0 1 1-1.46-3.54M13 2.5v3h-3' }],
   chevronLeft: [{ tag: 'path', d: 'M10 3 5 8l5 5' }],
   chevronRight: [{ tag: 'path', d: 'M6 3l5 5-5 5' }],

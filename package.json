@@ -2,7 +2,7 @@
   "name": "git-repo-and-branch-explorer",
   "displayName": "Git Repo & Branch Explorer",
   "description": "Visual Studio-style Git Repository explorer: branch/remote/tag tree in the Activity Bar, multi-lane SVG commit graph and history timeline in the editor, file diff inspection, and GitHub/Git Graph integration.",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "publisher": "juddersoft",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -94,6 +94,11 @@
     "configuration": {
       "title": "Git Repo & Branch Explorer",
       "properties": {
+        "gitRepoAndBranchExplorer.workspaceRoot": {
+          "type": "string",
+          "default": "",
+          "description": "Optional parent folder path scanned shallowly (up to 2 levels deep) to discover additional Git repositories under Repos:."
+        },
         "gitRepoAndBranchExplorer.blame.enabled": {
           "type": "boolean",
           "default": true,
