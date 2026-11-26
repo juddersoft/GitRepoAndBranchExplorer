@@ -1,6 +1,8 @@
-import type { CommitNode, RepoSnapshot, WorktreeInfo } from '../../types/git';
+import type { CommitNode, RepoSnapshot, StashInfo, WorktreeInfo } from '../../types/git';
+import type { BranchInfo } from '../../types/git';
 import type { TrackingIndicatorOrder } from '../../types/messages';
 import { planTrackedFetch } from '../../git/trackedFetch';
+import { parseUpstreamRef } from '../../git/remoteUrlBuilder';
 import type { ExplorerUiState, RefTarget } from './state';
 import { getHeadHash, isAncestorOfHead } from './state';
 
@@ -30,6 +32,11 @@ export type MenuActionId =
   | 'openWorktree'
   | 'removeWorktree'
   | 'copyWorktreePath'
+  | 'stashChanges'
+  | 'inspectStash'
+  | 'applyStash'
+  | 'popStash'
+  | 'dropStash'
   | 'cherryPick'
   | 'revert'
   | 'revertMerge'
@@ -60,6 +67,31 @@ const SEPARATOR: MenuEntry = { kind: 'separator' };
 /** First reason an action cannot run, in priority order; `undefined` means it is available. */
 function firstReason(...reasons: Array<string | false | undefined>): string | undefined {
   return reasons.find((reason): reason is string => typeof reason === 'string');
+}
+
+/** Resolve a local or remote branch to its remote branch and return a matching default branch. */
+export function resolveDefaultBranch(snapshot: RepoSnapshot, branch: BranchInfo): string | undefined {
+  let remoteName: string | null;
+  let remoteBranch: string | null;
+  if (branch.isRemote) {
+    remoteName = branch.remoteName;
+    remoteBranch = branch.displayName;
+  } else {
+    const remoteNames = [
+      ...new Set([
+        ...(snapshot.remotes ?? []),
+        ...snapshot.remoteGroups.map((group) => group.remoteName),
+      ]),
+    ];
+    const upstream = branch.upstream ? parseUpstreamRef(branch.upstream, remoteNames) : null;
+    remoteName = upstream?.remoteName ?? null;
+    remoteBranch = upstream?.remoteBranch ?? null;
+  }
+  if (!remoteName || !remoteBranch) {
+    return undefined;
+  }
+  const remote = snapshot.remoteGroups.find((group) => group.remoteName === remoteName);
+  return remote?.defaultBranch === remoteBranch ? remote.defaultBranch : undefined;
 }
 
 /** Why Pull/Push cannot run for the checked-out branch; `undefined` when allowed (push may publish a new upstream). */
@@ -117,6 +149,13 @@ export function buildRefMenu(snapshot: RepoSnapshot, state: ExplorerUiState, tar
     const remoteWebReason = state.integrations.remoteWebUrl
       ? undefined
       : 'This repository has no supported remote web URL.';
+    const defaultBranch = target.branch
+      ? resolveDefaultBranch(snapshot, target.branch)
+      : undefined;
+    const createPrReason = remoteWebReason
+      ?? (defaultBranch
+        ? `Cannot create a pull request from the default branch (${defaultBranch}).`
+        : undefined);
     return [
       item('checkoutRemote', 'Check Out as Local Tracking Branch\u2026', firstReason(busy)),
       SEPARATOR,
@@ -130,7 +169,7 @@ export function buildRefMenu(snapshot: RepoSnapshot, state: ExplorerUiState, tar
       SEPARATOR,
       item('fetch', 'Fetch', firstReason(busy)),
       SEPARATOR,
-      item('createPrInBrowser', 'Create Pull Request in Browser', remoteWebReason),
+      item('createPrInBrowser', 'Create Pull Request in Browser', createPrReason),
       item('openBranchInBrowser', 'Open Branch in Browser', remoteWebReason),
     ];
   }
@@ -141,6 +180,18 @@ export function buildRefMenu(snapshot: RepoSnapshot, state: ExplorerUiState, tar
     !hasUpstream && 'No upstream branch is configured.',
     branch?.upstreamGone === true && `Upstream ${branch.upstream ?? ''} no longer exists on the remote.`,
     !state.integrations.remoteWebUrl && 'This repository has no supported remote web URL.',
+  );
+  const defaultBranch = !trackedWebReason && branch
+    ? resolveDefaultBranch(snapshot, branch)
+    : undefined;
+  const createPrReason = trackedWebReason
+    ?? (defaultBranch
+      ? `Cannot create a pull request from the default branch (${defaultBranch}).`
+      : undefined);
+  const pushAndOpenPrReason = firstReason(
+    busy,
+    !state.integrations.remoteWebUrl && 'This repository has no supported remote web URL.',
+    defaultBranch && `Cannot create a pull request from the default branch (${defaultBranch}).`,
   );
   return [
     item(
@@ -162,17 +213,22 @@ export function buildRefMenu(snapshot: RepoSnapshot, state: ExplorerUiState, tar
     item(
       'pushAndOpenPr',
       'Push and Open PR in Browser',
-      firstReason(busy, !state.integrations.remoteWebUrl && 'This repository has no supported remote web URL.'),
+      pushAndOpenPrReason,
     ),
     item('fetch', 'Fetch', firstReason(busy)),
     SEPARATOR,
-    item('createPrInBrowser', 'Create Pull Request in Browser', trackedWebReason),
+    item('createPrInBrowser', 'Create Pull Request in Browser', createPrReason),
     item('openBranchInBrowser', 'Open Branch in Browser', trackedWebReason),
     SEPARATOR,
     createBranch,
     ...(!isCheckedOut && !isCheckedOutInOtherWorktree
       ? [item('createWorktree', 'Create Worktree…', firstReason(busy))]
       : []),
+    item(
+      'stashChanges',
+      'Stash Changes...',
+      firstReason(busy, !branch?.isCurrent && 'Only available on the checked-out branch.'),
+    ),
     item('renameBranch', 'Rename Branch\u2026', firstReason(busy)),
     item(
       'untrackBranch',
@@ -218,6 +274,17 @@ export function buildRepoMenu(
     noBranch,
     !state.integrations.remoteWebUrl && 'This repository has no supported remote web URL.',
   );
+  const defaultBranch = !webReason && current
+    ? resolveDefaultBranch(snapshot, current)
+    : undefined;
+  const createPrReason = webReason
+    ?? (defaultBranch
+      ? `Cannot create a pull request from the default branch (${defaultBranch}).`
+      : undefined);
+  const pushAndOpenPrReason = webReason
+    ?? (defaultBranch
+      ? `Cannot create a pull request from the default branch (${defaultBranch}).`
+      : undefined);
 
   return [
     ...(!hasRemotes
@@ -226,8 +293,8 @@ export function buildRepoMenu(
     item('fetchTracked', 'Fetch', firstReason(busy, nothingToFetch && 'No local branch tracks a remote branch.')),
     item('pull', 'Pull', pull),
     item('push', current?.upstream ? 'Push' : 'Publish Branch', push),
-    item('pushAndOpenPr', 'Push and Open PR in Browser', webReason),
-    item('createPrInBrowser', 'Create Pull Request in Browser', webReason),
+    item('pushAndOpenPr', 'Push and Open PR in Browser', pushAndOpenPrReason),
+    item('createPrInBrowser', 'Create Pull Request in Browser', createPrReason),
     item(
       'openRepoInBrowser',
       'Open Repository in Browser',
@@ -236,6 +303,7 @@ export function buildRepoMenu(
     SEPARATOR,
     item('newBranch', 'New Branch\u2026', firstReason(busy)),
     item('createWorktree', 'New Worktree\u2026', firstReason(busy)),
+    item('stashChanges', 'Stash Changes...', firstReason(busy)),
     SEPARATOR,
     item('refresh', 'Refresh'),
   ];
@@ -259,6 +327,18 @@ export function buildWorktreeMenu(worktree: WorktreeInfo): MenuEntry[] {
           ? 'Cannot remove the currently open worktree'
           : undefined,
     ),
+  ];
+}
+
+export function buildStashMenu(stash: StashInfo, state: ExplorerUiState): MenuEntry[] {
+  const disabled = state.isBusy ? BUSY_REASON : undefined;
+  return [
+    item('inspectStash', 'Inspect Stash'),
+    SEPARATOR,
+    item('applyStash', 'Apply Stash', disabled),
+    item('popStash', 'Pop Stash', disabled),
+    SEPARATOR,
+    item('dropStash', 'Drop Stash\u2026', disabled),
   ];
 }
 

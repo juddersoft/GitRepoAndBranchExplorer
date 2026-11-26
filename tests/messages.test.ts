@@ -91,6 +91,85 @@ describe('gitAction validation', () => {
   });
 });
 
+describe('stash message validation', () => {
+  it('accepts all five strict stash messages', () => {
+    expect(isWebviewToExtensionMessage({ type: 'stashChanges' })).toBe(true);
+    expect(isWebviewToExtensionMessage({ type: 'inspectStash', ref: 'stash@{0}', hash: HASH })).toBe(true);
+    for (const type of ['applyStash', 'popStash', 'dropStash'] as const) {
+      expect(isWebviewToExtensionMessage({ type, ref: 'stash@{12}' })).toBe(true);
+    }
+  });
+
+  it('rejects unsafe refs, invalid inspect hashes, and missing fields', () => {
+    for (const ref of ['stash', 'stash@{-1}', 'stash@{x}', '--all', ' stash@{0}', 'stash@{0} ']) {
+      expect(isWebviewToExtensionMessage({ type: 'applyStash', ref })).toBe(false);
+    }
+    expect(isWebviewToExtensionMessage({ type: 'inspectStash', ref: 'stash@{0}', hash: HASH.slice(0, 8) })).toBe(false);
+    expect(isWebviewToExtensionMessage({ type: 'inspectStash', ref: 'stash@{0}' })).toBe(false);
+    expect(isWebviewToExtensionMessage({ type: 'dropStash' })).toBe(false);
+  });
+
+  it('rejects unexpected and prototype-pollution properties on every stash message', () => {
+    const messages = [
+      { type: 'stashChanges' },
+      { type: 'inspectStash', ref: 'stash@{0}', hash: HASH },
+      { type: 'applyStash', ref: 'stash@{0}' },
+      { type: 'popStash', ref: 'stash@{0}' },
+      { type: 'dropStash', ref: 'stash@{0}' },
+    ];
+    for (const message of messages) {
+      expect(isWebviewToExtensionMessage({ ...message, extra: true })).toBe(false);
+      for (const key of ['__proto__', 'constructor', 'prototype']) {
+        const polluted = JSON.parse(JSON.stringify(message).replace(/}$/, `,"${key}":{}}`)) as unknown;
+        expect(isWebviewToExtensionMessage(polluted), `${message.type}.${key}`).toBe(false);
+      }
+    }
+  });
+});
+
+describe('stash snapshot validation', () => {
+  const snapshot = (stashes: unknown[]): unknown => ({
+    type: 'repoSnapshot',
+    payload: {
+      repoName: 'repo',
+      repoRoot: '/repo',
+      currentBranch: 'main',
+      isDetachedHead: false,
+      localBranches: [],
+      remoteGroups: [],
+      worktrees: [],
+      stashes,
+      tags: [],
+      commits: [],
+      hasMoreCommits: false,
+    },
+  });
+  const stash = {
+    index: 0,
+    ref: 'stash@{0}',
+    hash: HASH,
+    message: 'saved work',
+    timestamp: 1700000000,
+  };
+
+  it('accepts valid stash entries and requires the stash list', () => {
+    expect(isExtensionToWebviewMessage(snapshot([stash]))).toBe(true);
+    expect(isExtensionToWebviewMessage(snapshot([]))).toBe(true);
+    const withoutStashes = snapshot([]);
+    delete (withoutStashes as { payload: { stashes?: unknown[] } }).payload.stashes;
+    expect(isExtensionToWebviewMessage(withoutStashes)).toBe(true);
+  });
+
+  it('rejects malformed, mismatched and polluted stash entries', () => {
+    expect(isExtensionToWebviewMessage(snapshot([{ ...stash, ref: 'stash@{1}' }]))).toBe(false);
+    expect(isExtensionToWebviewMessage(snapshot([{ ...stash, hash: 'short' }]))).toBe(false);
+    expect(isExtensionToWebviewMessage(snapshot([{ ...stash, timestamp: -1 }]))).toBe(false);
+    expect(isExtensionToWebviewMessage(snapshot([JSON.parse(
+      `{"index":0,"ref":"stash@{0}","hash":"${HASH}","message":"saved","timestamp":1,"__proto__":{}}`,
+    )]))).toBe(false);
+  });
+});
+
 describe('createBranchAtRef validation', () => {
   const message = (startPoint: unknown): unknown => ({ type: 'createBranchAtRef', payload: { startPoint } });
 

@@ -16,8 +16,11 @@ import {
   parseDiffTreeOutput,
   parseForEachRefOutput,
   parseGitLogOutput,
+  parsePorcelainStatusZ,
+  parseStashListOutput,
   parseUpstreamTrack,
   parseWorktreeListPorcelain,
+  validateStashRef,
   validateRevSpec,
   WORKTREE_GIT_TIMEOUT_MS,
 } from '../src/git/gitService';
@@ -101,6 +104,100 @@ describe('parseUpstreamTrack', () => {
     ['', { ahead: 0, behind: 0, upstreamGone: false }],
   ])('parses %j', (track, expected) => {
     expect(parseUpstreamTrack(track)).toEqual(expected);
+  });
+
+  describe('parsePorcelainStatusZ', () => {
+    it('parses modified, added, deleted and untracked paths with spaces', () => {
+      const raw = [
+        ' M modified file.txt',
+        'A  added file.txt',
+        ' D deleted file.txt',
+        '?? untracked file.txt',
+        '',
+      ].join('\0');
+      expect(parsePorcelainStatusZ(raw)).toEqual([
+        { path: 'modified file.txt', indexStatus: ' ', worktreeStatus: 'M', untracked: false },
+        { path: 'added file.txt', indexStatus: 'A', worktreeStatus: ' ', untracked: false },
+        { path: 'deleted file.txt', indexStatus: ' ', worktreeStatus: 'D', untracked: false },
+        { path: 'untracked file.txt', indexStatus: '?', worktreeStatus: '?', untracked: true },
+      ]);
+    });
+
+    it('consumes rename and copy original-path tokens without shifting later entries', () => {
+      const raw = [
+        'R  new name.txt',
+        'old name.txt',
+        'C  copied file.txt',
+        'source file.txt',
+        ' M after rename.txt',
+        '',
+      ].join('\0');
+      expect(parsePorcelainStatusZ(raw)).toEqual([
+        {
+          path: 'new name.txt',
+          indexStatus: 'R',
+          worktreeStatus: ' ',
+          untracked: false,
+          originalPath: 'old name.txt',
+        },
+        {
+          path: 'copied file.txt',
+          indexStatus: 'C',
+          worktreeStatus: ' ',
+          untracked: false,
+          originalPath: 'source file.txt',
+        },
+        { path: 'after rename.txt', indexStatus: ' ', worktreeStatus: 'M', untracked: false },
+      ]);
+    });
+  });
+
+  describe('parseStashListOutput', () => {
+    it('parses stash refs, hashes, messages and timestamps', () => {
+      const output = [
+        `${sha('A')}${FS}stash@{0}${FS}WIP on main: work${FS}1700000000`,
+        `${sha('b')}${FS}stash@{2}${FS}saved changes${FS}1699999999`,
+      ].join('\n');
+      expect(parseStashListOutput(output)).toEqual([
+        {
+          index: 0,
+          ref: 'stash@{0}',
+          hash: sha('a'),
+          message: 'WIP on main: work',
+          timestamp: 1700000000,
+        },
+        {
+          index: 2,
+          ref: 'stash@{2}',
+          hash: sha('b'),
+          message: 'saved changes',
+          timestamp: 1699999999,
+        },
+      ]);
+      expect(parseStashListOutput('')).toEqual([]);
+    });
+
+    it('rejects malformed stash refs, hashes and timestamps', () => {
+      for (const output of [
+        `${sha('a')}${FS}main${FS}message${FS}1700000000`,
+        `${sha('a')}${FS}stash@{-1}${FS}message${FS}1700000000`,
+        `bad${FS}stash@{0}${FS}message${FS}1700000000`,
+        `${sha('a')}${FS}stash@{0}${FS}message${FS}not-a-time`,
+      ]) {
+        expect(() => parseStashListOutput(output)).toThrow(/invalid stash/i);
+      }
+    });
+  });
+
+  describe('validateStashRef', () => {
+    it.each(['stash@{0}', 'stash@{1}', 'stash@{1234567890}'])('accepts %s', (ref) => {
+      expect(validateStashRef(ref)).toBe(ref);
+    });
+
+    it.each(['', 'stash', 'stash@{-1}', 'stash@{x}', 'stash@{ 1}', ' stash@{0}', 'stash@{0} ', '--all', '-c'])(
+      'rejects %j',
+      (ref) => expect(() => validateStashRef(ref)).toThrow(/stash reference/i),
+    );
   });
 
   describe('parseWorktreeListPorcelain', () => {
@@ -217,6 +314,7 @@ describe('parseForEachRefOutput', () => {
     expect(result.remoteGroups.map((g) => g.remoteName)).toEqual(['origin', 'upstream']);
     const origin = result.remoteGroups[0];
     expect(origin.branches.map((b) => b.name)).toEqual(['origin/main', 'origin/featurebranch3']);
+    expect(origin.defaultBranch).toBe('main');
     expect(origin.branches[1]).toEqual({
       name: 'origin/featurebranch3',
       displayName: 'featurebranch3',
@@ -230,6 +328,42 @@ describe('parseForEachRefOutput', () => {
       behind: 0,
       upstreamGone: false,
     });
+  });
+
+  it('parses refs/remotes/origin/HEAD symref as the remote default branch', () => {
+    const parsed = parseForEachRefOutput(records(
+      [' ', 'refs/remotes/origin/HEAD', 'origin/HEAD', sha('a'), '', '', '', 'refs/remotes/origin/main'],
+      [' ', 'refs/remotes/origin/main', 'origin/main', sha('a'), '', ''],
+    ));
+    expect(parsed.remoteGroups).toEqual([
+      {
+        remoteName: 'origin',
+        branches: [expect.objectContaining({ name: 'origin/main', displayName: 'main' })],
+        defaultBranch: 'main',
+      },
+    ]);
+  });
+
+  it('falls back to main or master when HEAD symref is absent', () => {
+    const mainOnly = parseForEachRefOutput(records(
+      [' ', 'refs/remotes/origin/main', 'origin/main', sha('a'), '', ''],
+      [' ', 'refs/remotes/origin/feature', 'origin/feature', sha('b'), '', ''],
+    ));
+    expect(mainOnly.remoteGroups[0].defaultBranch).toBe('main');
+
+    const masterOnly = parseForEachRefOutput(records(
+      [' ', 'refs/remotes/origin/master', 'origin/master', sha('a'), '', ''],
+      [' ', 'refs/remotes/origin/feature', 'origin/feature', sha('b'), '', ''],
+    ));
+    expect(masterOnly.remoteGroups[0].defaultBranch).toBe('master');
+  });
+
+  it('leaves defaultBranch undefined when fallback is ambiguous', () => {
+    const parsed = parseForEachRefOutput(records(
+      [' ', 'refs/remotes/origin/main', 'origin/main', sha('a'), '', ''],
+      [' ', 'refs/remotes/origin/master', 'origin/master', sha('b'), '', ''],
+    ));
+    expect(parsed.remoteGroups[0].defaultBranch).toBeUndefined();
   });
 
   it('parses tags and peels annotated tags to their commit', () => {
@@ -658,6 +792,7 @@ describe('GitService operations (fake runner)', () => {
       {
         remoteName: 'origin',
         branches: [expect.objectContaining({ name: 'origin/main' })],
+        defaultBranch: 'main',
         url: 'git@github.com:owner/repo.git',
         destinationKind: 'hosted',
         providerName: 'GitHub',
@@ -922,6 +1057,61 @@ describe('GitService operations (fake runner)', () => {
     ]);
   });
 
+  it('lists, applies, pops and drops only validated stash refs', async () => {
+    const list = `${sha('a')}${FS}stash@{3}${FS}saved work${FS}1700000000\n`;
+    const { calls, service } = recorder((args) => args[0] === 'stash' && args[1] === 'list' ? list : '');
+    await expect(service.listStashes(ROOT)).resolves.toEqual([
+      { index: 3, ref: 'stash@{3}', hash: sha('a'), message: 'saved work', timestamp: 1700000000 },
+    ]);
+    await service.applyStash(ROOT, 'stash@{3}');
+    await service.popStash(ROOT, 'stash@{3}');
+    await service.dropStash(ROOT, 'stash@{3}');
+    expect(calls.map((call) => call.args)).toEqual([
+      ['stash', 'list', '--format=%H%x1f%gd%x1f%gs%x1f%ct'],
+      ['stash', 'apply', 'stash@{3}'],
+      ['stash', 'pop', 'stash@{3}'],
+      ['stash', 'drop', 'stash@{3}'],
+    ]);
+    expect(calls[1]?.timeoutMs).toBe(WORKTREE_GIT_TIMEOUT_MS);
+    expect(calls[2]?.timeoutMs).toBe(WORKTREE_GIT_TIMEOUT_MS);
+    const before = calls.length;
+    await expect(service.applyStash(ROOT, '--all')).rejects.toThrow(/stash reference/i);
+    expect(calls).toHaveLength(before);
+  });
+
+  it('pushes tracked-only or untracked stashes with an optional sanitized message', async () => {
+    const { calls, service } = recorder();
+    await service.stashPush(ROOT);
+    await service.stashPush(ROOT, { includeUntracked: true, message: '  saved work  ' });
+    expect(calls.map((call) => call.args)).toEqual([
+      ['stash', 'push'],
+      ['stash', 'push', '-u', '-m', 'saved work'],
+    ]);
+    await expect(service.stashPush(ROOT, { message: 'bad\0message' })).rejects.toThrow(/control/i);
+    expect(calls).toHaveLength(2);
+  });
+
+  it('passes validated selective stash paths after -- in the required order', async () => {
+    const { calls, service } = recorder();
+    await service.stashPush(ROOT, {
+      includeUntracked: true,
+      message: 'selected work',
+      paths: ['src/a b.ts', 'untracked.txt'],
+    });
+    expect(calls[0]?.args).toEqual([
+      'stash', 'push', '-u', '-m', 'selected work', '--', 'src/a b.ts', 'untracked.txt',
+    ]);
+  });
+
+  it.each(['../escape', '..\\escape', 'src/../../escape', '/absolute', String.raw`C:\absolute`, '\0bad', '-option'])(
+    'rejects unsafe selective stash path %j',
+    async (filePath) => {
+      const { calls, service } = recorder();
+      await expect(service.stashPush(ROOT, { paths: [filePath] })).rejects.toThrow(/invalid stash path/i);
+      expect(calls).toEqual([]);
+    },
+  );
+
   it('resolves commit hashes and safely renames local branches', async () => {
     const { calls, service } = recorder((args) => args[0] === 'rev-parse' ? HASH.toUpperCase() : '');
     await expect(service.resolveCommitHash(ROOT, 'HEAD')).resolves.toBe(HASH);
@@ -1050,6 +1240,32 @@ describe.skipIf(!isGitAvailable())('GitService against real repositories', () =>
     expect(snapshot.isDetachedHead).toBe(false);
     expect(snapshot.commits).toEqual([]);
     expect(snapshot.localBranches).toEqual([]);
+    expect(snapshot.stashes).toEqual([]);
+  });
+
+  it('includes stashes in snapshots and supports apply and drop', async () => {
+    const dir = makeTempDir();
+    await git(dir, 'init', '-b', 'main');
+    fs.writeFileSync(path.join(dir, 'tracked.txt'), 'initial\n');
+    await git(dir, 'add', 'tracked.txt');
+    await git(dir, 'commit', '-m', 'Initial commit');
+    fs.writeFileSync(path.join(dir, 'tracked.txt'), 'stashed\n');
+    await service.stashChanges(dir, 'saved for later');
+
+    const snapshot = await service.getRepoSnapshot(dir);
+    expect(snapshot.stashes).toHaveLength(1);
+    expect(snapshot.stashes[0]).toMatchObject({
+      index: 0,
+      ref: 'stash@{0}',
+      message: 'On main: saved for later',
+    });
+    expect(snapshot.stashes[0]?.hash).toMatch(/^[0-9a-f]{40}$/);
+    expect(snapshot.stashes[0]?.timestamp).toBeGreaterThan(0);
+
+    await service.applyStash(dir, 'stash@{0}');
+    expect(fs.readFileSync(path.join(dir, 'tracked.txt'), 'utf8').replace(/\r\n/g, '\n')).toBe('stashed\n');
+    await service.dropStash(dir, 'stash@{0}');
+    expect(await service.listStashes(dir)).toEqual([]);
   });
 
   it('reads branches, annotated tags, unicode subjects and detached HEAD', async () => {

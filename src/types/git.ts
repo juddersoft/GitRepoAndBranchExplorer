@@ -34,9 +34,31 @@ export interface WorktreeInfo {
   isPrunable: boolean;
 }
 
+export interface StashInfo {
+  /** Zero-based stash stack index. */
+  index: number;
+  /** Reflog selector, e.g. `stash@{0}`. */
+  ref: string;
+  /** Full 40-character commit SHA. */
+  hash: string;
+  /** Stash subject / summary. */
+  message: string;
+  /** Unix epoch seconds. */
+  timestamp: number;
+}
+
+export interface WorkingTreeFile {
+  path: string;
+  indexStatus: string;
+  worktreeStatus: string;
+  untracked: boolean;
+  originalPath?: string;
+}
+
 export interface RemoteGroup {
   remoteName: string;
   branches: BranchInfo[];
+  defaultBranch?: string;
   url?: string;
   destinationKind?: 'hosted' | 'localPath' | 'other';
   providerName?: string;
@@ -114,6 +136,7 @@ export interface RepoSnapshot {
   remotes?: string[];
   remoteGroups: RemoteGroup[];
   worktrees: WorktreeInfo[];
+  stashes?: StashInfo[];
   tags: TagInfo[];
   commits: CommitNode[];
   hasMoreCommits: boolean;

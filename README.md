@@ -2,11 +2,16 @@
 
 A Visual Studio-unified **Git Repository** window, natively for VS Code, Cursor, Windsurf, and VSCodium.
 
-![Git Repo & Branch Explorer overview](https://raw.githubusercontent.com/juddersoft/GitRepoAndBranchExplorer/main/media/screenshots/hero-overview.png)
+![Git Repo & Branch Explorer unified repository view](https://raw.githubusercontent.com/juddersoft/GitRepoAndBranchExplorer/main/media/screenshots/hero-unified-view.png)
+
+*Unified repository timeline, branch tree, commit details, and Git context actions.*
 
 ## Key Highlights
 
 - Native Activity Bar sidebar plus a far-left, synchronized editor timeline.
+- Multi-repository workspace discovery with a **REPOS:** switcher and repository-aware blame and remote resolution.
+- Git Worktree management in the sidebar, including **WORKTREE** badges and a live-destination **Create Worktree** modal.
+- Stash browsing and management, with repository and branch-aware stash creation plus selective tracked/untracked stashing.
 - Hierarchical local and remote branch folders with optional, persisted folder branch counts.
 - Multi-lane SVG commit graph with draggable, persisted column widths and virtualized 500-commit background pagination.
 - Responsive **CHECKED OUT** pill that never obscures branch names.
@@ -14,7 +19,8 @@ A Visual Studio-unified **Git Repository** window, natively for VS Code, Cursor,
 - Safe Reset `--mixed` / `--hard` modes and Merge-Commit Revert `-m 1`.
 - Read-only commit inspection and trust-gated side-by-side `vscode.diff` views.
 - One-click **Open File** beside each changed file, while retaining the row's side-by-side diff action.
-- Git Graph plus GitHub, Azure DevOps, GitLab and Bitbucket browser integration.
+- Git Graph plus GitHub, GitHub Enterprise Cloud (`.ghe.com`), Azure DevOps, GitLab and Bitbucket browser integration.
+- Default-branch guards for **Create Pull Request in Browser** and **Push and Open PR in Browser**.
 - Cloud remotes use a sky-blue cloud, while local-drive remotes use a distinct drive icon, `(local)` marker and full-path tooltip.
 - Subtle inline Git blame and status-bar summaries, with an on-demand blame gutter and bounded, trust-gated caching.
 
@@ -22,9 +28,31 @@ A Visual Studio-unified **Git Repository** window, natively for VS Code, Cursor,
 
 ### Context menus
 
-![Contextual Git actions](https://raw.githubusercontent.com/juddersoft/GitRepoAndBranchExplorer/main/media/screenshots/context-menus.png)
+![Git branch context menu](https://raw.githubusercontent.com/juddersoft/GitRepoAndBranchExplorer/main/media/screenshots/branch-context-menu.png)
 
-Contextual Git actions include Merge-Commit Revert `-m 1` and guarded Reset `--mixed` / `--hard`.
+*Branch context actions include Merge, Rebase, Pull/Push, Worktree-aware operations, stash workflows, and guarded destructive actions.*
+
+![Commit row context menu](https://raw.githubusercontent.com/juddersoft/GitRepoAndBranchExplorer/main/media/screenshots/context-menus.png)
+
+*Commit-row actions include Copy Commit Hash, branch creation, Cherry-Pick, Revert, Git Graph, and browser integration.*
+
+### Multi-repository workspaces, worktrees and stashes
+
+![Multi-repository sidebar with worktrees and stashes](https://raw.githubusercontent.com/juddersoft/GitRepoAndBranchExplorer/main/media/screenshots/sidebar-worktrees-stashes.png)
+
+*The `REPOS:` switcher discovers repositories in the workspace; Worktrees and Stashes stay grouped by repository.*
+
+Use the **Create Worktree** action to add a linked checkout from the current repository.
+
+![Create Worktree modal](https://raw.githubusercontent.com/juddersoft/GitRepoAndBranchExplorer/main/media/screenshots/create-worktree-modal.png)
+
+*The Create Worktree modal validates the branch and destination, with a live preview and Open, Remove, and Copy Path actions for existing worktrees.*
+
+### Stash inspection
+
+![Stash inspection and context menu](https://raw.githubusercontent.com/juddersoft/GitRepoAndBranchExplorer/main/media/screenshots/stash-inspect-and-menu.png)
+
+*Inspect a stash in Commit Details, then Apply, Pop, or quietly Drop it from the stash menu.*
 
 ### Commit details and diffs
 
@@ -34,9 +62,13 @@ Commit Details and the Changed Files drawer support one-click **Open File** acce
 
 ### Git Blame & Visual Studio Annotate
 
-![Inline Git blame and hover](https://raw.githubusercontent.com/juddersoft/GitRepoAndBranchExplorer/main/media/screenshots/blame-inline-hover.png)
+![Inline Git blame](https://raw.githubusercontent.com/juddersoft/GitRepoAndBranchExplorer/main/media/screenshots/inline-blame.png)
 
-![File blame gutter (annotate)](https://raw.githubusercontent.com/juddersoft/GitRepoAndBranchExplorer/main/media/screenshots/blame-annotate-gutter.png)
+*Inline blame stays close to the active line and remains repository-aware in multi-repository workspaces.*
+
+![Git blame gutter annotations](https://raw.githubusercontent.com/juddersoft/GitRepoAndBranchExplorer/main/media/screenshots/blame-annotate-gutter.png)
+
+*The optional gutter view adds Visual Studio-style blame annotations beside the file, on demand.*
 
 Subtle active-line inline Git blame and a Status Bar summary can be toggled with **Toggle Inline Git Blame** and configured in Settings. The blame hover card provides **Reveal in Commit Timeline**, **Open File Diff**, **Copy Commit Hash**, and **Open on GitHub** (when a GitHub remote is available). Enable an on-demand **Toggle File Blame Gutter (Annotate)** from the Command Palette or editor right-click menu. This stays free of per-function CodeLens bloat, uses a bounded per-file LRU cache, and is gated by Workspace Trust.
 
@@ -58,6 +90,7 @@ Extension Git actions run only in trusted workspaces, with `protocol.ext.allow=n
 ## Features
 
 ### Branch, remote and tag tree in the Activity Bar
+- Workspace discovery adds a **REPOS:** switcher for repositories under the open workspace. Repository selection keeps timeline, branch, remote, worktree, stash and blame context synchronized, and blame hover plus hosted-remote links resolve against the repository that owns the open file.
 - Local branches, `remotes/<name>` groups and tags in one filterable tree, shown directly in the Primary Side Bar. A **Repos:** heading sits above the repository row (`<repo> (<branch>)`), and local branches are listed directly under **Branches**.
 - Local and remote branches containing `/` are organized into collapsible, alphabetically sorted folder trees with indent guides. Manual expansion is persisted, checked-out branch ancestors expand automatically, and the repository context menu can persistently show or hide folder branch counts.
 - Selecting a ref, isolating branches (eye button) and the busy status of Git operations are mirrored between the sidebar tree and the editor timeline.
@@ -76,6 +109,15 @@ Extension Git actions run only in trusted workspaces, with `protocol.ext.allow=n
 - Merge, Rebase and Delete are disabled for the checked-out branch or a detached HEAD; Pull is disabled without an upstream or for a branch that is not checked out; Cherry-Pick is disabled for commits already in the current history; merge commits cannot be cherry-picked or reverted from the view.
 - Rebase and Delete ask for confirmation. If a merge, rebase, cherry-pick or revert stops on conflicts, the error message tells you to resolve them in the Source Control view or abort in a terminal.
 
+### Git worktrees
+- The **Worktrees** sidebar section lists the main checkout and linked worktrees for the selected repository. Worktree branches use a **WORKTREE** badge so linked checkouts are easy to distinguish.
+- **Create Worktree** opens a modal with a live destination preview, branch selection or validation, and safe checkout behavior. Existing worktrees provide Open, Remove, and Copy Path actions.
+
+### Stash management
+- The **Stashes** sidebar section lists stashes for the selected repository. Use the repository context menu or the stash action on the checked-out branch to run **Stash Changes…**.
+- Stash creation supports tracked changes, untracked files with `-u`, and selective multi-file stashing. Apply, Pop, Inspect, and Drop actions are available; Drop confirms through a quiet action rather than a disruptive modal.
+- **Inspect Stash** in Commit Details shows the stash contents and changed files, making it possible to review, apply, pop, or drop the stash without leaving the timeline.
+
 ### Multi-lane SVG commit graph
 - The history table has **Branch / Tag**, **Graph**, **Message**, **Author**, **Date** and **ID** columns. Drag any column divider to resize it (double-click a divider to reset that column); widths are remembered.
 - Branches, merges and octopus merges are drawn as coloured lanes that stay readable on light and dark themes.
@@ -87,6 +129,11 @@ Extension Git actions run only in trusted workspaces, with `protocol.ext.allow=n
 ### Live Git actions
 - **Fetch** (all remotes, with prune), **Pull** and **Push** from the toolbar.
 - Pushing any local branch without an upstream (or with a deleted upstream) asks which remote to use and shows the exact hosted URL or local drive path before creating the remote branch. Renamed branches can publish the new name or continue pushing to the existing old upstream branch.
+
+![Resolve push when no remote branch exists](https://raw.githubusercontent.com/juddersoft/GitRepoAndBranchExplorer/main/media/screenshots/resolve_push_no_remote_branch.png)
+
+*When a branch has no remote branch yet, choose the remote and publish destination before pushing.*
+
 - Repositories with no remote, or a local-only remote, can be published through a silent guided flow that creates a Personal or Organization GitHub repository, creates a local bare remote on disk, or attaches an existing remote URL.
 - **Push and Open PR in Browser** opens a pre-filled pull-request page; regular feature-branch pushes offer the same action in a non-blocking notification.
 - **Create Branch** uses an in-webview dialog that validates the name as you type, offers checkout and remote-tracking options, and safely handles dirty working-tree changes.
@@ -98,7 +145,8 @@ Extension Git actions run only in trusted workspaces, with `protocol.ext.allow=n
 
 ### Git Graph and hosted-remote integration
 - **Open in Git Graph** appears when the [Git Graph](https://marketplace.visualstudio.com/items?itemName=mhutchie.git-graph) extension is installed.
-- Repository, branch and commit browser actions recognize GitHub, Azure DevOps, GitLab and Bitbucket SSH or HTTPS remotes. Pull-request actions open each provider's pre-filled creation page.
+- Repository, branch and commit browser actions recognize GitHub, GitHub Enterprise Cloud (`.ghe.com`), Azure DevOps, GitLab and Bitbucket SSH or HTTPS remotes. Pull-request actions open each provider's pre-filled creation page.
+- **Create Pull Request in Browser** and **Push and Open PR in Browser** warn and stop rather than opening a PR from the repository's default branch.
 - GitHub sign-in uses VS Code's built-in authentication; the extension never stores credentials.
 
 ### Auto-refresh

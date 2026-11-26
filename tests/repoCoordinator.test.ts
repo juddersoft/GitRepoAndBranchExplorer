@@ -26,11 +26,16 @@ const mocks = vi.hoisted(() => ({
   openExternal: vi.fn(),
   createBranch: vi.fn(),
   hasWorkingTreeChanges: vi.fn(),
+  getWorkingTreeFiles: vi.fn(),
   resolveCommitHash: vi.fn(),
   stashChanges: vi.fn(),
+  stashPush: vi.fn(),
   discardWorkingTreeChanges: vi.fn(),
   addWorktree: vi.fn(),
   removeWorktree: vi.fn(),
+  applyStash: vi.fn(),
+  popStash: vi.fn(),
+  dropStash: vi.fn(),
   clipboardWriteText: vi.fn(),
   renameLocalBranch: vi.fn(),
   unsetBranchUpstream: vi.fn(),
@@ -130,11 +135,16 @@ vi.mock('../src/git/gitService', () => ({
     pushToRemoteBranch = mocks.pushToRemoteBranch;
     createBranch = mocks.createBranch;
     hasWorkingTreeChanges = mocks.hasWorkingTreeChanges;
+    getWorkingTreeFiles = mocks.getWorkingTreeFiles;
     resolveCommitHash = mocks.resolveCommitHash;
     stashChanges = mocks.stashChanges;
+    stashPush = mocks.stashPush;
     discardWorkingTreeChanges = mocks.discardWorkingTreeChanges;
     addWorktree = mocks.addWorktree;
     removeWorktree = mocks.removeWorktree;
+    applyStash = mocks.applyStash;
+    popStash = mocks.popStash;
+    dropStash = mocks.dropStash;
     renameLocalBranch = mocks.renameLocalBranch;
     unsetBranchUpstream = mocks.unsetBranchUpstream;
     addRemote = mocks.addRemote;
@@ -205,6 +215,7 @@ function makeSnapshot(branches: BranchInfo[]): RepoSnapshot {
     localBranches: branches,
     remoteGroups: [],
     worktrees: [],
+    stashes: [],
     tags: [{ name: 'v1', fullName: 'refs/tags/v1', targetHash: sha('a') }],
     commits: [],
     hasMoreCommits: false,
@@ -290,12 +301,17 @@ describe('RepoCoordinator', () => {
     mocks.executeCommand.mockResolvedValue(undefined);
     mocks.checkoutBranch.mockResolvedValue(undefined);
     mocks.hasWorkingTreeChanges.mockResolvedValue(false);
+    mocks.getWorkingTreeFiles.mockResolvedValue([]);
     mocks.resolveCommitHash.mockResolvedValue(sha('a'));
     mocks.createBranch.mockResolvedValue(undefined);
     mocks.addWorktree.mockResolvedValue(undefined);
     mocks.removeWorktree.mockResolvedValue(undefined);
+    mocks.applyStash.mockResolvedValue(undefined);
+    mocks.popStash.mockResolvedValue(undefined);
+    mocks.dropStash.mockResolvedValue(undefined);
     mocks.clipboardWriteText.mockResolvedValue(undefined);
     mocks.stashChanges.mockResolvedValue(undefined);
+    mocks.stashPush.mockResolvedValue(undefined);
     mocks.discardWorkingTreeChanges.mockResolvedValue(undefined);
     mocks.renameLocalBranch.mockResolvedValue(undefined);
     mocks.addRemote.mockResolvedValue(undefined);
@@ -1589,6 +1605,28 @@ describe('RepoCoordinator', () => {
       }));
     });
 
+    it('blocks Push and Open PR before pushing the remote default branch', async () => {
+      mocks.getRepoSnapshot.mockResolvedValue({
+        ...snapshotWith([{ ...branch('main', true), upstream: 'origin/main' }]),
+        remoteGroups: [{
+          remoteName: 'origin',
+          branches: [],
+          defaultBranch: 'main',
+        }],
+      });
+      await openBoth();
+      coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'pushAndOpenPr', target: 'main' },
+      });
+      await vi.waitFor(() => expect(mocks.showInformationMessage).toHaveBeenCalledWith(
+        'Cannot create a pull request from the default branch (main).',
+      ));
+      expect(mocks.pushCurrentBranch).not.toHaveBeenCalled();
+      expect(mocks.pushToRemoteBranch).not.toHaveBeenCalled();
+      expect(mocks.openExternal).not.toHaveBeenCalled();
+    });
+
     it('offers Create PR after a regular feature push but not for main', async () => {
       mocks.getRepoSnapshot.mockResolvedValue(snapshotWith([
         { ...branch('feature/pr', true), upstream: 'origin/feature/pr' },
@@ -1647,6 +1685,59 @@ describe('RepoCoordinator', () => {
         `https://gitlab.com/group/repo/-/commit/${sha('a')}`,
         'https://gitlab.com/group/repo/-/merge_requests/new?merge_request%5Bsource_branch%5D=feature%2Fweb',
       ]);
+    });
+
+    it('blocks Create PR for a remote default branch but opens it for feature branches', async () => {
+      const mainLocal = { ...branch('main', true), upstream: 'origin/main' };
+      const featureLocal = { ...branch('feature/foo', false), upstream: 'origin/feature/foo' };
+      const mainRemote: BranchInfo = {
+        ...mainLocal,
+        name: 'origin/main',
+        displayName: 'main',
+        fullName: 'refs/remotes/origin/main',
+        isCurrent: false,
+        isRemote: true,
+        remoteName: 'origin',
+        upstream: null,
+      };
+      const featureRemote: BranchInfo = {
+        ...featureLocal,
+        name: 'origin/feature/foo',
+        displayName: 'feature/foo',
+        fullName: 'refs/remotes/origin/feature/foo',
+        isCurrent: false,
+        isRemote: true,
+        remoteName: 'origin',
+        upstream: null,
+      };
+      const snap = snapshotWith([mainLocal, featureLocal]);
+      snap.remoteGroups = [{
+        remoteName: 'origin',
+        branches: [mainRemote, featureRemote],
+        defaultBranch: 'main',
+      }];
+      mocks.getRepoSnapshot.mockResolvedValue(snap);
+      mocks.getRemoteUrl.mockResolvedValue('https://github.com/owner/repo');
+      await openBoth();
+
+      coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'createPrInBrowser', target: 'origin/main' },
+      });
+      await vi.waitFor(() => expect(mocks.showInformationMessage).toHaveBeenCalledWith(
+        'Cannot create a pull request from the default branch (main).',
+      ));
+      expect(mocks.openExternal).not.toHaveBeenCalled();
+
+      vi.clearAllMocks();
+      coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'createPrInBrowser', target: 'origin/feature/foo' },
+      });
+      await vi.waitFor(() => expect(mocks.openExternal).toHaveBeenCalledWith({
+        url: 'https://github.com/owner/repo/compare/feature/foo?expand=1',
+        strict: true,
+      }));
     });
   });
 
@@ -1709,6 +1800,222 @@ describe('RepoCoordinator', () => {
       expect.objectContaining({ fsPath: linkedPath }),
       { forceNewWindow: true },
     );
+  });
+
+  it('reports a clean working tree without prompting or pushing a stash', async () => {
+    await openBoth();
+    coordinator.handleMessage('sidebar', { type: 'stashChanges' });
+    await vi.waitFor(() => expect(mocks.showInformationMessage).toHaveBeenCalledWith('No local changes to stash.'));
+    expect(mocks.showQuickPick).not.toHaveBeenCalled();
+    expect(mocks.stashPush).not.toHaveBeenCalled();
+  });
+
+  it('stashes dirty tracked or untracked changes with the selected scope and message', async () => {
+    await openBoth();
+    mocks.hasWorkingTreeChanges.mockResolvedValue(true);
+    mocks.showQuickPick.mockResolvedValueOnce({ label: 'Stash including untracked files (-u)' });
+    mocks.showInputBox.mockResolvedValueOnce('saved work');
+    coordinator.handleMessage('sidebar', { type: 'stashChanges' });
+    await vi.waitFor(() => expect(mocks.stashPush).toHaveBeenCalledWith(
+      '/repo',
+      { includeUntracked: true, message: 'saved work' },
+    ));
+    expect(mocks.showInformationMessage).toHaveBeenCalledWith('Changes stashed.');
+
+    mocks.showQuickPick.mockResolvedValueOnce({ label: 'Stash tracked changes' });
+    mocks.showInputBox.mockResolvedValueOnce('');
+    coordinator.handleMessage('sidebar', { type: 'stashChanges' });
+    await vi.waitFor(() => expect(mocks.stashPush).toHaveBeenLastCalledWith('/repo', { includeUntracked: false }));
+  });
+
+  it('selectively stashes picked files and automatically includes untracked files', async () => {
+    await openBoth();
+    mocks.hasWorkingTreeChanges.mockResolvedValue(true);
+    const renamed = {
+      path: 'new name.ts',
+      originalPath: 'old name.ts',
+      indexStatus: 'R',
+      worktreeStatus: ' ',
+      untracked: false,
+    };
+    const untracked = {
+      path: 'notes.txt',
+      indexStatus: '?',
+      worktreeStatus: '?',
+      untracked: true,
+    };
+    const modified = {
+      path: 'other.ts',
+      indexStatus: ' ',
+      worktreeStatus: 'M',
+      untracked: false,
+    };
+    mocks.getWorkingTreeFiles.mockResolvedValue([renamed, untracked, modified]);
+    mocks.showQuickPick
+      .mockResolvedValueOnce({ label: 'Select files to stash...' })
+      .mockResolvedValueOnce([
+        { label: renamed.path, file: renamed },
+        { label: untracked.path, file: untracked },
+      ]);
+    mocks.showInputBox.mockResolvedValueOnce('selected work');
+
+    coordinator.handleMessage('sidebar', { type: 'stashChanges' });
+    await vi.waitFor(() => expect(mocks.stashPush).toHaveBeenCalledWith('/repo', {
+      includeUntracked: true,
+      message: 'selected work',
+      paths: ['old name.ts', 'new name.ts', 'notes.txt'],
+    }));
+    expect(mocks.showQuickPick).toHaveBeenNthCalledWith(
+      2,
+      expect.arrayContaining([
+        expect.objectContaining({ label: renamed.path, description: 'Renamed' }),
+        expect.objectContaining({ label: untracked.path, description: 'Untracked' }),
+      ]),
+      expect.objectContaining({ canPickMany: true, placeHolder: 'Select files to stash' }),
+    );
+  });
+
+  it('cancels selective stash cleanly for an empty or dismissed file selection', async () => {
+    await openBoth();
+    mocks.hasWorkingTreeChanges.mockResolvedValue(true);
+    const file = {
+      path: 'modified.ts',
+      indexStatus: ' ',
+      worktreeStatus: 'M',
+      untracked: false,
+    };
+    mocks.getWorkingTreeFiles.mockResolvedValue([file]);
+    mocks.showQuickPick
+      .mockResolvedValueOnce({ label: 'Select files to stash...' })
+      .mockResolvedValueOnce([]);
+    coordinator.handleMessage('sidebar', { type: 'stashChanges' });
+    await vi.waitFor(() => expect(mocks.showQuickPick).toHaveBeenCalledTimes(2));
+    expect(mocks.showInputBox).not.toHaveBeenCalled();
+    expect(mocks.stashPush).not.toHaveBeenCalled();
+
+    mocks.showQuickPick
+      .mockResolvedValueOnce({ label: 'Select files to stash...' })
+      .mockResolvedValueOnce(undefined);
+    coordinator.handleMessage('sidebar', { type: 'stashChanges' });
+    await vi.waitFor(() => expect(mocks.getWorkingTreeFiles).toHaveBeenCalledTimes(2));
+    expect(mocks.stashPush).not.toHaveBeenCalled();
+  });
+
+  it('does not run stash workflows in an untrusted workspace', async () => {
+    await openBoth();
+    mocks.isTrusted = false;
+    mocks.hasWorkingTreeChanges.mockResolvedValue(true);
+    coordinator.handleMessage('sidebar', { type: 'stashChanges' });
+    coordinator.handleMessage('sidebar', { type: 'applyStash', ref: 'stash@{0}' });
+    expect(mocks.hasWorkingTreeChanges).not.toHaveBeenCalled();
+    expect(mocks.stashPush).not.toHaveBeenCalled();
+    expect(mocks.applyStash).not.toHaveBeenCalled();
+  });
+
+  it('inspects a stash by validated snapshot SHA through the outside-graph pipeline', async () => {
+    const hash = sha('c');
+    mocks.getRepoSnapshot.mockResolvedValue({
+      ...MAIN_AND_FEATURE(),
+      stashes: [{
+        index: 0,
+        ref: 'stash@{0}',
+        hash,
+        message: 'saved work',
+        timestamp: 1700000000,
+      }],
+    });
+    await openBoth();
+    mocks.getCommitDetails.mockResolvedValue({ hash, body: 'stash body', files: [] });
+
+    coordinator.handleMessage('sidebar', { type: 'inspectStash', ref: 'stash@{0}', hash: sha('d') });
+    expect(mocks.getCommitDetails).not.toHaveBeenCalled();
+    coordinator.handleMessage('sidebar', { type: 'inspectStash', ref: 'stash@{0}', hash });
+    await vi.waitFor(() => expect(mocks.getCommitDetails).toHaveBeenCalledWith('/repo', hash));
+    await vi.waitFor(() => expect(editor.ofType('revealCommit')).toContainEqual({
+      type: 'revealCommit',
+      payload: { hash, outsideGraph: true },
+    }));
+  });
+
+  it('applies and pops known stashes and refreshes each snapshot', async () => {
+    mocks.getRepoSnapshot.mockResolvedValue({
+      ...MAIN_AND_FEATURE(),
+      stashes: [{
+        index: 0,
+        ref: 'stash@{0}',
+        hash: sha('c'),
+        message: 'saved work',
+        timestamp: 1700000000,
+      }],
+    });
+    await openBoth();
+
+    coordinator.handleMessage('sidebar', { type: 'applyStash', ref: 'stash@{0}' });
+    await vi.waitFor(() => expect(mocks.applyStash).toHaveBeenCalledWith('/repo', 'stash@{0}'));
+    await vi.waitFor(() => expect(sidebar.ofType('repoSnapshot')).toHaveLength(2));
+    coordinator.handleMessage('sidebar', { type: 'popStash', ref: 'stash@{0}' });
+    await vi.waitFor(() => expect(mocks.popStash).toHaveBeenCalledWith('/repo', 'stash@{0}'));
+    await vi.waitFor(() => expect(sidebar.ofType('repoSnapshot')).toHaveLength(3));
+  });
+
+  it('surfaces conflicts from failed stash application', async () => {
+    mocks.getRepoSnapshot.mockResolvedValue({
+      ...MAIN_AND_FEATURE(),
+      stashes: [{
+        index: 0,
+        ref: 'stash@{0}',
+        hash: sha('c'),
+        message: 'conflicting work',
+        timestamp: 1700000000,
+      }],
+    });
+    await openBoth();
+    mocks.applyStash.mockRejectedValue(new GitExecutionError(
+      'stash apply failed',
+      'COMMAND_FAILED',
+      1,
+      'CONFLICT (content): Merge conflict in app.ts',
+    ));
+    coordinator.handleMessage('sidebar', { type: 'applyStash', ref: 'stash@{0}' });
+    await vi.waitFor(() => expect(mocks.showWarningMessage).toHaveBeenCalledWith(
+      expect.stringContaining('merge conflicts'),
+    ));
+  });
+
+  it('uses a silent quick pick to confirm dropping a stash', async () => {
+    mocks.getRepoSnapshot.mockResolvedValue({
+      ...MAIN_AND_FEATURE(),
+      stashes: [{
+        index: 0,
+        ref: 'stash@{0}',
+        hash: sha('c'),
+        message: 'saved work',
+        timestamp: 1700000000,
+      }],
+    });
+    await openBoth();
+    mocks.showWarningMessage.mockClear();
+    mocks.showQuickPick.mockResolvedValueOnce({ label: 'Cancel' });
+    coordinator.handleMessage('sidebar', { type: 'dropStash', ref: 'stash@{0}' });
+    await vi.waitFor(() => expect(mocks.showQuickPick).toHaveBeenCalled());
+    expect(mocks.dropStash).not.toHaveBeenCalled();
+
+    mocks.showQuickPick.mockResolvedValueOnce({
+      label: 'Drop Stash',
+      description: `stash@{0}: saved work`,
+    });
+    coordinator.handleMessage('sidebar', { type: 'dropStash', ref: 'stash@{0}' });
+    await vi.waitFor(() => expect(mocks.dropStash).toHaveBeenCalledWith('/repo', 'stash@{0}'));
+    expect(mocks.showWarningMessage).not.toHaveBeenCalled();
+  });
+
+  it('rejects stash actions for refs absent from the loaded snapshot', async () => {
+    await openBoth();
+    coordinator.handleMessage('sidebar', { type: 'applyStash', ref: 'stash@{99}' });
+    await vi.waitFor(() => expect(mocks.showWarningMessage).toHaveBeenCalledWith(
+      expect.stringContaining('no longer available'),
+    ));
+    expect(mocks.applyStash).not.toHaveBeenCalled();
   });
 
   it('adds all loaded worktree roots to the diff allowlist', async () => {

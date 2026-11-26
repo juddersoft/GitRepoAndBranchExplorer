@@ -184,6 +184,7 @@ describe('static webview sink and Git spawning audit', () => {
       'columnResize.ts',
       'BranchTree.ts',
       'HistoryPane.ts',
+      'sidebar.ts',
       'CreateWorktreeModal.ts',
       'worktreeCreateModel.ts',
     ];
@@ -193,6 +194,25 @@ describe('static webview sink and Git spawning audit', () => {
       expect(source, file).not.toMatch(/\.(innerHTML|outerHTML)\b/);
       expect(source, file).not.toMatch(/\bstyle\s*=/i);
     }
+  });
+
+  it('strictly validates stash messages against injection and schema pollution', () => {
+    const messages = [
+      { type: 'stashChanges' },
+      { type: 'inspectStash', ref: 'stash@{0}', hash: SHA_A },
+      { type: 'applyStash', ref: 'stash@{0}' },
+      { type: 'popStash', ref: 'stash@{0}' },
+      { type: 'dropStash', ref: 'stash@{0}' },
+    ];
+    for (const message of messages) {
+      expect(isWebviewToExtensionMessage(message)).toBe(true);
+      expect(isWebviewToExtensionMessage({ ...message, extra: true })).toBe(false);
+      expect(isWebviewToExtensionMessage(JSON.parse(
+        `${JSON.stringify(message).slice(0, -1)},"constructor":{"prototype":{"polluted":true}}}`,
+      ))).toBe(false);
+    }
+    expect(isWebviewToExtensionMessage({ type: 'applyStash', ref: '--all' })).toBe(false);
+    expect(isWebviewToExtensionMessage({ type: 'inspectStash', ref: 'stash@{0}', hash: 'HEAD' })).toBe(false);
   });
 
   it('prepends color and ext protocol hardening to every Git spawn argv', () => {

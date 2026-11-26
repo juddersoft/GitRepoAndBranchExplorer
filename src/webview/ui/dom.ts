@@ -94,7 +94,7 @@ const ICONS = {
 } satisfies Record<string, Shape[]>;
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
-type ColoredIconName = 'repo' | 'branch' | 'remote' | 'localDrive' | 'folder' | 'folderOpen' | 'check' | 'tag' | 'worktree';
+type ColoredIconName = 'repo' | 'branch' | 'remote' | 'localDrive' | 'folder' | 'folderOpen' | 'check' | 'tag' | 'worktree' | 'stash';
 export type IconName = keyof typeof ICONS | ColoredIconName;
 
 type SvgAttributes = Record<string, string | number>;
@@ -171,6 +171,12 @@ const COLORED_ICONS: Record<ColoredIconName, (svg: SVGSVGElement) => void> = {
     appendSvgShape(svg, 'path', { d: 'M9.5 4.2h4v7.2h-4z', fill: '#C5AFE8' });
     appendSvgShape(svg, 'path', { d: 'M6.5 8h3', stroke: '#F5C451', 'stroke-width': 1.6, 'stroke-linecap': 'round' });
     appendSvgShape(svg, 'circle', { cx: 7.9, cy: 8, r: 1.2, fill: '#4EC9B0', stroke: '#277E73', 'stroke-width': 0.5 });
+  },
+  stash: (svg) => {
+    appendSvgShape(svg, 'path', { d: 'M3 4.2h10l1 2v7.3H2V6.2z', fill: '#7A5AF8' });
+    appendSvgShape(svg, 'rect', { x: 3.4, y: 2.5, width: 9.2, height: 3.2, rx: 1, fill: '#B59CFA' });
+    appendSvgShape(svg, 'path', { d: 'M3 7h10v6.5H3z', fill: '#8D72EE' });
+    appendSvgShape(svg, 'path', { d: 'M5 8.5h6M5 10.8h4', stroke: '#F4D35E', 'stroke-width': 1.4, 'stroke-linecap': 'round' });
   },
 };
 

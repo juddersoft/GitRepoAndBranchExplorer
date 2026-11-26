@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { BranchInfo, CommitNode, RepoSnapshot } from '../src/types/git';
-import { buildCommitMenu, buildRefMenu, buildRepoMenu, buildSettingsMenu, buildWorktreeMenu, clampMenuPosition, pullPushDisabledReason } from '../src/webview/ui/contextMenuModel';
+import { buildCommitMenu, buildRefMenu, buildRepoMenu, buildSettingsMenu, buildStashMenu, buildWorktreeMenu, clampMenuPosition, pullPushDisabledReason } from '../src/webview/ui/contextMenuModel';
 import type { MenuActionId, MenuEntry } from '../src/webview/ui/contextMenuModel';
 import type { ExplorerUiState } from '../src/webview/ui/state';
 import { branchRefTarget, createInitialState, tagRefTarget } from '../src/webview/ui/state';
@@ -71,6 +71,7 @@ const snapshot: RepoSnapshot = {
   localBranches: [main, feature, release],
   remoteGroups: [{ remoteName: 'origin', branches: [originFeature] }],
   worktrees: [],
+  stashes: [],
   tags: [{ name: 'v1', fullName: 'refs/tags/v1', targetHash: A }],
   commits: [commit(G, [D, B]), commit(M, [C]), commit(D, [C]), commit(C, [B]), commit(B, [A]), commit(A, [])],
   hasMoreCommits: false,
@@ -90,12 +91,80 @@ const ids = (entries: MenuEntry[]): string[] => entries.flatMap((e) => (e.kind =
 const enabled = (entries: MenuEntry[]): string[] => entries.flatMap((e) => (e.kind === 'item' && e.enabled ? [e.id] : []));
 
 describe('buildRefMenu: local branches', () => {
+  it('disables Create PR for a local branch tracking the remote default branch', () => {
+    const withDefaultMain: RepoSnapshot = {
+      ...snapshot,
+      remoteGroups: [{ remoteName: 'origin', branches: [originFeature], defaultBranch: 'main' }],
+    };
+    const integration = state({
+      snapshot: withDefaultMain,
+      integrations: {
+        gitGraphAvailable: false,
+        gitGraphExtensionId: null,
+        githubRemoteUrl: 'https://github.com/o/r',
+        remoteWebUrl: 'https://github.com/o/r',
+        remoteProvider: 'github',
+        remoteProviderName: 'GitHub',
+      },
+    });
+    expect(item(buildRefMenu(withDefaultMain, integration, branchRefTarget(main)), 'createPrInBrowser'))
+      .toMatchObject({
+        enabled: false,
+        reason: 'Cannot create a pull request from the default branch (main).',
+      });
+
+    const featureWithUpstream = { ...feature, upstream: 'origin/feature/foo' };
+    const menu = buildRefMenu(withDefaultMain, integration, branchRefTarget(featureWithUpstream));
+    expect(item(menu, 'createPrInBrowser').enabled).toBe(true);
+  });
+
   it('offers the full branch menu', () => {
     expect(ids(buildRefMenu(snapshot, state(), branchRefTarget(feature)))).toEqual([
       'checkout', 'merge', 'rebase', 'resetMixed', 'resetHard',
       'pull', 'push', 'pushAndOpenPr', 'fetch', 'createPrInBrowser', 'openBranchInBrowser',
-      'createBranchHere', 'createWorktree', 'renameBranch', 'untrackBranch', 'isolate', 'deleteBranch',
+      'createBranchHere', 'createWorktree', 'stashChanges', 'renameBranch', 'untrackBranch', 'isolate', 'deleteBranch',
     ]);
+  });
+
+  it('guards Push and Open PR on the default branch but enables it for a feature branch', () => {
+    const defaultSnapshot: RepoSnapshot = {
+     ...snapshot,
+     remoteGroups: [{ remoteName: 'origin', branches: [originFeature], defaultBranch: 'main' }],
+    };
+    const integrations = {
+     gitGraphAvailable: false,
+     gitGraphExtensionId: null,
+     githubRemoteUrl: 'https://github.com/o/r',
+     remoteWebUrl: 'https://github.com/o/r',
+     remoteProvider: 'github' as const,
+     remoteProviderName: 'GitHub',
+    };
+    expect(item(
+     buildRefMenu(defaultSnapshot, state({ snapshot: defaultSnapshot, integrations }), branchRefTarget(main)),
+     'pushAndOpenPr',
+    )).toMatchObject({
+     enabled: false,
+     reason: 'Cannot create a pull request from the default branch (main).',
+    });
+
+    const trackedFeature = { ...feature, upstream: 'origin/feature' };
+    const featureMenu = buildRefMenu(
+     { ...defaultSnapshot, localBranches: [main, trackedFeature, release] },
+     state({ snapshot: defaultSnapshot, integrations }),
+     branchRefTarget(trackedFeature),
+    );
+    expect(item(featureMenu, 'pushAndOpenPr').enabled).toBe(true);
+  });
+
+  it('only enables Stash Changes on the checked-out local branch', () => {
+    const currentMenu = buildRefMenu(snapshot, state(), branchRefTarget(main));
+    expect(item(currentMenu, 'stashChanges')).toMatchObject({ enabled: true, label: 'Stash Changes...' });
+    expect(item(buildRefMenu(snapshot, state(), branchRefTarget(feature)), 'stashChanges')).toMatchObject({
+     enabled: false,
+     reason: 'Only available on the checked-out branch.',
+    });
+    expect(item(buildRefMenu(snapshot, state({ isBusy: true }), branchRefTarget(main)), 'stashChanges').reason)
+     .toMatch(/running/i);
   });
 
   it('enables checkout, merge, rebase and delete for another branch, but not pull/push', () => {
@@ -114,7 +183,10 @@ describe('buildRefMenu: local branches', () => {
     for (const id of ['checkout', 'merge', 'rebase', 'deleteBranch'] as const) {
       expect(item(menu, id).enabled, id).toBe(false);
     }
-    expect(enabled(menu)).toEqual(['resetMixed', 'resetHard', 'pull', 'push', 'fetch', 'createBranchHere', 'renameBranch', 'untrackBranch', 'isolate']);
+    expect(enabled(menu)).toEqual([
+      'resetMixed', 'resetHard', 'pull', 'push', 'fetch', 'createBranchHere',
+      'stashChanges', 'renameBranch', 'untrackBranch', 'isolate',
+    ]);
   });
 
   it('enables untracking tracked and gone upstreams, and disables it for untracked branches', () => {
@@ -187,9 +259,50 @@ describe('buildRefMenu: local branches', () => {
     expect(item(buildWorktreeMenu(mainWorktree), 'removeWorktree').reason).toBe('Cannot remove the main worktree');
     expect(item(buildWorktreeMenu({ ...mainWorktree, isMain: false, isCurrent: false, path: '/feature' }), 'removeWorktree').enabled).toBe(true);
   });
+
+  it('builds apply, pop and drop stash actions with busy guards', () => {
+    const stash = { index: 0, ref: 'stash@{0}', hash: A, message: 'saved work', timestamp: 1700000000 };
+    expect(ids(buildStashMenu(stash, state()))).toEqual(['inspectStash', 'applyStash', 'popStash', 'dropStash']);
+    expect(enabled(buildStashMenu(stash, state()))).toEqual(['inspectStash', 'applyStash', 'popStash', 'dropStash']);
+    const busy = buildStashMenu(stash, state({ isBusy: true }));
+    expect(enabled(busy)).toEqual(['inspectStash']);
+    expect(item(busy, 'dropStash').reason).toMatch(/running/i);
+  });
 });
 
 describe('buildRefMenu: remote branches and tags', () => {
+  it('disables Create PR for a remote default branch and enables feature branches', () => {
+    const remoteMain: BranchInfo = {
+      ...originFeature,
+      name: 'origin/main',
+      displayName: 'main',
+      fullName: 'refs/remotes/origin/main',
+    };
+    const withOriginDefault: RepoSnapshot = {
+      ...snapshot,
+      remoteGroups: [{ remoteName: 'origin', branches: [remoteMain, originFeature], defaultBranch: 'main' }],
+    };
+    const integration = state({
+      snapshot: withOriginDefault,
+      integrations: {
+        gitGraphAvailable: false,
+        gitGraphExtensionId: null,
+        githubRemoteUrl: 'https://github.com/o/r',
+        remoteWebUrl: 'https://github.com/o/r',
+        remoteProvider: 'github',
+        remoteProviderName: 'GitHub',
+      },
+    });
+
+    expect(item(buildRefMenu(withOriginDefault, integration, branchRefTarget(remoteMain)), 'createPrInBrowser'))
+      .toMatchObject({
+        enabled: false,
+        reason: 'Cannot create a pull request from the default branch (main).',
+      });
+    expect(item(buildRefMenu(withOriginDefault, integration, branchRefTarget(originFeature)), 'createPrInBrowser'))
+      .toMatchObject({ enabled: true });
+  });
+
   it('offers a tracking checkout, merge and rebase for a remote branch, and never delete/pull/push', () => {
     const menu = buildRefMenu(snapshot, state(), branchRefTarget(originFeature));
     expect(ids(menu)).toEqual([
@@ -327,12 +440,46 @@ describe('buildRepoMenu', () => {
     const menu = menuFor(snapshot);
     expect(ids(menu)).toEqual([
       'fetchTracked', 'pull', 'push', 'pushAndOpenPr', 'createPrInBrowser', 'openRepoInBrowser',
-      'newBranch', 'createWorktree', 'refresh',
+      'newBranch', 'createWorktree', 'stashChanges', 'refresh',
     ]);
     expect(enabled(menu)).toEqual([
-      'fetchTracked', 'pull', 'push', 'newBranch', 'createWorktree', 'refresh',
+      'fetchTracked', 'pull', 'push', 'newBranch', 'createWorktree', 'stashChanges', 'refresh',
     ]);
     expect(item(menu, 'push').label).toBe('Push');
+    expect(item(menu, 'stashChanges').label).toBe('Stash Changes...');
+  });
+
+  it('disables Stash Changes while another operation is running', () => {
+    expect(item(menuFor(snapshot, { isBusy: true }), 'stashChanges').reason).toMatch(/running/i);
+  });
+
+  it('disables Create PR when the checked-out branch tracks the remote default branch', () => {
+    const defaultSnapshot: RepoSnapshot = {
+      ...snapshot,
+      remoteGroups: [{ remoteName: 'origin', branches: [originFeature], defaultBranch: 'main' }],
+    };
+    const menu = buildRepoMenu(
+      defaultSnapshot,
+      state({
+        snapshot: defaultSnapshot,
+        integrations: {
+          gitGraphAvailable: false,
+          gitGraphExtensionId: null,
+          githubRemoteUrl: 'https://github.com/o/r',
+          remoteWebUrl: 'https://github.com/o/r',
+          remoteProvider: 'github',
+          remoteProviderName: 'GitHub',
+        },
+      }),
+    );
+    expect(item(menu, 'createPrInBrowser')).toMatchObject({
+      enabled: false,
+      reason: 'Cannot create a pull request from the default branch (main).',
+    });
+    expect(item(menu, 'pushAndOpenPr')).toMatchObject({
+      enabled: false,
+      reason: 'Cannot create a pull request from the default branch (main).',
+    });
   });
 
   it('keeps display preferences exclusively in the settings menu', () => {

@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import type { BranchInfo, ChangedFileEntry, CommitDetails, CommitNode, RefBadge, RemoteGroup, RepoSnapshot, TagInfo, WorktreeInfo } from '../types/git';
+import type { BranchInfo, ChangedFileEntry, CommitDetails, CommitNode, RefBadge, RemoteGroup, RepoSnapshot, StashInfo, TagInfo, WorkingTreeFile, WorktreeInfo } from '../types/git';
 import { isChangedFileStatus, isSafeRepoRelativePath } from '../types/messages';
 import type { ExecGitOptions } from './gitExecutor';
 import { execGit, GitExecutionError, validateGitRef } from './gitExecutor';
@@ -20,10 +20,10 @@ export const MAX_LOG_COMMITS = 500;
 
 /**
  * `%(*objectname)` (7th field) peels annotated tags to their commit so tag badges land on the right commit.
- * The parser also accepts the 6-field form without it.
+ * The parser also accepts older 6-field fixtures and peels the optional symref field at the end.
  */
 export const FOR_EACH_REF_FORMAT =
-  '%(HEAD)%1f%(refname)%1f%(refname:short)%1f%(objectname)%1f%(upstream:short)%1f%(upstream:track)%1f%(*objectname)%1e';
+  '%(HEAD)%1f%(refname)%1f%(refname:short)%1f%(objectname)%1f%(upstream:short)%1f%(upstream:track)%1f%(*objectname)%1f%(symref)%1e';
 
 export const LOG_FORMAT = '%H%x1f%h%x1f%P%x1f%s%x1f%an%x1f%ae%x1f%aI%x1f%at%x1e';
 
@@ -114,6 +114,81 @@ const STRICT_COMMIT_HASH = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i;
 /** Full-length SHA-1 (40 hex) or SHA-256 (64 hex) commit hash check applied before any hash reaches Git. */
 export function isValidCommitHash(value: unknown): value is string {
   return typeof value === 'string' && STRICT_COMMIT_HASH.test(value);
+}
+
+const STASH_REF_PATTERN = /^stash@\{([0-9]+)\}$/;
+const STASH_HASH_PATTERN = /^[0-9a-f]{40}$/i;
+
+export function parseStashListOutput(output: string): StashInfo[] {
+  const stashes: StashInfo[] = [];
+  for (const line of output.split(/\r?\n/)) {
+    if (line.length === 0) {
+      continue;
+    }
+    const [hash, ref, message = '', timestampText, ...extra] = line.split('\x1f');
+    const refMatch = ref === undefined ? null : STASH_REF_PATTERN.exec(ref);
+    const index = refMatch === null ? Number.NaN : Number(refMatch[1]);
+    const timestamp = Number(timestampText);
+    if (
+      extra.length > 0 ||
+      refMatch === null ||
+      !Number.isSafeInteger(index) ||
+      !STASH_HASH_PATTERN.test(hash ?? '') ||
+      !Number.isSafeInteger(timestamp) ||
+      timestamp < 0
+    ) {
+      throw new Error('Git returned an invalid stash list entry.');
+    }
+    stashes.push({
+      index,
+      ref: ref!,
+      hash: hash.toLowerCase(),
+      message,
+      timestamp,
+    });
+  }
+  return stashes;
+}
+
+export function validateStashRef(value: string): string {
+  if (!STASH_REF_PATTERN.test(value)) {
+    throw new Error('Invalid stash reference; expected stash@{N}.');
+  }
+  return value;
+}
+
+export function parsePorcelainStatusZ(rawOutput: string): WorkingTreeFile[] {
+  const tokens = rawOutput.split('\0');
+  const files: WorkingTreeFile[] = [];
+  for (let index = 0; index < tokens.length; index++) {
+    const record = tokens[index] ?? '';
+    if (record.length === 0) {
+      continue;
+    }
+    if (record.length < 3) {
+      throw new Error('Git returned an invalid porcelain status record.');
+    }
+    const indexStatus = record[0] ?? ' ';
+    const worktreeStatus = record[1] ?? ' ';
+    const path = record.slice(3);
+    if (path.length === 0) {
+      throw new Error('Git returned an invalid empty working-tree path.');
+    }
+    const renamedOrCopied = indexStatus === 'R' || indexStatus === 'C' ||
+      worktreeStatus === 'R' || worktreeStatus === 'C';
+    const originalPath = renamedOrCopied ? tokens[++index] : undefined;
+    if (renamedOrCopied && (!originalPath || originalPath.length === 0)) {
+      throw new Error('Git returned a rename without its original path.');
+    }
+    files.push({
+      path,
+      indexStatus,
+      worktreeStatus,
+      untracked: indexStatus === '?' && worktreeStatus === '?',
+      ...(originalPath === undefined ? {} : { originalPath }),
+    });
+  }
+  return files;
 }
 
 /** Validates a commit hash and returns it lowercased for use in Git arguments. */
@@ -251,6 +326,7 @@ export function parseUpstreamTrack(track: string): { ahead: number; behind: numb
 export function parseForEachRefOutput(rawOutput: string): ParsedRefs {
   const localBranches: BranchInfo[] = [];
   const remotesByName = new Map<string, BranchInfo[]>();
+  const defaultBranchesByName = new Map<string, string>();
   const tags: TagInfo[] = [];
 
   for (const record of splitRecords(rawOutput)) {
@@ -259,7 +335,7 @@ export function parseForEachRefOutput(rawOutput: string): ParsedRefs {
       continue;
     }
     // Names are derived from the full refname: %(refname:short) may be disambiguated (e.g. "heads/x").
-    const [head, refname, , objectname, upstream, track, peeledHash = ''] = fields;
+    const [head, refname, , objectname, upstream, track, peeledHash = '', symref = ''] = fields;
 
     if (refname.startsWith(LOCAL_PREFIX)) {
       const name = refname.slice(LOCAL_PREFIX.length);
@@ -283,6 +359,16 @@ export function parseForEachRefOutput(rawOutput: string): ParsedRefs {
       const remoteName = name.slice(0, slash);
       const displayName = name.slice(slash + 1);
       if (displayName === 'HEAD') {
+        if (!remotesByName.has(remoteName)) {
+          remotesByName.set(remoteName, []);
+        }
+        const symrefPrefix = `refs/remotes/${remoteName}/`;
+        if (symref.startsWith(symrefPrefix)) {
+          const defaultBranch = symref.slice(symrefPrefix.length);
+          if (defaultBranch.length > 0) {
+            defaultBranchesByName.set(remoteName, defaultBranch);
+          }
+        }
         continue;
       }
       const branches = remotesByName.get(remoteName) ?? [];
@@ -310,7 +396,20 @@ export function parseForEachRefOutput(rawOutput: string): ParsedRefs {
   }
 
   const remoteGroups = [...remotesByName.entries()]
-    .map(([remoteName, branches]) => ({ remoteName, branches }))
+    .map(([remoteName, branches]): RemoteGroup => {
+      const symrefDefault = defaultBranchesByName.get(remoteName);
+      const branchNames = new Set(branches.map((branch) => branch.displayName));
+      const fallbackDefault =
+        branchNames.has('main') && !branchNames.has('master')
+          ? 'main'
+          : branchNames.has('master') && !branchNames.has('main')
+            ? 'master'
+            : undefined;
+      const defaultBranch = symrefDefault ?? fallbackDefault;
+      return defaultBranch === undefined
+        ? { remoteName, branches }
+        : { remoteName, branches, defaultBranch };
+    })
     .sort((a, b) => compareStrings(a.remoteName, b.remoteName));
 
   return { localBranches, remoteGroups, tags };
@@ -385,11 +484,12 @@ export class GitService {
     const topLevel = await this.runGit(['rev-parse', '--show-toplevel'], workspaceFolderPath);
     const repoRoot = path.normalize(topLevel.trim());
 
-    const [refOutput, head, remoteOutput, worktreesResult] = await Promise.all([
+    const [refOutput, head, remoteOutput, worktreesResult, stashes] = await Promise.all([
       this.runGit(['for-each-ref', `--format=${FOR_EACH_REF_FORMAT}`, 'refs/heads', 'refs/remotes', 'refs/tags'], repoRoot),
       this.resolveHead(repoRoot),
       this.runGit(['remote', '-v'], repoRoot),
       this.listWorktrees(repoRoot).catch(() => null),
+      this.listStashes(repoRoot),
     ]);
     const refs = parseForEachRefOutput(refOutput);
     const worktrees = worktreesResult === null
@@ -446,6 +546,7 @@ export class GitService {
       localBranches: refs.localBranches,
       remoteGroups,
       worktrees,
+      stashes,
       tags: refs.tags,
       ...page,
     };
@@ -454,6 +555,73 @@ export class GitService {
   public async listWorktrees(repoRoot: string): Promise<WorktreeInfo[]> {
     const output = await this.runGit(['worktree', 'list', '--porcelain'], repoRoot);
     return parseWorktreeListPorcelain(output, repoRoot);
+  }
+
+  public async listStashes(repoRoot: string): Promise<StashInfo[]> {
+    const output = await this.runGit(
+      ['stash', 'list', '--format=%H%x1f%gd%x1f%gs%x1f%ct'],
+      repoRoot,
+    );
+    return parseStashListOutput(output);
+  }
+
+  public async getWorkingTreeFiles(repoRoot: string): Promise<WorkingTreeFile[]> {
+    return parsePorcelainStatusZ(
+      await this.runGit(['status', '--porcelain=v1', '-z'], repoRoot),
+    );
+  }
+
+  public async stashPush(
+    repoRoot: string,
+    options: { message?: string; includeUntracked?: boolean; paths?: string[] } = {},
+  ): Promise<void> {
+    let message: string | undefined;
+    if (options.message !== undefined) {
+      if (/[\x00-\x1f\x7f]/.test(options.message)) {
+        throw new Error('Stash messages cannot contain control characters.');
+      }
+      message = options.message.trim() || undefined;
+    }
+    const validatedPaths = options.paths?.map((filePath) => {
+      if (
+        typeof filePath !== 'string' ||
+        filePath.length === 0 ||
+        filePath.startsWith('-') ||
+        /[\x00-\x1f\x7f]/.test(filePath) ||
+        /^[\\/]/.test(filePath) ||
+        /^[a-zA-Z]:/.test(filePath) ||
+        filePath.split(/[\\/]/).some((segment) => segment === '..')
+      ) {
+        throw new Error(`Invalid stash path: ${String(filePath)}`);
+      }
+      return filePath;
+    }) ?? [];
+    await this.runGit(
+      [
+        'stash',
+        'push',
+        ...(options.includeUntracked ? ['-u'] : []),
+        ...(message === undefined ? [] : ['-m', message]),
+        ...(validatedPaths.length > 0 ? ['--', ...validatedPaths] : []),
+      ],
+      repoRoot,
+      { timeoutMs: WORKTREE_GIT_TIMEOUT_MS },
+    );
+  }
+
+  public async applyStash(repoRoot: string, stashRef: string): Promise<void> {
+    const ref = validateStashRef(stashRef);
+    await this.runGit(['stash', 'apply', ref], repoRoot, { timeoutMs: WORKTREE_GIT_TIMEOUT_MS });
+  }
+
+  public async popStash(repoRoot: string, stashRef: string): Promise<void> {
+    const ref = validateStashRef(stashRef);
+    await this.runGit(['stash', 'pop', ref], repoRoot, { timeoutMs: WORKTREE_GIT_TIMEOUT_MS });
+  }
+
+  public async dropStash(repoRoot: string, stashRef: string): Promise<void> {
+    const ref = validateStashRef(stashRef);
+    await this.runGit(['stash', 'drop', ref], repoRoot);
   }
 
   public async addWorktree(
@@ -671,7 +839,7 @@ export class GitService {
 
   public async stashChanges(repoRoot: string, message: string): Promise<void> {
     const safeMessage = message.replace(/[\x00-\x1f\x7f]+/g, ' ').trim() || 'Auto-stash';
-    await this.runGit(['stash', 'push', '-u', '-m', safeMessage], repoRoot, { timeoutMs: WORKTREE_GIT_TIMEOUT_MS });
+    await this.stashPush(repoRoot, { message: safeMessage, includeUntracked: true });
   }
 
   public async discardWorkingTreeChanges(repoRoot: string): Promise<void> {

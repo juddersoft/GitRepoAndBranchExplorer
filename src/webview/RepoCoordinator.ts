@@ -24,7 +24,7 @@ import type { ParsedRemoteHost } from '../git/remoteUrlBuilder';
 import type { TrackedFetchResult } from '../git/trackedFetch';
 import { describeTrackedFetch, NOTHING_TO_FETCH_MESSAGE, planTrackedFetch } from '../git/trackedFetch';
 import { GitHubService } from '../github/githubService';
-import type { BranchInfo, ExternalIntegrationsInfo, RepoSnapshot, WorkspaceRepoInfo } from '../types/git';
+import type { BranchInfo, ExternalIntegrationsInfo, RepoSnapshot, WorkingTreeFile, WorkspaceRepoInfo } from '../types/git';
 import type {
   ActionStatusPayload,
   ExtensionToWebviewMessage,
@@ -381,6 +381,21 @@ export class RepoCoordinator implements vscode.Disposable {
       case 'submitCreateWorktree':
         void this.handleSubmitCreateWorktree(message.payload);
         break;
+      case 'stashChanges':
+        void this.handleStashChanges();
+        break;
+      case 'inspectStash':
+        void this.handleInspectStash(message.ref, message.hash);
+        break;
+      case 'applyStash':
+        void this.handleApplyStash(message.ref);
+        break;
+      case 'popStash':
+        void this.handlePopStash(message.ref);
+        break;
+      case 'dropStash':
+        void this.handleDropStash(message.ref);
+        break;
       case 'setTabPinned':
         this.host.setTabPinned(message.payload.pinned);
         break;
@@ -690,6 +705,190 @@ export class RepoCoordinator implements vscode.Disposable {
         await this.handleRemoveWorktree(target);
         break;
     }
+  }
+
+  private requireSnapshotStash(ref: string) {
+    if (!this.ensureTrustedWorkspace()) {
+      return undefined;
+    }
+    const snapshot = this.lastSnapshot;
+    if (!snapshot) {
+      void vscode.window.showWarningMessage('No Git repository is loaded.');
+      return undefined;
+    }
+    const stash = snapshot.stashes?.find((candidate) => candidate.ref === ref);
+    if (!stash) {
+      void vscode.window.showWarningMessage('That stash is no longer available. Refresh the repository and try again.');
+      return undefined;
+    }
+    return stash;
+  }
+
+  private async handleStashChanges(): Promise<void> {
+    if (!this.ensureTrustedWorkspace()) {
+      return;
+    }
+    const snapshot = this.lastSnapshot;
+    if (!snapshot) {
+      void vscode.window.showWarningMessage('No Git repository is loaded.');
+      return;
+    }
+    if (!(await this.gitService.hasWorkingTreeChanges(snapshot.repoRoot))) {
+      void vscode.window.showInformationMessage('No local changes to stash.');
+      return;
+    }
+    const tracked = 'Stash tracked changes';
+    const includingUntracked = 'Stash including untracked files (-u)';
+    const selectFiles = 'Select files to stash...';
+    const scope = await vscode.window.showQuickPick(
+      [{ label: tracked }, { label: includingUntracked }, { label: selectFiles }],
+      {
+        title: 'Stash Changes',
+        placeHolder: 'Choose which working-tree changes to stash',
+        ignoreFocusOut: true,
+      },
+    );
+    if (!scope) {
+      return;
+    }
+    let includeUntracked = scope.label === includingUntracked;
+    let paths: string[] | undefined;
+    if (scope.label === selectFiles) {
+      const files = await this.gitService.getWorkingTreeFiles(snapshot.repoRoot);
+      if (files.length === 0) {
+        void vscode.window.showInformationMessage('No local changes to stash.');
+        return;
+      }
+      const items = files.map((file) => ({
+        label: file.path,
+        description: this.describeWorkingTreeFile(file),
+        file,
+      }));
+      const selected = await vscode.window.showQuickPick(items, {
+        canPickMany: true,
+        placeHolder: 'Select files to stash',
+      });
+      if (!selected || selected.length === 0) {
+        return;
+      }
+      includeUntracked = selected.some((item) => item.file.untracked);
+      paths = [...new Set(selected.flatMap((item) =>
+        item.file.originalPath === undefined
+          ? [item.file.path]
+          : [item.file.originalPath, item.file.path],
+      ))];
+    }
+    const message = await vscode.window.showInputBox({
+      title: 'Stash Changes',
+      prompt: 'Optional stash message (leave blank for Git’s default message)',
+      placeHolder: 'Message',
+      ignoreFocusOut: true,
+    });
+    if (message === undefined) {
+      return;
+    }
+    const success = await this.runGitOperation('Stashing changes', (root) =>
+      this.gitService.stashPush(root, {
+        includeUntracked,
+        ...(message.trim() === '' ? {} : { message }),
+        ...(paths === undefined ? {} : { paths }),
+      }),
+    );
+    if (success) {
+      void vscode.window.showInformationMessage('Changes stashed.');
+    }
+  }
+
+  private describeWorkingTreeFile(file: WorkingTreeFile): string {
+    if (file.untracked) {
+      return 'Untracked';
+    }
+    const statuses = `${file.indexStatus}${file.worktreeStatus}`;
+    const names: Record<string, string> = {
+      A: 'Added',
+      M: 'Modified',
+      D: 'Deleted',
+      R: 'Renamed',
+      C: 'Copied',
+      U: 'Unmerged',
+      T: 'Type changed',
+    };
+    return [...new Set(statuses.split('').filter((status) => status !== ' ').map(
+      (status) => names[status] ?? `Status ${status}`,
+    ))].join(', ') || 'Changed';
+  }
+
+  private async handleInspectStash(ref: string, hash: string): Promise<void> {
+    const stash = this.requireSnapshotStash(ref);
+    if (!stash || stash.hash.toLowerCase() !== hash.toLowerCase()) {
+      if (stash) {
+        void vscode.window.showWarningMessage('That stash changed. Refresh the repository and try again.');
+      }
+      return;
+    }
+    this.host.openPanel();
+    this.revealCommit(stash.hash);
+  }
+
+  private warnOnStashConflict(err: unknown): void {
+    const text =
+      err instanceof GitExecutionError
+        ? `${err.stderr}\n${err.message}`
+        : describeError(err);
+    if (/conflict|unmerged/i.test(text)) {
+      void vscode.window.showWarningMessage('The stash was applied with merge conflicts. Resolve the conflicts before continuing.');
+    }
+  }
+
+  private async handleApplyStash(ref: string): Promise<void> {
+    const stash = this.requireSnapshotStash(ref);
+    if (!stash) {
+      return;
+    }
+    await this.runGitOperation(
+      `Applying ${stash.ref}`,
+      (root) => this.gitService.applyStash(root, stash.ref),
+      undefined,
+      (err) => this.warnOnStashConflict(err),
+    );
+  }
+
+  private async handlePopStash(ref: string): Promise<void> {
+    const stash = this.requireSnapshotStash(ref);
+    if (!stash) {
+      return;
+    }
+    await this.runGitOperation(
+      `Popping ${stash.ref}`,
+      (root) => this.gitService.popStash(root, stash.ref),
+      undefined,
+      (err) => this.warnOnStashConflict(err),
+    );
+  }
+
+  private async handleDropStash(ref: string): Promise<void> {
+    const stash = this.requireSnapshotStash(ref);
+    if (!stash) {
+      return;
+    }
+    const drop = 'Drop Stash';
+    const choice = await vscode.window.showQuickPick(
+      [{ label: drop, description: `${stash.ref}: ${stash.message || stash.hash.slice(0, 8)}` }, { label: 'Cancel' }],
+      {
+        title: `Drop ${stash.ref}`,
+        placeHolder: `${stash.ref}: ${stash.message || stash.hash.slice(0, 8)}`,
+        ignoreFocusOut: true,
+      },
+    );
+    if (choice?.label !== drop) {
+      return;
+    }
+    const current = this.requireSnapshotStash(ref);
+    if (!current || current.hash !== stash.hash) {
+      void vscode.window.showWarningMessage('The stash list changed while confirming. Review the stash and try again.');
+      return;
+    }
+    await this.runGitOperation(`Dropping ${stash.ref}`, (root) => this.gitService.dropStash(root, stash.ref));
   }
 
   private resolveSnapshotWorktree(target: string | undefined) {
@@ -1441,6 +1640,18 @@ export class RepoCoordinator implements vscode.Disposable {
         }
         return this.gitService.pushToRemoteBranch(root, upstream.remoteName, branch.name, branch.name, false);
       };
+    }
+
+    if (openPrAfterPush && pushed) {
+      const defaultBranch = snapshot.remoteGroups.find(
+        (group) => group.remoteName === pushed?.remoteName,
+      )?.defaultBranch;
+      if (defaultBranch !== undefined && defaultBranch === pushed.remoteBranchName) {
+        void vscode.window.showInformationMessage(
+          `Cannot create a pull request from the default branch (${defaultBranch}).`,
+        );
+        return;
+      }
     }
 
     let recoveryCancelled = false;
@@ -2285,6 +2496,13 @@ export class RepoCoordinator implements vscode.Disposable {
       }
       remoteName = upstream.remoteName;
       remoteBranch = upstream.remoteBranch;
+    }
+    const remoteGroup = snapshot.remoteGroups.find((group) => group.remoteName === remoteName);
+    if (remoteGroup?.defaultBranch === remoteBranch) {
+      void vscode.window.showInformationMessage(
+        `Cannot create a pull request from the default branch (${remoteBranch}).`,
+      );
+      return;
     }
     const remote = await this.resolveRemoteHost(snapshot.repoRoot, remoteName);
     const url = remote === null ? null : buildRemoteCreatePrUrl(remote, remoteBranch);

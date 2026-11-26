@@ -1429,6 +1429,15 @@ col.col-id {
   border-left: 2px solid var(--vscode-textLink-foreground);
 }
 
+.stash-inspection-banner {
+  margin: 0 0 8px;
+  padding: 7px 9px;
+  color: var(--vscode-foreground);
+  background: var(--vscode-editorInfo-background, var(--vscode-editorWidget-background));
+  border-left: 3px solid var(--vscode-charts-purple, #b180d7);
+  font-weight: 600;
+}
+
 .full-hash {
   user-select: all;
   word-break: break-all;

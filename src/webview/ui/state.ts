@@ -4,6 +4,7 @@ import { collectAncestorFolderIds } from './branchFolderTree';
 
 export const NODE_BRANCHES = 'branches';
 export const NODE_TAGS = 'tags';
+export const NODE_STASHES = 'stashes';
 export const MAX_CACHED_COMMIT_DETAILS = 200;
 
 export function normalizeRepoKey(repoRoot: string): string {

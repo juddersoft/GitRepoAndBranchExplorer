@@ -3,7 +3,7 @@ import { isExtensionToWebviewMessage } from '../../types/messages';
 import { BranchTree } from './BranchTree';
 import { ContextMenu } from './ContextMenu';
 import type { MenuActionId } from './contextMenuModel';
-import { buildRefMenu, buildRepoMenu, buildSettingsMenu, buildWorktreeMenu } from './contextMenuModel';
+import { buildRefMenu, buildRepoMenu, buildSettingsMenu, buildStashMenu, buildWorktreeMenu } from './contextMenuModel';
 import { el } from './dom';
 import type { ExplorerUiState, RefTarget } from './state';
 import {
@@ -70,6 +70,14 @@ function postGitAction(action: GitAction, target?: string): void {
   vscode.postMessage({ type: 'gitAction', payload: target === undefined ? { action } : { action, target } });
 }
 
+function postStashAction(action: 'inspectStash' | 'applyStash' | 'popStash' | 'dropStash', stash: { ref: string; hash: string }): void {
+  if (action === 'inspectStash') {
+    vscode.postMessage({ type: action, ref: stash.ref, hash: stash.hash });
+    return;
+  }
+  vscode.postMessage({ type: action, ref: stash.ref });
+}
+
 function selectRef(target: RefTarget): void {
   // Skip no-op selections so a double-click (two clicks) does not rebuild the tree between them.
   if (state.selectedBranchFullName !== target.fullName) {
@@ -118,6 +126,9 @@ function runRefMenuAction(id: MenuActionId, target: RefTarget): void {
     case 'openBranchInBrowser':
       postGitAction(id, target.name);
       break;
+    case 'stashChanges':
+      vscode.postMessage({ type: 'stashChanges' });
+      break;
     case 'createBranchHere':
       vscode.postMessage({
         type: 'openCreateBranchDialog',
@@ -151,6 +162,9 @@ function runRepoMenuAction(id: MenuActionId): void {
       break;
     case 'createWorktree':
       postGitAction('createWorktree');
+      break;
+    case 'stashChanges':
+      vscode.postMessage({ type: 'stashChanges' });
       break;
     case 'refresh':
       vscode.postMessage({ type: 'requestRefresh' });
@@ -233,6 +247,18 @@ function showWorktreeContextMenu(
   });
 }
 
+function showStashContextMenu(
+  stash: NonNullable<NonNullable<ExplorerUiState['snapshot']>['stashes']>[number],
+  x: number,
+  y: number,
+): void {
+  contextMenu.show(x, y, buildStashMenu(stash, state), (id) => {
+    if (id === 'inspectStash' || id === 'applyStash' || id === 'popStash' || id === 'dropStash') {
+      postStashAction(id, stash);
+    }
+  });
+}
+
 const branchTree = new BranchTree({
   onFilterChange: (text) => setState({ branchFilterText: text }),
   onToggleNode: (key) => {
@@ -249,6 +275,8 @@ const branchTree = new BranchTree({
   onContextMenu: showRefContextMenu,
   onWorktreeContextMenu: showWorktreeContextMenu,
   onOpenWorktree: (worktreePath) => postGitAction('openWorktree', worktreePath),
+  onInspectStash: (stash) => postStashAction('inspectStash', stash),
+  onStashContextMenu: showStashContextMenu,
   onRepoContextMenu: showRepoContextMenu,
   onSelectRepository: (repoRoot) => {
     vscode.postMessage({ type: 'selectRepository', payload: { repoRoot } });

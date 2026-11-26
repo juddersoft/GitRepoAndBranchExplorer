@@ -4,6 +4,7 @@ import type {
   CommitNode,
   ExternalIntegrationsInfo,
   RepoSnapshot,
+  StashInfo,
   WorkspaceRepoInfo,
 } from './git';
 import type { CreateBranchDialogRequest, CreateBranchSourceKind } from '../webview/ui/branchCreateModel';
@@ -68,7 +69,7 @@ export const GIT_ACTION_LABELS: Readonly<Record<GitAction, string>> = {
   copyWorktreePath: 'Copy Worktree Path',
 };
 
-/** What a `gitAction` must carry in `target`: nothing, a ref name (branch/tag), or a full commit hash. */
+/** What a `gitAction` must carry in `target`: nothing, a ref/hash, a path, or a stash reflog selector. */
 export type GitActionTargetKind = 'none' | 'optionalRef' | 'ref' | 'commit' | 'refOrCommit' | 'path';
 
 export const GIT_ACTION_TARGETS: Readonly<Record<GitAction, GitActionTargetKind>> = {
@@ -132,6 +133,11 @@ export type WebviewToExtensionMessage =
   | { type: 'createBranchAtRef'; payload: { startPoint: string } }
   | { type: 'openCreateBranchDialog'; payload: { startPoint?: string; sourceKind?: CreateBranchSourceKind } }
   | { type: 'submitCreateBranch'; payload: { branchName: string; startPoint?: string; checkout: boolean; track: boolean } }
+  | { type: 'stashChanges' }
+  | { type: 'inspectStash'; ref: string; hash: string }
+  | { type: 'applyStash'; ref: string }
+  | { type: 'popStash'; ref: string }
+  | { type: 'dropStash'; ref: string }
   | { type: 'browseWorktreeParentFolder'; payload: { currentParentPath?: string } }
   | {
       type: 'submitCreateWorktree';
@@ -326,6 +332,10 @@ function isValidGitActionPayload(payload: Record<string, unknown> | null): boole
   }
 }
 
+export function isSafeStashRefArgument(value: unknown): value is string {
+  return typeof value === 'string' && /^stash@\{[0-9]+\}$/.test(value);
+}
+
 function isSafePathArgument(value: unknown): value is string {
   return (
     typeof value === 'string' &&
@@ -363,7 +373,18 @@ export function isWebviewToExtensionMessage(value: unknown): value is WebviewToE
     case 'openRepositoryPanel':
     case 'requestRefresh':
     case 'loadMoreCommits':
-      return true;
+    case 'stashChanges':
+      return hasOnlyFields(value, ['type']);
+    case 'inspectStash':
+      return (
+        hasOnlyFields(value, ['type', 'ref', 'hash']) &&
+        isSafeStashRefArgument(ownField(value, 'ref')) &&
+        isCommitHash(ownField(value, 'hash'))
+      );
+    case 'applyStash':
+    case 'popStash':
+    case 'dropStash':
+      return hasOnlyFields(value, ['type', 'ref']) && isSafeStashRefArgument(ownField(value, 'ref'));
     case 'checkoutBranch': {
       const branchName = payload === null ? undefined : ownField(payload, 'branchName');
       return isSafeRefArgument(branchName);
@@ -514,11 +535,35 @@ function isRepoSnapshotShape(p: Record<string, unknown>): boolean {
     Array.isArray(p.localBranches) &&
     Array.isArray(p.worktrees) &&
     p.worktrees.every(isWorktreeInfoShape) &&
+    (p.stashes === undefined ||
+      (Array.isArray(p.stashes) && p.stashes.every(isStashInfoShape))) &&
     (p.remotes === undefined || (Array.isArray(p.remotes) && p.remotes.every((name: unknown) => isSafeRefArgument(name)))) &&
     Array.isArray(p.remoteGroups) &&
     Array.isArray(p.tags) &&
     Array.isArray(p.commits) &&
     typeof p.hasMoreCommits === 'boolean'
+  );
+}
+
+function isStashInfoShape(value: unknown): value is StashInfo {
+  if (
+    !isSafeRecord(value) ||
+    !hasOnlyFields(value, ['index', 'ref', 'hash', 'message', 'timestamp']) ||
+    !Number.isSafeInteger(value.index) ||
+    (value.index as number) < 0 ||
+    !isSafeStashRefArgument(value.ref)
+  ) {
+    return false;
+  }
+  const refMatch = /^stash@\{([0-9]+)\}$/.exec(value.ref);
+  return (
+    refMatch !== null &&
+    Number(refMatch[1]) === value.index &&
+    typeof value.hash === 'string' &&
+    /^[0-9a-f]{40}$/i.test(value.hash) &&
+    typeof value.message === 'string' &&
+    Number.isSafeInteger(value.timestamp) &&
+    (value.timestamp as number) >= 0
   );
 }
 

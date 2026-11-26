@@ -1,4 +1,4 @@
-import type { BranchInfo, RemoteGroup, RepoSnapshot, TagInfo, WorktreeInfo } from '../../types/git';
+import type { BranchInfo, RemoteGroup, RepoSnapshot, StashInfo, TagInfo, WorktreeInfo } from '../../types/git';
 import type { TrackingIndicatorOrder } from '../../types/messages';
 import { buildBranchFolderTree, type BranchTreeNode } from './branchFolderTree';
 import { button, createSearchBox, el, icon, type IconName, rebuildPreservingFocus } from './dom';
@@ -9,6 +9,7 @@ import {
   filterBranches,
   filterTags,
   NODE_BRANCHES,
+  NODE_STASHES,
   NODE_TAGS,
   normalizeRepoKey,
   remoteNodeKey,
@@ -27,6 +28,8 @@ export interface BranchTreeCallbacks {
   onContextMenu(target: RefTarget, x: number, y: number): void;
   onWorktreeContextMenu(worktree: WorktreeInfo, x: number, y: number): void;
   onOpenWorktree(worktreePath: string): void;
+  onInspectStash(stash: StashInfo): void;
+  onStashContextMenu(stash: StashInfo, x: number, y: number): void;
   /** Right-click / Shift+F10 / Menu key on the repository row. */
   onRepoContextMenu(x: number, y: number): void;
   onSelectRepository(repoRoot: string): void;
@@ -115,6 +118,7 @@ export class BranchTree {
   private readonly resizeObserver: ResizeObserver | undefined;
   private refTargets = new Map<string, RefTarget>();
   private worktrees = new Map<string, WorktreeInfo>();
+  private stashes = new Map<string, StashInfo>();
   private trackingOrder: TrackingIndicatorOrder = 'vscode';
   private lastState: ExplorerUiState | undefined;
 
@@ -184,6 +188,7 @@ export class BranchTree {
     this.busyEl.textContent = state.isBusy ? state.busyMessage ?? 'Working\u2026' : '';
     this.refTargets = new Map();
     this.worktrees = new Map();
+    this.stashes = new Map();
 
     rebuildPreservingFocus(this.treeEl, () => {
       if (state.workspaceRepos.length === 0 && !state.snapshot) {
@@ -279,6 +284,7 @@ export class BranchTree {
             el('ul', { className: 'tree', attrs: { role: 'group' } }, [
               this.renderBranchesNode(state.snapshot, state),
               ...this.renderWorktreesNode(state.snapshot, state),
+              ...this.renderStashesNode(state.snapshot, state),
               ...this.renderTagsNode(state.snapshot, state),
             ]),
           );
@@ -444,6 +450,73 @@ export class BranchTree {
         children: tags.map((tag) => this.renderTag(tag, state, 2)),
       }),
     ];
+  }
+
+  private renderStashesNode(snapshot: RepoSnapshot, state: ExplorerUiState): HTMLLIElement[] {
+    if ((snapshot.stashes?.length ?? 0) === 0) {
+      return [];
+    }
+    const filter = state.branchFilterText.trim().toLocaleLowerCase();
+    const stashes = filter
+      ? (snapshot.stashes ?? []).filter((stash) =>
+          `${stash.ref} ${stash.message} ${stash.hash}`.toLocaleLowerCase().includes(filter),
+        )
+      : (snapshot.stashes ?? []);
+    if (filter && stashes.length === 0) {
+      return [];
+    }
+    return [
+      this.renderGroup({
+        key: NODE_STASHES,
+        label: 'Stashes',
+        iconName: 'stash',
+        depth: 1,
+        open: filter.length > 0 || state.expandedNodes.has(NODE_STASHES),
+        children: stashes.map((stash) => this.renderStash(stash, 2)),
+      }),
+    ];
+  }
+
+  private renderStash(stash: StashInfo, depth: number): HTMLLIElement {
+    this.stashes.set(stash.ref, stash);
+    const label = stash.message || stash.hash.slice(0, 8);
+    const title = [
+      stash.ref,
+      stash.message || stash.hash,
+      stash.hash,
+      new Date(stash.timestamp * 1000).toLocaleString(),
+    ].join('\n');
+    const row = el(
+      'div',
+      { className: 'tree-row tree-leaf stash-row', title },
+      [
+        el('span', { className: 'twisty-spacer' }),
+        icon('stash'),
+        el('span', { className: 'tree-label', text: `${stash.ref}: ${label}` }),
+      ],
+    );
+    this.setTreeDepth(row, depth);
+    row.addEventListener('click', () => this.callbacks.onInspectStash(stash));
+    row.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      this.callbacks.onStashContextMenu(stash, event.clientX, event.clientY);
+    });
+    return el(
+      'li',
+      {
+        className: 'tree-node tree-stash',
+        attrs: {
+          role: 'treeitem',
+          'aria-level': String(depth + 1),
+          'aria-label': `${stash.ref}: ${label}`,
+          'aria-haspopup': 'menu',
+          tabindex: '-1',
+          'data-focus-key': `stash:${stash.ref}`,
+          'data-stash-ref': stash.ref,
+        },
+      },
+      [row],
+    );
   }
 
   private renderWorktreesNode(snapshot: RepoSnapshot, state: ExplorerUiState): HTMLLIElement[] {
@@ -762,6 +835,8 @@ export class BranchTree {
     const fullName = target.dataset.fullName;
     const worktreePath = target.dataset.worktreePath;
     const worktree = worktreePath ? this.worktrees.get(worktreePath) : undefined;
+    const stashRef = target.dataset.stashRef;
+    const stash = stashRef ? this.stashes.get(stashRef) : undefined;
     const ref = fullName ? this.refTargets.get(fullName) : undefined;
     const expanded = target.getAttribute('aria-expanded') === 'true';
 
@@ -823,6 +898,8 @@ export class BranchTree {
           }
         } else if (nodeKey) {
           this.callbacks.onToggleNode(nodeKey);
+        } else if (stash) {
+          this.callbacks.onInspectStash(stash);
         } else if (ref) {
           if (ref.kind === 'local' && ref.branch?.isCurrent === false) {
             this.callbacks.onCheckout(ref.branch);
@@ -846,12 +923,14 @@ export class BranchTree {
         break;
       case 'ContextMenu':
       case 'F10':
-        if ((!ref && !worktree) || (event.key === 'F10' && !event.shiftKey)) {
+        if ((!ref && !worktree && !stash) || (event.key === 'F10' && !event.shiftKey)) {
           return;
         }
         {
           const rect = target.getBoundingClientRect();
-          if (worktree) {
+          if (stash) {
+            this.callbacks.onStashContextMenu(stash, rect.left + 24, rect.bottom);
+          } else if (worktree) {
             this.callbacks.onWorktreeContextMenu(worktree, rect.left + 24, rect.bottom);
           } else if (ref) {
             this.callbacks.onContextMenu(ref, rect.left + 24, rect.bottom);

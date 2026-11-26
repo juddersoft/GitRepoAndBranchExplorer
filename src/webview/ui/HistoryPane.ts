@@ -748,11 +748,17 @@ export class HistoryPane {
     ];
     const details = state.commitDetails.get(selectedHash);
     if (!commit) {
+      const inspectedStash = snapshot.stashes?.find((stash) => stash.hash === selectedHash);
       this.detailsBody.replaceChildren(
-        el('div', {
-          className: 'details-outside-graph-note',
-          text: 'Commit is outside the currently loaded history window (showing details directly).',
-        }),
+        inspectedStash
+          ? el('div', {
+              className: 'stash-inspection-banner',
+              text: `Inspecting ${inspectedStash.ref}: ${inspectedStash.message || inspectedStash.hash.slice(0, 8)}`,
+            })
+          : el('div', {
+              className: 'details-outside-graph-note',
+              text: 'Commit is outside the currently loaded history window (showing details directly).',
+            }),
         el('dl', { className: 'details-grid' }, [
           ...field('Commit', [el('code', { className: 'hash full-hash', text: selectedHash }), copy]),
           ...field('Message', [

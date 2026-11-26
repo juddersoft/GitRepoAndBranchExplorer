@@ -3,6 +3,17 @@
 All notable changes to **Git Repo & Branch Explorer** are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [1.8.0] - 2026-11-26
+
+### Added
+- **Multi-Repository Workspaces:** Added workspace repository discovery with a **REPOS:** switcher and repository-aware branch, blame, stash, worktree, and remote resolution.
+- **Git Worktree Management:** Added a **Worktrees** sidebar section, **WORKTREE** branch badges, a live-destination **Create Worktree** modal, and Open, Remove, and Copy Path actions.
+- **Stash Management:** Added a **Stashes** sidebar section, repository and checked-out branch **Stash Changes...** actions, tracked and untracked (`-u`) stashing, selective multi-file stashing, **Inspect Stash** in Commit Details, and Apply, Pop, and quiet Drop actions.
+- **GitHub Enterprise Cloud:** Added `.ghe.com` remote detection and browser-link generation for GitHub Enterprise Cloud repositories.
+
+### Changed
+- **Pull Request Safety:** **Create Pull Request in Browser** and **Push and Open PR in Browser** now guard against creating pull requests from the repository's default branch.
+
 ## [1.7.0] - 2026-11-25
 
 ### Added
