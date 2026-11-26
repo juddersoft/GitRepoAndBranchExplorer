@@ -6,7 +6,7 @@ import type { ExecGitOptions } from './gitExecutor';
 import { execGit, GitExecutionError, validateGitRef } from './gitExecutor';
 import type { TrackedFetchResult } from './trackedFetch';
 import { planTrackedFetch } from './trackedFetch';
-import { classifyRemoteDestination, parseRemoteHostInfo } from './remoteUrlBuilder';
+import { buildRemoteCommitUrl, classifyRemoteDestination, parseRemoteHostInfo } from './remoteUrlBuilder.js';
 
 const FIELD_SEP = '\x1f';
 const RECORD_SEP = '\x1e';
@@ -187,39 +187,29 @@ export function parseDiffTreeOutput(rawOutput: string): ChangedFileEntry[] {
   return files;
 }
 
-const GITHUB_REMOTE_PATTERNS: readonly RegExp[] = [
-  /^git@github\.com:([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i,
-  /^ssh:\/\/git@github\.com(?::\d+)?\/([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i,
-  /^(?:https?|git):\/\/(?:[^@/\s]+@)?github\.com(?::\d+)?\/([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i,
-];
-const GITHUB_NAME_SEGMENT = /^[A-Za-z0-9_.-]+$/;
-
-/** Converts SSH/HTTPS GitHub remote URLs to `https://github.com/<owner>/<repo>`; null for anything else. */
+/** Converts supported GitHub remote URL formats to a normalized HTTPS repository URL. */
 export function normalizeGitHubRemoteUrl(remoteUrl: string): string | null {
-  const trimmed = remoteUrl.trim();
-  for (const pattern of GITHUB_REMOTE_PATTERNS) {
-    const match = pattern.exec(trimmed);
-    if (!match) {
-      continue;
-    }
-    const owner = match[1] ?? '';
-    const repo = match[2] ?? '';
-    if (!GITHUB_NAME_SEGMENT.test(owner) || !GITHUB_NAME_SEGMENT.test(repo) || repo === '.' || repo === '..') {
-      return null;
-    }
-    return `https://github.com/${owner}/${repo}`;
-  }
-  return null;
+  const parsed = parseRemoteHostInfo(remoteUrl);
+  return parsed?.provider === 'github' ? parsed.webBaseUrl : null;
 }
 
-const GITHUB_REPO_URL = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
-
-/** Builds `<repoUrl>/commit/<hash>`, or null unless the URL is a normalized `https://github.com/` repo URL. */
+/** Builds a commit URL for a normalized HTTPS GitHub or GitHub Enterprise Cloud repository URL. */
 export function buildGitHubCommitUrl(githubRemoteUrl: string, hash: string): string | null {
-  if (!githubRemoteUrl.startsWith('https://github.com/') || !GITHUB_REPO_URL.test(githubRemoteUrl) || !isValidCommitHash(hash)) {
+  const trimmedRepoUrl = githubRemoteUrl.trim();
+  if (!trimmedRepoUrl.startsWith('https://')) {
     return null;
   }
-  return `${githubRemoteUrl}/commit/${hash.toLowerCase()}`;
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(trimmedRepoUrl);
+  } catch {
+    return null;
+  }
+  if (parsedUrl.pathname.replace(/\/+$/, '').toLowerCase().endsWith('.git')) {
+    return null;
+  }
+  const parsed = parseRemoteHostInfo(trimmedRepoUrl);
+  return parsed?.provider === 'github' ? buildRemoteCommitUrl(parsed, hash) : null;
 }
 
 /** Picks the first GitHub remote from `git remote -v` output, preferring `origin`. */

@@ -438,12 +438,15 @@ describe('GitHub remote URL normalization', () => {
   it.each([
     ['git@github.com:owner/repo.git', 'https://github.com/owner/repo'],
     ['git@github.com:owner/repo', 'https://github.com/owner/repo'],
+    ['git@acme.ghe.com:owner/repo.git', 'https://acme.ghe.com/owner/repo'],
+    ['ssh://git@acme.ghe.com/owner/repo', 'https://acme.ghe.com/owner/repo'],
+    ['https://Acme.GHE.COM/owner/repo.git', 'https://acme.ghe.com/owner/repo'],
     ['ssh://git@github.com/owner/repo.git', 'https://github.com/owner/repo'],
     ['ssh://git@github.com:22/owner/repo.git', 'https://github.com/owner/repo'],
     ['https://github.com/owner/repo.git', 'https://github.com/owner/repo'],
     ['https://github.com/owner/repo', 'https://github.com/owner/repo'],
     ['https://github.com/owner/repo/', 'https://github.com/owner/repo'],
-    ['https://user@github.com/My-Org/my.repo.git\n', 'https://github.com/My-Org/my.repo'],
+    ['https://git@github.com/My-Org/my.repo.git\n', 'https://github.com/My-Org/my.repo'],
     ['http://github.com/owner/repo.git', 'https://github.com/owner/repo'],
   ])('normalizes %s', (input, expected) => {
     expect(normalizeGitHubRemoteUrl(input)).toBe(expected);
@@ -457,6 +460,8 @@ describe('GitHub remote URL normalization', () => {
     'https://github.com/owner',
     'https://github.com/owner/repo/extra',
     'https://github.com/owner/<script>',
+    'https://user@github.com/owner/repo',
+    'https://user:pass@acme.ghe.com/owner/repo',
     'file:///home/me/repo',
     '',
   ])('rejects %s', (input) => {
@@ -477,7 +482,12 @@ describe('GitHub remote URL normalization', () => {
   it('builds commit URLs only for normalized GitHub URLs and valid hashes', () => {
     const hash = 'ABCDEF'.padEnd(40, '0');
     expect(buildGitHubCommitUrl('https://github.com/o/r', hash)).toBe(`https://github.com/o/r/commit/${hash.toLowerCase()}`);
+    expect(buildGitHubCommitUrl('https://acme.ghe.com/o/r', hash)).toBe(
+      `https://acme.ghe.com/o/r/commit/${hash.toLowerCase()}`,
+    );
     expect(buildGitHubCommitUrl('http://github.com/o/r', hash)).toBeNull();
+    expect(buildGitHubCommitUrl('http://acme.ghe.com/o/r', hash)).toBeNull();
+    expect(buildGitHubCommitUrl('https://acme.ghe.com/o/r.git', hash)).toBeNull();
     expect(buildGitHubCommitUrl('https://github.com.evil.com/o/r', hash)).toBeNull();
     expect(buildGitHubCommitUrl('javascript:alert(1)//https://github.com/o/r', hash)).toBeNull();
     expect(buildGitHubCommitUrl('https://github.com/o/r', 'HEAD')).toBeNull();
@@ -486,6 +496,9 @@ describe('GitHub remote URL normalization', () => {
   it('builds commit URLs for 64-character SHA-256 hashes and rejects near-miss lengths', () => {
     const sha256 = 'ABCDEF'.padEnd(64, '9');
     expect(buildGitHubCommitUrl('https://github.com/o/r', sha256)).toBe(`https://github.com/o/r/commit/${sha256.toLowerCase()}`);
+    expect(buildGitHubCommitUrl('https://acme.ghe.com/o/r', sha256)).toBe(
+      `https://acme.ghe.com/o/r/commit/${sha256.toLowerCase()}`,
+    );
     for (const length of [39, 41, 63, 65]) {
       expect(buildGitHubCommitUrl('https://github.com/o/r', 'a'.repeat(length))).toBeNull();
     }

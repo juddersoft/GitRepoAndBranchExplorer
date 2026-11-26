@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { validateGitRef } from '../src/git/gitExecutor';
+import { parseRemoteHostInfo } from '../src/git/remoteUrlBuilder';
 import { buildGitHubCommitUrl, buildRefMap, isValidCommitHash, parseForEachRefOutput, parseGitLogOutput } from '../src/git/gitService';
 import { isExtensionToWebviewMessage, isValidWebviewMessage, isWebviewToExtensionMessage } from '../src/types/messages';
 import { buildCspHeader, getNonce } from '../src/webview/security';
@@ -117,8 +118,15 @@ describe('adversarial external navigation guards', () => {
     'https://github.com@evil.com/owner/repo.git',
     'https://evil.com/github.com/owner/repo.git',
     'https://user:pass@github.com/owner/repo.git',
+    'https://acme.ghe.com@evil.com/owner/repo',
+    'https://evil.sub.ghe.com/owner/repo',
+    'https://ghe.com/owner/repo',
+    'https://acme.ghe.com.evil.com/owner/repo',
+    'https://user:pass@acme.ghe.com/owner/repo',
+    'https://evil.com/acme.ghe.com/owner/repo',
   ])('rejects spoofed GitHub remote URL %s', (remoteUrl) => {
     expect(buildGitHubCommitUrl(remoteUrl, validHash)).toBeNull();
+    expect(parseRemoteHostInfo(remoteUrl)).toBeNull();
   });
 
   it.each(['abc123', '../../issues', 'g'.repeat(40), 'a'.repeat(39), 'a'.repeat(41), 'a'.repeat(64).replace(/a/g, 'g')])(

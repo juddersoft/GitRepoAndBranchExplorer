@@ -18,6 +18,15 @@ export interface RemoteDestinationInfo {
 const NAME_SEGMENT = /^[A-Za-z0-9_.-]+$/;
 const COMMIT_HASH = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i;
 const CONTROL_CHARS = /[\x00-\x1f\x7f]/;
+const GITHUB_ENTERPRISE_CLOUD_HOST_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.ghe\.com$/;
+
+export function isGitHubEnterpriseCloudHost(hostname: string): boolean {
+  return GITHUB_ENTERPRISE_CLOUD_HOST_PATTERN.test(hostname.toLowerCase());
+}
+
+export function isGitHubHostname(hostname: string): boolean {
+  return hostname === 'github.com' || isGitHubEnterpriseCloudHost(hostname);
+}
 
 function safeNameSegment(value: string): boolean {
   return NAME_SEGMENT.test(value) && value !== '.' && value !== '..';
@@ -84,14 +93,18 @@ export function parseRemoteHostInfo(rawRemoteUrl: string): ParsedRemoteHost | nu
   const path = remote.path.map((part, index) => (index === lastIndex ? stripGitSuffix(part) : part));
   const hasUnsafeCredential =
     remote.password.length > 0 ||
-    (remote.username.length > 0 && remote.host !== 'dev.azure.com' && remote.host !== 'ssh.dev.azure.com' && remote.host !== 'github.com' &&
+    (remote.username.length > 0 && remote.host !== 'dev.azure.com' && remote.host !== 'ssh.dev.azure.com' && !isGitHubHostname(remote.host) &&
       remote.host !== 'gitlab.com' && remote.host !== 'bitbucket.org');
   if (hasUnsafeCredential || (remote.username.length > 0 && remote.username !== 'git' && remote.host !== 'dev.azure.com')) {
     return null;
   }
 
-  if (remote.host === 'github.com' && path.length === 2 && path.every(safeNameSegment)) {
-    return parsed('github', `https://github.com/${path[0]}/${path[1]}`, 'GitHub');
+  if (isGitHubHostname(remote.host) && path.length === 2 && path.every(safeNameSegment)) {
+    return parsed(
+      'github',
+      `https://${remote.host}/${path[0]}/${path[1]}`,
+      isGitHubEnterpriseCloudHost(remote.host) ? 'GitHub Enterprise' : 'GitHub',
+    );
   }
 
   if (remote.host === 'ssh.dev.azure.com' && path.length === 4 && path[0] === 'v3') {

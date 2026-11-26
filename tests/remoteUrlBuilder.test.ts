@@ -70,6 +70,12 @@ describe.each([validateGitHubRepoName, validateLocalBareRepoFolderName])(
 describe('parseRemoteHostInfo', () => {
   it.each([
     ['git@github.com:owner/repo.git', 'github', 'https://github.com/owner/repo', 'GitHub'],
+    ['https://Acme-Corp.GHE.COM/owner/repo.git', 'github', 'https://acme-corp.ghe.com/owner/repo', 'GitHub Enterprise'],
+    ['http://acme.ghe.com/owner/repo.git', 'github', 'https://acme.ghe.com/owner/repo', 'GitHub Enterprise'],
+    ['git://acme.ghe.com/owner/repo', 'github', 'https://acme.ghe.com/owner/repo', 'GitHub Enterprise'],
+    ['ssh://git@acme.ghe.com/owner/repo', 'github', 'https://acme.ghe.com/owner/repo', 'GitHub Enterprise'],
+    ['git@acme.ghe.com:owner/repo.git', 'github', 'https://acme.ghe.com/owner/repo', 'GitHub Enterprise'],
+    ['https://a.ghe.com/owner/repo', 'github', 'https://a.ghe.com/owner/repo', 'GitHub Enterprise'],
     ['ssh://git@github.com/owner/repo', 'github', 'https://github.com/owner/repo', 'GitHub'],
     ['http://github.com/owner/repo.git', 'github', 'https://github.com/owner/repo', 'GitHub'],
     ['git://github.com/owner/repo', 'github', 'https://github.com/owner/repo', 'GitHub'],
@@ -98,6 +104,13 @@ describe('parseRemoteHostInfo', () => {
     'https://gitlab.com/group/../repo',
     'https://bitbucket.org/workspace/..',
     'https://github.com/owner/repo?redirect=http://evil.test',
+    'https://ghe.com/owner/repo',
+    'https://evil.sub.ghe.com/owner/repo',
+    'https://-bad.ghe.com/owner/repo',
+    'https://bad-.ghe.com/owner/repo',
+    'https://acme.ghe.com.evil.com/owner/repo',
+    'https://user:pass@acme.ghe.com/owner/repo',
+    'https://evil.com/acme.ghe.com/owner/repo',
   ])('rejects malformed or unsafe remote %s', (raw) => {
     expect(parseRemoteHostInfo(raw)).toBeNull();
   });
@@ -105,6 +118,7 @@ describe('parseRemoteHostInfo', () => {
 
 describe('remote URL builders', () => {
   const github = parseRemoteHostInfo('https://github.com/owner/repo')!;
+  const githubEnterprise = parseRemoteHostInfo('https://acme.ghe.com/owner/repo')!;
   const azure = parseRemoteHostInfo('https://dev.azure.com/org/project/_git/repo')!;
   const gitlab = parseRemoteHostInfo('https://gitlab.com/group/subgroup/repo')!;
   const bitbucket = parseRemoteHostInfo('https://bitbucket.org/workspace/repo')!;
@@ -151,6 +165,31 @@ describe('remote URL builders', () => {
     expect(buildRemoteCreatePrUrl(bitbucket, 'feature/x')).toBe(
       'https://bitbucket.org/workspace/repo/pull-requests/new?source=feature%2Fx',
     );
+  });
+
+  it('builds GitHub Enterprise Cloud repository, branch, commit, and PR URLs', () => {
+    expect(buildRemoteRepoUrl(githubEnterprise)).toBe('https://acme.ghe.com/owner/repo');
+    expect(buildRemoteBranchUrl(githubEnterprise, 'feature/x')).toBe(
+      'https://acme.ghe.com/owner/repo/tree/feature/x',
+    );
+    expect(buildRemoteCommitUrl(githubEnterprise, sha1)).toBe(
+      `https://acme.ghe.com/owner/repo/commit/${sha1.toLowerCase()}`,
+    );
+    expect(buildRemoteCommitUrl(githubEnterprise, sha256)).toBe(
+      `https://acme.ghe.com/owner/repo/commit/${sha256}`,
+    );
+    expect(buildRemoteCreatePrUrl(githubEnterprise, 'feature/x')).toBe(
+      'https://acme.ghe.com/owner/repo/compare/feature/x?expand=1',
+    );
+  });
+
+  it('classifies GitHub Enterprise Cloud remotes with the enterprise provider name', () => {
+    expect(classifyRemoteDestination('git@acme.ghe.com:owner/repo.git')).toEqual({
+      kind: 'hosted',
+      rawUrl: 'git@acme.ghe.com:owner/repo.git',
+      displayLabel: 'GitHub Enterprise: https://acme.ghe.com/owner/repo',
+      providerName: 'GitHub Enterprise',
+    });
   });
 
   it.each(['', '..', 'feature/../main', 'feature/\nmain', 'feature//main'])('rejects unsafe branch %j', (branch) => {
