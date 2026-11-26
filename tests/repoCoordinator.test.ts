@@ -50,6 +50,7 @@ const mocks = vi.hoisted(() => ({
   openCommitFileDiff: vi.fn(),
   buildShowUri: vi.fn(),
   stat: vi.fn(),
+  readdir: vi.fn(),
   showTextDocument: vi.fn(),
   openGitHubCommit: vi.fn(),
   isTrusted: true,
@@ -150,7 +151,7 @@ vi.mock('../src/git/gitService', () => ({
   isValidCommitHash: (value: string): boolean => /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value),
 }));
 
-vi.mock('fs', () => ({ promises: { stat: mocks.stat } }));
+vi.mock('fs', () => ({ promises: { stat: mocks.stat, readdir: mocks.readdir } }));
 vi.mock('../src/github/githubService', () => ({
   GitHubService: class {
     openCommit = mocks.openGitHubCommit;
@@ -311,7 +312,8 @@ describe('RepoCoordinator', () => {
     mocks.openExternal.mockResolvedValue(true);
     showCheckedOutBadge = true;
     showFolderCounts = true;
-    mocks.stat.mockResolvedValue({ isFile: () => true });
+    mocks.stat.mockResolvedValue({ isFile: () => true, isDirectory: () => true });
+    mocks.readdir.mockResolvedValue([]);
     mocks.buildShowUri.mockImplementation((repoRoot: string, revSpec: string, filePath: string) => ({
       scheme: 'git-repo-explorer-show',
       repoRoot,
@@ -1733,28 +1735,284 @@ describe('RepoCoordinator', () => {
     expect([...diffProvider.setAllowedRepoRoots.mock.calls[0][0]]).toEqual(['/repo', '/other', '/linked']);
   });
 
-  it("supports leaveInWorktree without changing or stashing the current worktree", async () => {
+  it('queues a create worktree dialog until a cold-start editor is ready', async () => {
+    coordinator.attach(sidebar);
+    coordinator.handleMessage('sidebar', { type: 'webviewReady' });
+    await vi.waitFor(() => expect(sidebar.ofType('repoSnapshot')).toHaveLength(1));
+    coordinator.attach(editor);
+
+    coordinator.handleMessage('sidebar', {
+      type: 'gitAction',
+      payload: { action: 'createWorktree' },
+    });
+    await vi.waitFor(() => expect(host.openPanel).toHaveBeenCalledTimes(1));
+    expect(editor.ofType('showCreateWorktreeDialog')).toHaveLength(0);
+
+    coordinator.handleMessage('editor', { type: 'webviewReady' });
+    expect(editor.ofType('showCreateWorktreeDialog')).toContainEqual({
+      type: 'showCreateWorktreeDialog',
+      payload: expect.objectContaining({
+        repoRoot: '/repo',
+        availableBranches: ['main', 'feature'],
+        branchLocked: false,
+      }),
+    });
+  });
+
+  it('queues the dirty-worktree dialog for a cold-start editor without creating the branch', async () => {
     mocks.hasWorkingTreeChanges.mockResolvedValue(true);
-    mocks.showQuickPick
-      .mockResolvedValueOnce({ label: 'Leave Changes Here & Create Worktree…' })
-      .mockResolvedValueOnce({ label: 'Stay Here' });
-    mocks.showOpenDialog.mockResolvedValueOnce([{ fsPath: '/worktrees' }]);
-    mocks.showInputBox.mockResolvedValueOnce('repo-feature-new');
-    mocks.stat.mockRejectedValueOnce(Object.assign(new Error('missing'), { code: 'ENOENT' }));
+    mocks.showQuickPick.mockResolvedValueOnce({ label: 'Leave Changes Here & Create Worktree…' });
+    coordinator.attach(sidebar);
+    coordinator.handleMessage('sidebar', { type: 'webviewReady' });
+    await vi.waitFor(() => expect(sidebar.ofType('repoSnapshot')).toHaveLength(1));
+    coordinator.attach(editor);
+
+    coordinator.handleMessage('sidebar', {
+      type: 'submitCreateBranch',
+      payload: { branchName: 'feature/queued', checkout: true, track: false },
+    });
+    await vi.waitFor(() => expect(host.openPanel).toHaveBeenCalledTimes(1));
+    expect(editor.ofType('showCreateWorktreeDialog')).toHaveLength(0);
+
+    coordinator.handleMessage('editor', { type: 'webviewReady' });
+    expect(editor.ofType('showCreateWorktreeDialog')).toContainEqual({
+      type: 'showCreateWorktreeDialog',
+      payload: expect.objectContaining({
+        initialBranchName: 'feature/queued',
+        initialCreateBranch: true,
+        branchLocked: true,
+      }),
+    });
+    expect(mocks.createBranch).not.toHaveBeenCalled();
+  });
+
+  it('returns the selected worktree parent and child names, but blocks browsing in untrusted workspaces', async () => {
+    await openBoth();
+    mocks.showOpenDialog.mockResolvedValueOnce([{ fsPath: '/selected-worktrees' }]);
+    mocks.readdir.mockResolvedValueOnce(['alpha', 'beta']);
+
+    coordinator.handleMessage('editor', {
+      type: 'browseWorktreeParentFolder',
+      payload: { currentParentPath: '/current-worktrees' },
+    });
+    await vi.waitFor(() => expect(editor.ofType('worktreeParentFolderSelected')).toEqual([
+      {
+        type: 'worktreeParentFolderSelected',
+        payload: {
+          parentFolderPath: '/selected-worktrees',
+          existingChildNames: ['alpha', 'beta'],
+        },
+      },
+    ]));
+
+    mocks.isTrusted = false;
+    coordinator.handleMessage('editor', {
+      type: 'browseWorktreeParentFolder',
+      payload: { currentParentPath: '/current-worktrees' },
+    });
+    expect(mocks.showOpenDialog).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects unsafe worktree submissions before invoking Git', async () => {
+    mocks.getRepoSnapshot.mockResolvedValue({
+      ...MAIN_AND_FEATURE(),
+      localBranches: MAIN_AND_FEATURE().localBranches.map((item) =>
+        item.name === 'feature' ? { ...item, worktreePath: '/linked-feature' } : item,
+      ),
+    });
+    mocks.stat.mockImplementation(async (candidate: string) => {
+      const existingTarget = path.resolve('/worktrees', 'existing');
+      if (candidate === '/repo/sub' || candidate === '/worktrees' || candidate === existingTarget) {
+        return { isDirectory: () => candidate !== existingTarget };
+      }
+      throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+    });
+    await openBoth();
+
+    const submissions = [
+      {
+        branchName: 'bad..name',
+        createBranch: true,
+        parentFolderPath: '/worktrees',
+        folderName: 'invalid',
+      },
+      {
+        branchName: 'feature',
+        createBranch: false,
+        parentFolderPath: '/worktrees',
+        folderName: 'checked-out',
+      },
+      {
+        branchName: 'feature/new',
+        createBranch: true,
+        parentFolderPath: '/repo/sub',
+        folderName: 'nested',
+      },
+      {
+        branchName: 'feature/new',
+        createBranch: true,
+        parentFolderPath: '/worktrees',
+        folderName: 'existing',
+      },
+    ];
+    for (const [index, payload] of submissions.entries()) {
+      coordinator.handleMessage('editor', {
+        type: 'submitCreateWorktree',
+        payload: { ...payload, openInNewWindow: false },
+      });
+      await vi.waitFor(() => expect(mocks.showWarningMessage).toHaveBeenCalledTimes(index + 1));
+    }
+    expect(mocks.addWorktree).not.toHaveBeenCalled();
+  });
+
+  it('rejects Windows case-mismatched paths nested inside the repository', async () => {
+    mocks.discoverWorkspaceRepositories.mockResolvedValue([{
+      repoRoot: 'C:\\Repos\\App',
+      repoName: 'App',
+      commonDir: 'C:\\Repos\\App\\.git',
+      currentBranch: 'main',
+    }]);
+    mocks.getRepoSnapshot.mockResolvedValue({
+      ...MAIN_AND_FEATURE(),
+      repoRoot: 'C:\\Repos\\App',
+    });
+    mocks.stat.mockResolvedValue({ isDirectory: () => true });
+    await openBoth();
+
+    coordinator.handleMessage('editor', {
+      type: 'submitCreateWorktree',
+      payload: {
+        branchName: 'feature/new',
+        createBranch: true,
+        parentFolderPath: 'c:/repos/app/sub',
+        folderName: 'nested',
+        openInNewWindow: false,
+      },
+    });
+    await vi.waitFor(() => expect(mocks.showWarningMessage).toHaveBeenCalledWith(
+      'The new worktree cannot be created inside the repository.',
+    ));
+    expect(mocks.addWorktree).not.toHaveBeenCalled();
+  });
+
+  it('blocks worktree submission and Git invocation in an untrusted workspace', async () => {
+    await openBoth();
+    mocks.isTrusted = false;
+
+    coordinator.handleMessage('editor', {
+      type: 'submitCreateWorktree',
+      payload: {
+        branchName: 'feature/new',
+        createBranch: true,
+        parentFolderPath: '/worktrees',
+        folderName: 'new',
+        openInNewWindow: true,
+      },
+    });
+
+    expect(mocks.stat).not.toHaveBeenCalled();
+    expect(mocks.addWorktree).not.toHaveBeenCalled();
+    expect(editor.ofType('repoError').at(-1)).toMatchObject({
+      payload: { code: 'UNTRUSTED_WORKSPACE' },
+    });
+  });
+
+  it('opens newly created worktrees only when requested', async () => {
+    mocks.stat.mockImplementation(async (candidate: string) => {
+      if (candidate === '/worktrees') {
+        return { isDirectory: () => true };
+      }
+      throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+    });
+    await openBoth();
+
+    coordinator.handleMessage('editor', {
+      type: 'submitCreateWorktree',
+      payload: {
+        branchName: 'feature/new',
+        createBranch: true,
+        parentFolderPath: '/worktrees',
+        folderName: 'open',
+        openInNewWindow: true,
+      },
+    });
+    await vi.waitFor(() => expect(mocks.executeCommand).toHaveBeenCalledWith(
+      'vscode.openFolder',
+      expect.objectContaining({ fsPath: path.resolve('/worktrees', 'open') }),
+      { forceNewWindow: true },
+    ));
+
+    mocks.executeCommand.mockClear();
+    coordinator.handleMessage('editor', {
+      type: 'submitCreateWorktree',
+      payload: {
+        branchName: 'feature/closed',
+        createBranch: true,
+        parentFolderPath: '/worktrees',
+        folderName: 'closed',
+        openInNewWindow: false,
+      },
+    });
+    await vi.waitFor(() => expect(mocks.addWorktree).toHaveBeenCalledTimes(2));
+    expect(mocks.executeCommand).not.toHaveBeenCalledWith(
+      'vscode.openFolder',
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('opens a pre-filled worktree dialog when leaving dirty changes in the current worktree', async () => {
+    mocks.hasWorkingTreeChanges.mockResolvedValue(true);
+    mocks.showQuickPick.mockResolvedValueOnce({ label: 'Leave Changes Here & Create Worktree…' });
+    mocks.readdir.mockResolvedValueOnce(['repo']);
     await openBoth();
 
     coordinator.handleMessage('sidebar', {
       type: 'submitCreateBranch',
       payload: { branchName: 'feature/new', checkout: true, track: false },
     });
-    await vi.waitFor(() => expect(mocks.addWorktree).toHaveBeenCalledWith(
-      '/repo',
-      path.join('/worktrees', 'repo-feature-new'),
-      { branchName: 'feature/new', createBranch: true, startPoint: undefined },
-    ));
+    await vi.waitFor(() => expect(editor.ofType('showCreateWorktreeDialog')).toHaveLength(1));
+    expect(editor.ofType('showCreateWorktreeDialog')).toContainEqual({
+      type: 'showCreateWorktreeDialog',
+      payload: {
+        repoRoot: '/repo',
+        repoName: 'repo',
+        defaultParentPath: path.dirname('/repo'),
+        existingChildNames: ['repo'],
+        availableBranches: ['main', 'feature'],
+        allLocalBranchNames: ['main', 'feature'],
+        initialBranchName: 'feature/new',
+        initialCreateBranch: true,
+        branchLocked: true,
+      },
+    });
+    expect(mocks.showOpenDialog).not.toHaveBeenCalled();
+    expect(mocks.addWorktree).not.toHaveBeenCalled();
     expect(mocks.createBranch).not.toHaveBeenCalled();
     expect(mocks.stashChanges).not.toHaveBeenCalled();
     expect(mocks.discardWorkingTreeChanges).not.toHaveBeenCalled();
+
+    mocks.stat.mockImplementation(async (candidate: string) => {
+      if (candidate === '/worktrees') {
+        return { isDirectory: () => true };
+      }
+      throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+    });
+    coordinator.handleMessage('editor', {
+      type: 'submitCreateWorktree',
+      payload: {
+        branchName: 'feature/new',
+        createBranch: true,
+        parentFolderPath: '/worktrees',
+        folderName: 'repo-feature-new',
+        openInNewWindow: false,
+      },
+    });
+    await vi.waitFor(() => expect(mocks.addWorktree).toHaveBeenCalledWith(
+      '/repo',
+      path.resolve('/worktrees', 'repo-feature-new'),
+      { branchName: 'feature/new', createBranch: true, startPoint: undefined },
+    ));
   });
 
   it('blocks main and current worktree removal without prompting or invoking Git', async () => {

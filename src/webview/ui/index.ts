@@ -3,6 +3,7 @@ import type { ExtensionToWebviewMessage, GitAction } from '../../types/messages'
 import { isExtensionToWebviewMessage } from '../../types/messages';
 import { ContextMenu } from './ContextMenu';
 import { CreateBranchModal } from './CreateBranchModal';
+import { CreateWorktreeModal } from './CreateWorktreeModal';
 import type { StoredColumnWidths } from './columnResize';
 import { sanitizeStoredColumnWidths } from './columnResize';
 import type { MenuActionId } from './contextMenuModel';
@@ -59,6 +60,7 @@ let state: ExplorerUiState = { ...createInitialState(), ...readPersistedState(vs
 let columnWidths: StoredColumnWidths = readPersistedColumnWidths(vscode.getState());
 const knownRemoteNames = new Set<string>();
 let pendingRevealCommitHash: string | null = null;
+let createWorktreeModal: CreateWorktreeModal | null = null;
 
 function persist(): void {
   const data: PersistedState = {
@@ -305,6 +307,29 @@ function handleMessage(message: ExtensionToWebviewMessage): void {
       modal.open();
       break;
     }
+    case 'showCreateWorktreeDialog': {
+      createWorktreeModal?.close();
+      createWorktreeModal = new CreateWorktreeModal(
+        message.payload,
+        (payload) => {
+          createWorktreeModal = null;
+          vscode.postMessage({ type: 'submitCreateWorktree', payload });
+        },
+        (currentParentPath) =>
+          vscode.postMessage({
+            type: 'browseWorktreeParentFolder',
+            payload: { currentParentPath },
+          }),
+      );
+      createWorktreeModal.open();
+      break;
+    }
+    case 'worktreeParentFolderSelected':
+      createWorktreeModal?.updateParentFolder(
+        message.payload.parentFolderPath,
+        message.payload.existingChildNames,
+      );
+      break;
   }
 }
 

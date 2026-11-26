@@ -141,6 +141,106 @@ describe('createBranchAtRef validation', () => {
     });
   });
 
+  describe('create worktree dialog messages', () => {
+    it('validates browse, submit, and extension dialog requests', () => {
+      expect(isWebviewToExtensionMessage({
+        type: 'browseWorktreeParentFolder',
+        payload: { currentParentPath: '/worktrees' },
+      })).toBe(true);
+      expect(isWebviewToExtensionMessage({
+        type: 'submitCreateWorktree',
+        payload: {
+          branchName: 'feature/new',
+          createBranch: true,
+          startPoint: 'main',
+          parentFolderPath: '/worktrees',
+          folderName: 'new_wt',
+          openInNewWindow: true,
+        },
+      })).toBe(true);
+      expect(isExtensionToWebviewMessage({
+        type: 'showCreateWorktreeDialog',
+        payload: {
+          repoRoot: '/repo',
+          repoName: 'repo',
+          defaultParentPath: '/',
+          existingChildNames: ['repo'],
+          availableBranches: ['main'],
+          allLocalBranchNames: ['main'],
+          initialBranchName: 'feature/new',
+          initialCreateBranch: true,
+          branchLocked: true,
+          startPoint: 'main',
+        },
+      })).toBe(true);
+      expect(isExtensionToWebviewMessage({
+        type: 'worktreeParentFolderSelected',
+        payload: { parentFolderPath: '/other', existingChildNames: [] },
+      })).toBe(true);
+    });
+
+    it('rejects extra fields, unsafe strings, and polluted records', () => {
+      expect(isWebviewToExtensionMessage({
+        type: 'submitCreateWorktree',
+        payload: {
+          branchName: 'feature/new',
+          createBranch: true,
+          parentFolderPath: '/worktrees',
+          folderName: 'new_wt',
+          openInNewWindow: true,
+          extra: true,
+        },
+      })).toBe(false);
+      expect(isWebviewToExtensionMessage({
+        type: 'browseWorktreeParentFolder',
+        payload: { currentParentPath: 'bad\u0000path' },
+      })).toBe(false);
+      const payload = JSON.parse(
+        '{"repoRoot":"/repo","repoName":"repo","defaultParentPath":"/","existingChildNames":[],' +
+        '"availableBranches":[],"allLocalBranchNames":[],"branchLocked":false,"__proto__":{}}',
+      );
+      expect(isExtensionToWebviewMessage({ type: 'showCreateWorktreeDialog', payload })).toBe(false);
+    });
+
+    it.each(['__proto__', 'constructor', 'prototype'])(
+      'rejects the %s pollution key on worktree requests',
+      (key) => {
+        const browsePayload = JSON.parse(`{"currentParentPath":"/worktrees","${key}":{}}`) as unknown;
+        const submitPayload = JSON.parse(
+          `{"branchName":"feature/new","createBranch":true,"parentFolderPath":"/worktrees",` +
+          `"folderName":"new_wt","openInNewWindow":true,"${key}":{}}`,
+        ) as unknown;
+        expect(isWebviewToExtensionMessage({ type: 'browseWorktreeParentFolder', payload: browsePayload }))
+          .toBe(false);
+        expect(isWebviewToExtensionMessage({ type: 'submitCreateWorktree', payload: submitPayload }))
+          .toBe(false);
+      },
+    );
+
+    it('rejects unexpected properties on both worktree request envelopes and payloads', () => {
+      expect(isWebviewToExtensionMessage({
+        type: 'browseWorktreeParentFolder',
+        payload: { currentParentPath: '/worktrees' },
+        extra: true,
+      })).toBe(false);
+      expect(isWebviewToExtensionMessage({
+        type: 'browseWorktreeParentFolder',
+        payload: { currentParentPath: '/worktrees', extra: true },
+      })).toBe(false);
+      expect(isWebviewToExtensionMessage({
+        type: 'submitCreateWorktree',
+        payload: {
+          branchName: 'feature/new',
+          createBranch: true,
+          parentFolderPath: '/worktrees',
+          folderName: 'new_wt',
+          openInNewWindow: true,
+        },
+        extra: true,
+      })).toBe(false);
+    });
+  });
+
   it('rejects option-like, empty, oversized and non-string start points', () => {
     for (const value of ['', '-b', '--orphan', 'a b', 'x'.repeat(256), 1, undefined]) {
       expect(isWebviewToExtensionMessage(message(value)), String(value)).toBe(false);

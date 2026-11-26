@@ -7,6 +7,7 @@ import type {
   WorkspaceRepoInfo,
 } from './git';
 import type { CreateBranchDialogRequest, CreateBranchSourceKind } from '../webview/ui/branchCreateModel';
+import type { CreateWorktreeDialogPayload } from '../webview/ui/worktreeCreateModel';
 
 export type TrackingIndicatorOrder = 'vscode' | 'visualStudio';
 
@@ -131,6 +132,18 @@ export type WebviewToExtensionMessage =
   | { type: 'createBranchAtRef'; payload: { startPoint: string } }
   | { type: 'openCreateBranchDialog'; payload: { startPoint?: string; sourceKind?: CreateBranchSourceKind } }
   | { type: 'submitCreateBranch'; payload: { branchName: string; startPoint?: string; checkout: boolean; track: boolean } }
+  | { type: 'browseWorktreeParentFolder'; payload: { currentParentPath?: string } }
+  | {
+      type: 'submitCreateWorktree';
+      payload: {
+        branchName: string;
+        createBranch: boolean;
+        startPoint?: string;
+        parentFolderPath: string;
+        folderName: string;
+        openInNewWindow: boolean;
+      };
+    }
   | { type: 'setTabPinned'; payload: { pinned: boolean } }
   | { type: 'setShowCheckedOutBadge'; payload: { show: boolean } }
   | { type: 'setShowFolderCounts'; payload: { show: boolean } }
@@ -205,7 +218,12 @@ export type ExtensionToWebviewMessage =
   | { type: 'actionStatus'; payload: ActionStatusPayload }
   | { type: 'syncState'; payload: SyncStatePayload }
   | { type: 'revealCommit'; payload: { hash: string; outsideGraph?: boolean } }
-  | { type: 'showCreateBranchDialog'; payload: CreateBranchDialogRequest };
+  | { type: 'showCreateBranchDialog'; payload: CreateBranchDialogRequest }
+  | { type: 'showCreateWorktreeDialog'; payload: CreateWorktreeDialogPayload }
+  | {
+      type: 'worktreeParentFolderSelected';
+      payload: { parentFolderPath: string; existingChildNames: string[] };
+    };
 
 export interface ActionStatusPayload {
   busy: boolean;
@@ -317,6 +335,19 @@ function isSafePathArgument(value: unknown): value is string {
   );
 }
 
+function isSafeWorktreeFolderNameArgument(value: unknown): value is string {
+  return (
+    isSafePathArgument(value) &&
+    value.length <= 255 &&
+    value !== '.' &&
+    !value.includes('..') &&
+    !/[/\\]/.test(value) &&
+    !/[<>:"|?*\x00-\x1f]/.test(value) &&
+    !/[. ]$/.test(value) &&
+    !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i.test(value)
+  );
+}
+
 /** Validates untrusted data received from a webview before the extension acts on it. */
 export function isWebviewToExtensionMessage(value: unknown): value is WebviewToExtensionMessage {
   if (!isSafeRecord(value)) {
@@ -378,6 +409,37 @@ export function isWebviewToExtensionMessage(value: unknown): value is WebviewToE
           (startPoint === undefined || isCommitHash(startPoint) || isSafeRefArgument(startPoint)) &&
           typeof ownField(payload, 'checkout') === 'boolean' &&
           typeof ownField(payload, 'track') === 'boolean'
+        );
+      }
+    case 'browseWorktreeParentFolder':
+      if (!hasOnlyFields(value, ['type', 'payload']) || payload === null || !hasOnlyFields(payload, ['currentParentPath'])) {
+        return false;
+      }
+      {
+        const currentParentPath = ownField(payload, 'currentParentPath');
+        return currentParentPath === undefined || isSafePathArgument(currentParentPath);
+      }
+    case 'submitCreateWorktree':
+      if (!hasOnlyFields(value, ['type', 'payload']) || payload === null) {
+        return false;
+      }
+      {
+        const startPoint = ownField(payload, 'startPoint');
+        return (
+          hasOnlyFields(payload, [
+            'branchName',
+            'createBranch',
+            'startPoint',
+            'parentFolderPath',
+            'folderName',
+            'openInNewWindow',
+          ]) &&
+          isSafeRefArgument(ownField(payload, 'branchName')) &&
+          typeof ownField(payload, 'createBranch') === 'boolean' &&
+          (startPoint === undefined || isCommitHash(startPoint) || isSafeRefArgument(startPoint)) &&
+          isSafePathArgument(ownField(payload, 'parentFolderPath')) &&
+          isSafeWorktreeFolderNameArgument(ownField(payload, 'folderName')) &&
+          typeof ownField(payload, 'openInNewWindow') === 'boolean'
         );
       }
     case 'setTabPinned':
@@ -559,6 +621,55 @@ export function isExtensionToWebviewMessage(value: unknown): value is ExtensionT
         (payload.remoteTrackingRef === undefined || isSafeRefArgument(payload.remoteTrackingRef)) &&
         Array.isArray(payload.existingLocalBranches) &&
         payload.existingLocalBranches.every((branch: unknown) => isSafeRefArgument(branch))
+      );
+    case 'showCreateWorktreeDialog':
+      return (
+        isSafeRecord(value) &&
+        hasOnlyFields(value, ['type', 'payload']) &&
+        isSafeRecord(payload) &&
+        hasOnlyFields(payload, [
+          'repoRoot',
+          'repoName',
+          'defaultParentPath',
+          'existingChildNames',
+          'availableBranches',
+          'allLocalBranchNames',
+          'initialBranchName',
+          'initialCreateBranch',
+          'branchLocked',
+          'startPoint',
+        ]) &&
+        isSafePathArgument(payload.repoRoot) &&
+        typeof payload.repoName === 'string' &&
+        payload.repoName.length > 0 &&
+        payload.repoName.length <= 255 &&
+        isSafePathArgument(payload.defaultParentPath) &&
+        Array.isArray(payload.existingChildNames) &&
+        payload.existingChildNames.every(
+          (name: unknown) => isSafePathArgument(name) && !/[/\\]/.test(name),
+        ) &&
+        Array.isArray(payload.availableBranches) &&
+        payload.availableBranches.every((branch: unknown) => isSafeRefArgument(branch)) &&
+        Array.isArray(payload.allLocalBranchNames) &&
+        payload.allLocalBranchNames.every((branch: unknown) => isSafeRefArgument(branch)) &&
+        (payload.initialBranchName === undefined || isSafeRefArgument(payload.initialBranchName)) &&
+        (payload.initialCreateBranch === undefined || typeof payload.initialCreateBranch === 'boolean') &&
+        typeof payload.branchLocked === 'boolean' &&
+        (payload.startPoint === undefined ||
+          isCommitHash(payload.startPoint) ||
+          isSafeRefArgument(payload.startPoint))
+      );
+    case 'worktreeParentFolderSelected':
+      return (
+        isSafeRecord(value) &&
+        hasOnlyFields(value, ['type', 'payload']) &&
+        isSafeRecord(payload) &&
+        hasOnlyFields(payload, ['parentFolderPath', 'existingChildNames']) &&
+        isSafePathArgument(payload.parentFolderPath) &&
+        Array.isArray(payload.existingChildNames) &&
+        payload.existingChildNames.every(
+          (name: unknown) => isSafePathArgument(name) && !/[/\\]/.test(name),
+        )
       );
     default:
       return false;

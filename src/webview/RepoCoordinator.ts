@@ -45,6 +45,7 @@ import type { RefTarget } from './ui/state';
 import { isSameSelection, listRefTargets, normalizeSelection } from './ui/state';
 import type { CreateBranchDialogRequest, CreateBranchSourceKind } from './ui/branchCreateModel';
 import { extractShortRemoteBranchName } from './ui/branchCreateModel';
+import type { CreateWorktreeDialogPayload } from './ui/worktreeCreateModel';
 
 /** Git metadata whose changes mean branches, HEAD or remote refs moved outside this panel. */
 export const GIT_WATCH_GLOB = '.git/{HEAD,FETCH_HEAD,ORIG_HEAD,packed-refs,refs/**}';
@@ -115,6 +116,24 @@ function isNotFullyMergedError(err: unknown): boolean {
   return err instanceof GitExecutionError && /not fully merged/i.test(err.stderr);
 }
 
+function isWindowsStylePath(value: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(value) || /^[/\\]{2}[^/\\]+[/\\][^/\\]+/.test(value);
+}
+
+function resolveWorktreePath(value: string): string {
+  return (process.platform === 'win32' || isWindowsStylePath(value) ? path.win32 : path.posix).resolve(value);
+}
+
+function isAbsoluteWorktreePath(value: string): boolean {
+  return (process.platform === 'win32' || isWindowsStylePath(value) ? path.win32 : path.posix).isAbsolute(value);
+}
+
+function normalizeWorktreePathForComparison(value: string): string {
+  const windowsPath = process.platform === 'win32' || isWindowsStylePath(value);
+  const resolved = (windowsPath ? path.win32 : path.posix).resolve(value).replace(/\\/g, '/');
+  return windowsPath ? resolved.toLowerCase() : resolved;
+}
+
 /** The two webviews the coordinator keeps in step: the Activity Bar branch tree and the editor timeline. */
 export type SurfaceId = 'sidebar' | 'editor';
 
@@ -180,6 +199,7 @@ export class RepoCoordinator implements vscode.Disposable {
   private watchDebounceTimer: ReturnType<typeof setTimeout> | undefined;
   private pendingRevealCommitHash: string | null = null;
   private pendingCreateBranchDialog: CreateBranchDialogRequest | null = null;
+  private pendingCreateWorktreeDialog: CreateWorktreeDialogPayload | null = null;
   private isLoadingMoreCommits = false;
   private loadingMoreCommits: Promise<boolean> | null = null;
   private isSearchingForRevealCommit = false;
@@ -313,6 +333,7 @@ export class RepoCoordinator implements vscode.Disposable {
         if (source === 'editor') {
           this.flushPendingRevealCommit();
           this.flushPendingCreateBranchDialog();
+          this.flushPendingCreateWorktreeDialog();
         }
         break;
       case 'requestRefresh':
@@ -353,6 +374,12 @@ export class RepoCoordinator implements vscode.Disposable {
         break;
       case 'submitCreateBranch':
         void this.handleSubmitCreateBranch(message.payload);
+        break;
+      case 'browseWorktreeParentFolder':
+        void this.handleBrowseWorktreeParentFolder(message.payload.currentParentPath);
+        break;
+      case 'submitCreateWorktree':
+        void this.handleSubmitCreateWorktree(message.payload);
         break;
       case 'setTabPinned':
         this.host.setTabPinned(message.payload.pinned);
@@ -481,6 +508,7 @@ export class RepoCoordinator implements vscode.Disposable {
     this.githubRemoteByRepo.clear();
     this.selection = EMPTY_SELECTION;
     this.pendingCreateBranchDialog = null;
+    this.pendingCreateWorktreeDialog = null;
     this.gitDiffProvider?.clearAllowedRepoRoots();
     this.disposeGitWatcher();
     this.broadcast({ type: 'workspaceRepos', payload: { repos: [], activeRepoRoot: null } });
@@ -764,130 +792,200 @@ export class RepoCoordinator implements vscode.Disposable {
     if (!snapshot) {
       return;
     }
-    let branchName = target;
-    let createBranch = false;
-    if (branchName !== undefined) {
-      const branch = snapshot.localBranches.find((candidate) => candidate.name === branchName);
+    if (target !== undefined) {
+      const branch = snapshot.localBranches.find((candidate) => candidate.name === target);
       if (!branch || branch.worktreePath) {
         void vscode.window.showWarningMessage(
           !branch
-            ? `"${branchName}" is not a local branch in this repository.`
-            : `Branch "${branchName}" is already checked out in worktree: ${branch.worktreePath}`,
+            ? `"${target}" is not a local branch in this repository.`
+            : `Branch "${target}" is already checked out in worktree: ${branch.worktreePath}`,
         );
         return;
       }
-    } else {
-      const available = snapshot.localBranches.filter((branch) => !branch.worktreePath);
-      const createNewLabel = 'Create New Branch in Worktree…';
-      const choice = await vscode.window.showQuickPick(
-        [
-          ...available.map((branch) => ({ label: branch.name, description: 'Existing branch' })),
-          { label: createNewLabel },
-        ],
-        { title: 'Create Worktree', placeHolder: 'Choose an available local branch or create a new branch', ignoreFocusOut: true },
-      );
-      if (!choice) {
-        return;
-      }
-      if (choice.label === createNewLabel) {
-        const input = await vscode.window.showInputBox({
-          title: 'Create New Branch in Worktree',
-          prompt: 'New branch name',
-          validateInput: (value) => {
-            try {
-              validateGitRef(value);
-              return null;
-            } catch (err) {
-              return describeError(err);
-            }
-          },
-        });
-        if (input === undefined) {
-          return;
-        }
-        branchName = validateGitRef(input);
-        createBranch = true;
-      } else {
-        branchName = choice.label;
-      }
     }
-    if (!branchName) {
-      return;
-    }
-    await this.createWorktreeAtPath(snapshot, branchName, createBranch);
+    await this.openCreateWorktreeDialog(snapshot, {
+      ...(target === undefined ? {} : { initialBranchName: target }),
+      branchLocked: target !== undefined,
+    });
   }
 
-  private async createWorktreeAtPath(
+  private async readChildDirectoryNames(dirPath: string): Promise<string[]> {
+    try {
+      return await fs.promises.readdir(dirPath);
+    } catch {
+      return [];
+    }
+  }
+
+  private async openCreateWorktreeDialog(
     snapshot: RepoSnapshot,
-    branchName: string,
-    createBranch: boolean,
-    startPoint?: string,
+    options: {
+      readonly initialBranchName?: string;
+      readonly initialCreateBranch?: boolean;
+      readonly branchLocked: boolean;
+      readonly startPoint?: string;
+    },
   ): Promise<void> {
-    const targetPath = await this.pickWorktreePath(snapshot, branchName);
-    if (!targetPath) {
-      return;
-    }
-    const created = await this.runGitOperation(`Creating worktree for ${branchName}`, (root) =>
-      this.gitService.addWorktree(root, targetPath, { branchName, createBranch, startPoint }),
-    );
-    if (created) {
-      await this.offerOpenWorktree(targetPath);
-    }
+    const defaultParentPath = path.dirname(snapshot.repoRoot);
+    this.pendingCreateWorktreeDialog = {
+      repoRoot: snapshot.repoRoot,
+      repoName: snapshot.repoName,
+      defaultParentPath,
+      existingChildNames: await this.readChildDirectoryNames(defaultParentPath),
+      availableBranches: snapshot.localBranches
+        .filter((branch) => !branch.worktreePath)
+        .map((branch) => branch.name),
+      allLocalBranchNames: snapshot.localBranches.map((branch) => branch.name),
+      ...(options.initialBranchName === undefined ? {} : { initialBranchName: options.initialBranchName }),
+      ...(options.initialCreateBranch === undefined ? {} : { initialCreateBranch: options.initialCreateBranch }),
+      branchLocked: options.branchLocked,
+      ...(options.startPoint === undefined ? {} : { startPoint: options.startPoint }),
+    };
+    this.host.openPanel();
+    this.flushPendingCreateWorktreeDialog();
   }
 
-  private async pickWorktreePath(snapshot: RepoSnapshot, branchName: string): Promise<string | undefined> {
-    const parent = await vscode.window.showOpenDialog({
+  private async handleBrowseWorktreeParentFolder(currentParentPath: string | undefined): Promise<void> {
+    if (!this.ensureTrustedWorkspace()) {
+      return;
+    }
+    const snapshot = this.lastSnapshot;
+    const defaultPath = currentParentPath && path.isAbsolute(currentParentPath)
+      ? currentParentPath
+      : snapshot === null
+        ? undefined
+        : path.dirname(snapshot.repoRoot);
+    const selected = await vscode.window.showOpenDialog({
       canSelectFiles: false,
       canSelectFolders: true,
       canSelectMany: false,
-      defaultUri: vscode.Uri.file(path.dirname(snapshot.repoRoot)),
-      openLabel: 'Select Parent Folder for Worktree',
+      ...(defaultPath === undefined ? {} : { defaultUri: vscode.Uri.file(defaultPath) }),
+      openLabel: 'Select Parent Folder',
     });
-    if (!parent?.[0]) {
-      return undefined;
+    const selectedPath = selected?.[0]?.fsPath;
+    const editor = this.surfaces.get('editor');
+    if (selectedPath === undefined || editor === undefined) {
+      return;
     }
-    const sanitized = branchName.replace(/[\\/<>:"|?*\x00-\x1f]/g, '-');
-    const folderName = await vscode.window.showInputBox({
-      title: 'Worktree Folder Name',
-      prompt: `Folder inside ${parent[0].fsPath}`,
-      value: `${snapshot.repoName}-${sanitized}`,
-      validateInput: (value) => {
-        if (!value.trim()) {
-          return 'Enter a folder name.';
-        }
-        if (value === '.' || value.includes('..') || value.includes('/') || value.includes('\\')) {
-          return 'Enter a folder name, not a path.';
-        }
-        if (/[<>:"|?*\x00-\x1f]/.test(value)) {
-          return 'The folder name contains invalid filename characters.';
-        }
-        return null;
+    editor.post({
+      type: 'worktreeParentFolderSelected',
+      payload: {
+        parentFolderPath: selectedPath,
+        existingChildNames: await this.readChildDirectoryNames(selectedPath),
       },
-      ignoreFocusOut: true,
     });
-    if (folderName === undefined) {
-      return undefined;
+  }
+
+  private async handleSubmitCreateWorktree(payload: {
+    branchName: string;
+    createBranch: boolean;
+    startPoint?: string;
+    parentFolderPath: string;
+    folderName: string;
+    openInNewWindow: boolean;
+  }): Promise<void> {
+    if (!this.ensureTrustedWorkspace()) {
+      return;
     }
-    const targetPath = path.join(parent[0].fsPath, folderName);
+    const snapshot = this.lastSnapshot;
+    if (!snapshot) {
+      return;
+    }
+
+    let branchName: string;
+    try {
+      branchName = validateGitRef(payload.branchName);
+    } catch (err) {
+      void vscode.window.showWarningMessage(`Cannot create worktree: ${describeError(err)}`);
+      return;
+    }
+
+    let startPoint: string | undefined;
+    if (payload.startPoint !== undefined) {
+      try {
+        startPoint = validateGitRef(payload.startPoint);
+      } catch (err) {
+        void vscode.window.showWarningMessage(`Cannot create worktree: invalid start point (${describeError(err)})`);
+        return;
+      }
+    }
+
+    const branch = snapshot.localBranches.find((candidate) => candidate.name === branchName);
+    if (payload.createBranch) {
+      if (branch !== undefined) {
+        void vscode.window.showWarningMessage(`Branch "${branchName}" already exists.`);
+        return;
+      }
+    } else if (branch === undefined) {
+      void vscode.window.showWarningMessage(`"${branchName}" is not a local branch in this repository.`);
+      return;
+    } else if (branch.worktreePath) {
+      void vscode.window.showWarningMessage(
+        `Branch "${branchName}" is already checked out in worktree: ${branch.worktreePath}`,
+      );
+      return;
+    }
+
+    const parentFolderPath = payload.parentFolderPath.trim();
+    if (!isAbsoluteWorktreePath(parentFolderPath)) {
+      void vscode.window.showWarningMessage('The worktree parent folder must be an absolute path.');
+      return;
+    }
+    try {
+      const parentStat = await fs.promises.stat(parentFolderPath);
+      if (!parentStat.isDirectory()) {
+        void vscode.window.showWarningMessage(`The worktree parent folder is not a directory: ${parentFolderPath}`);
+        return;
+      }
+    } catch {
+      void vscode.window.showWarningMessage(`The worktree parent folder does not exist: ${parentFolderPath}`);
+      return;
+    }
+
+    const folderName = payload.folderName;
+    if (
+      !folderName.trim() ||
+      folderName === '.' ||
+      folderName.includes('..') ||
+      /[/\\]/.test(folderName) ||
+      /[<>:"|?*\x00-\x1f]/.test(folderName) ||
+      /[. ]$/.test(folderName) ||
+      /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i.test(folderName)
+    ) {
+      void vscode.window.showWarningMessage('Enter a valid worktree folder name.');
+      return;
+    }
+
+    const targetPath = resolveWorktreePath(
+      `${parentFolderPath.replace(/[\\/]+$/, '')}${isWindowsStylePath(parentFolderPath) ? '\\' : '/'}${folderName}`,
+    );
+    const normalizedRoot = normalizeWorktreePathForComparison(snapshot.repoRoot);
+    const normalizedTarget = normalizeWorktreePathForComparison(targetPath);
+    const normalizedRootPrefix = normalizedRoot.endsWith('/') ? normalizedRoot : `${normalizedRoot}/`;
+    if (normalizedTarget === normalizedRoot || normalizedTarget.startsWith(normalizedRootPrefix)) {
+      void vscode.window.showWarningMessage('The new worktree cannot be created inside the repository.');
+      return;
+    }
     try {
       await fs.promises.stat(targetPath);
       void vscode.window.showWarningMessage(`That path already exists: ${targetPath}`);
-      return undefined;
+      return;
     } catch (err) {
       const code = err instanceof Error && 'code' in err ? String(err.code) : '';
       if (code !== 'ENOENT') {
-        throw err;
+        void vscode.window.showWarningMessage(`Could not verify the worktree destination: ${targetPath}`);
+        return;
       }
     }
-    return targetPath;
-  }
 
-  private async offerOpenWorktree(targetPath: string): Promise<void> {
-    const choice = await vscode.window.showQuickPick(
-      [{ label: 'Open Worktree in New Window' }, { label: 'Stay Here' }],
-      { title: 'Worktree Created', placeHolder: targetPath, ignoreFocusOut: true },
+    const created = await this.runGitOperation(`Creating worktree for ${branchName}`, (root) =>
+      this.gitService.addWorktree(root, targetPath, {
+        branchName,
+        createBranch: payload.createBranch,
+        startPoint,
+      }),
     );
-    if (choice?.label === 'Open Worktree in New Window') {
+    if (created && payload.openInNewWindow) {
       await vscode.commands.executeCommand(
         'vscode.openFolder',
         vscode.Uri.file(targetPath),
@@ -1910,7 +2008,12 @@ export class RepoCoordinator implements vscode.Disposable {
       return;
     }
     if (dirtyAction === 'leaveInWorktree') {
-      await this.createWorktreeAtPath(snapshot, name, true, resolvedStartPoint);
+      await this.openCreateWorktreeDialog(snapshot, {
+        initialBranchName: name,
+        initialCreateBranch: true,
+        branchLocked: true,
+        ...(resolvedStartPoint === undefined ? {} : { startPoint: resolvedStartPoint }),
+      });
       return;
     }
     if (dirtyAction === 'discard') {
@@ -2346,6 +2449,7 @@ export class RepoCoordinator implements vscode.Disposable {
       this.broadcast({ type: 'repoSnapshot', payload: snapshot });
       this.flushPendingRevealCommit();
       this.flushPendingCreateBranchDialog();
+      this.flushPendingCreateWorktreeDialog();
       await this.publishIntegrations();
       if (sequence !== this.loadSequence || this.disposed) {
         return;
@@ -2543,6 +2647,23 @@ export class RepoCoordinator implements vscode.Disposable {
     editor.post({ type: 'showCreateBranchDialog', payload: request });
     if (this.pendingCreateBranchDialog === request) {
       this.pendingCreateBranchDialog = null;
+    }
+  }
+
+  private flushPendingCreateWorktreeDialog(): void {
+    const request = this.pendingCreateWorktreeDialog;
+    const editor = this.surfaces.get('editor');
+    if (
+      request === null ||
+      editor === undefined ||
+      !this.readySurfaces.has('editor') ||
+      this.lastSnapshot === null
+    ) {
+      return;
+    }
+    editor.post({ type: 'showCreateWorktreeDialog', payload: request });
+    if (this.pendingCreateWorktreeDialog === request) {
+      this.pendingCreateWorktreeDialog = null;
     }
   }
 

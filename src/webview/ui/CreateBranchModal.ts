@@ -85,10 +85,8 @@ export class CreateBranchModal {
     this.createButton = button({ className: 'branch-modal-button branch-modal-button-primary', label: 'Create Branch', showLabel: true });
     this.createButton.type = 'submit';
     const footer = el('div', { className: 'branch-modal-footer' }, [cancelButton, this.createButton]);
-
-    this.form.append(
-      title,
-      subtitle,
+    const header = el('div', { className: 'branch-modal-header' }, [title, subtitle]);
+    const body = el('div', { className: 'branch-modal-body' }, [
       el('div', { className: 'branch-modal-field' }, [nameLabel, this.input]),
       el('div', { className: 'branch-modal-options' }, [
         el('div', { className: 'branch-modal-checkbox-row' }, [this.checkoutInput, checkoutLabel]),
@@ -96,6 +94,11 @@ export class CreateBranchModal {
         this.trackHint,
       ]),
       this.error,
+    ]);
+
+    this.form.append(
+      header,
+      body,
       footer,
     );
     this.backdrop.append(this.form);
