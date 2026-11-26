@@ -32,7 +32,11 @@ export type GitAction =
   | 'deleteBranch'
   | 'checkoutRemoteBranch'
   | 'resetMixed'
-  | 'resetHard';
+  | 'resetHard'
+  | 'createWorktree'
+  | 'openWorktree'
+  | 'removeWorktree'
+  | 'copyWorktreePath';
 
 export const GIT_ACTION_LABELS: Readonly<Record<GitAction, string>> = {
   fetch: 'Fetch',
@@ -57,10 +61,14 @@ export const GIT_ACTION_LABELS: Readonly<Record<GitAction, string>> = {
   checkoutRemoteBranch: 'Check Out as Local Branch',
   resetMixed: 'Reset (Keep Changes)',
   resetHard: 'Reset (Delete Changes)',
+  createWorktree: 'Create Worktree',
+  openWorktree: 'Open Worktree in New Window',
+  removeWorktree: 'Remove Worktree',
+  copyWorktreePath: 'Copy Worktree Path',
 };
 
 /** What a `gitAction` must carry in `target`: nothing, a ref name (branch/tag), or a full commit hash. */
-export type GitActionTargetKind = 'none' | 'optionalRef' | 'ref' | 'commit' | 'refOrCommit';
+export type GitActionTargetKind = 'none' | 'optionalRef' | 'ref' | 'commit' | 'refOrCommit' | 'path';
 
 export const GIT_ACTION_TARGETS: Readonly<Record<GitAction, GitActionTargetKind>> = {
   fetch: 'none',
@@ -85,6 +93,10 @@ export const GIT_ACTION_TARGETS: Readonly<Record<GitAction, GitActionTargetKind>
   checkoutRemoteBranch: 'ref',
   resetMixed: 'refOrCommit',
   resetHard: 'refOrCommit',
+  createWorktree: 'optionalRef',
+  openWorktree: 'path',
+  removeWorktree: 'path',
+  copyWorktreePath: 'path',
 };
 
 export interface GitActionPayload {
@@ -291,7 +303,18 @@ function isValidGitActionPayload(payload: Record<string, unknown> | null): boole
       return isCommitHash(target);
     case 'refOrCommit':
       return isCommitHash(target) || isSafeRefArgument(target);
+    case 'path':
+      return isSafePathArgument(target);
   }
+}
+
+function isSafePathArgument(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.trim().length > 0 &&
+    value.length <= 4096 &&
+    !/[\x00-\x1f\x7f]/.test(value)
+  );
 }
 
 /** Validates untrusted data received from a webview before the extension acts on it. */
@@ -427,11 +450,28 @@ function isRepoSnapshotShape(p: Record<string, unknown>): boolean {
     typeof p.currentBranch === 'string' &&
     typeof p.isDetachedHead === 'boolean' &&
     Array.isArray(p.localBranches) &&
+    Array.isArray(p.worktrees) &&
+    p.worktrees.every(isWorktreeInfoShape) &&
     (p.remotes === undefined || (Array.isArray(p.remotes) && p.remotes.every((name: unknown) => isSafeRefArgument(name)))) &&
     Array.isArray(p.remoteGroups) &&
     Array.isArray(p.tags) &&
     Array.isArray(p.commits) &&
     typeof p.hasMoreCommits === 'boolean'
+  );
+}
+
+function isWorktreeInfoShape(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.path === 'string' &&
+    typeof value.headHash === 'string' &&
+    (value.branchName === null || typeof value.branchName === 'string') &&
+    typeof value.isDetached === 'boolean' &&
+    typeof value.isBare === 'boolean' &&
+    typeof value.isMain === 'boolean' &&
+    typeof value.isCurrent === 'boolean' &&
+    typeof value.isLocked === 'boolean' &&
+    typeof value.isPrunable === 'boolean'
   );
 }
 

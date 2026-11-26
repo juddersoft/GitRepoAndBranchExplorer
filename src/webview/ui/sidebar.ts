@@ -3,7 +3,7 @@ import { isExtensionToWebviewMessage } from '../../types/messages';
 import { BranchTree } from './BranchTree';
 import { ContextMenu } from './ContextMenu';
 import type { MenuActionId } from './contextMenuModel';
-import { buildRefMenu, buildRepoMenu, buildSettingsMenu } from './contextMenuModel';
+import { buildRefMenu, buildRepoMenu, buildSettingsMenu, buildWorktreeMenu } from './contextMenuModel';
 import { el } from './dom';
 import type { ExplorerUiState, RefTarget } from './state';
 import {
@@ -96,6 +96,14 @@ function runRefMenuAction(id: MenuActionId, target: RefTarget): void {
     case 'untrackBranch':
       postGitAction('untrackBranch', target.name);
       break;
+    case 'createWorktree':
+      postGitAction('createWorktree', target.name);
+      break;
+    case 'openWorktree':
+      if (target.branch?.worktreePath) {
+        postGitAction('openWorktree', target.branch.worktreePath);
+      }
+      break;
     case 'resetMixed':
     case 'resetHard':
       postGitAction(id, target.fullName);
@@ -140,6 +148,9 @@ function runRepoMenuAction(id: MenuActionId): void {
       break;
     case 'newBranch':
       vscode.postMessage({ type: 'openCreateBranchDialog', payload: { sourceKind: 'head' } });
+      break;
+    case 'createWorktree':
+      postGitAction('createWorktree');
       break;
     case 'refresh':
       vscode.postMessage({ type: 'requestRefresh' });
@@ -210,6 +221,18 @@ function showRefContextMenu(target: RefTarget, x: number, y: number): void {
   }
 }
 
+function showWorktreeContextMenu(
+  worktree: NonNullable<ExplorerUiState['snapshot']>['worktrees'][number],
+  x: number,
+  y: number,
+): void {
+  contextMenu.show(x, y, buildWorktreeMenu(worktree), (id) => {
+    if (id === 'openWorktree' || id === 'removeWorktree' || id === 'copyWorktreePath') {
+      postGitAction(id, worktree.path);
+    }
+  });
+}
+
 const branchTree = new BranchTree({
   onFilterChange: (text) => setState({ branchFilterText: text }),
   onToggleNode: (key) => {
@@ -224,6 +247,8 @@ const branchTree = new BranchTree({
   onCheckout: (branch) => vscode.postMessage({ type: 'checkoutBranch', payload: { branchName: branch.name } }),
   onSelectRef: selectRef,
   onContextMenu: showRefContextMenu,
+  onWorktreeContextMenu: showWorktreeContextMenu,
+  onOpenWorktree: (worktreePath) => postGitAction('openWorktree', worktreePath),
   onRepoContextMenu: showRepoContextMenu,
   onSelectRepository: (repoRoot) => {
     vscode.postMessage({ type: 'selectRepository', payload: { repoRoot } });

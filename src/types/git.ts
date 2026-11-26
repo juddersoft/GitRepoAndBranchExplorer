@@ -18,6 +18,20 @@ export interface BranchInfo {
   behind: number;
   /** The configured upstream no longer exists (Git reports `[gone]`), so `ahead`/`behind` are unknown. */
   upstreamGone: boolean;
+  /** Path of the worktree currently holding this local branch, if any. */
+  worktreePath?: string | null;
+}
+
+export interface WorktreeInfo {
+  path: string;
+  headHash: string;
+  branchName: string | null;
+  isDetached: boolean;
+  isBare: boolean;
+  isMain: boolean;
+  isCurrent: boolean;
+  isLocked: boolean;
+  isPrunable: boolean;
 }
 
 export interface RemoteGroup {
@@ -99,6 +113,7 @@ export interface RepoSnapshot {
   /** Configured Git remotes, including remotes that have no fetched branch refs yet. */
   remotes?: string[];
   remoteGroups: RemoteGroup[];
+  worktrees: WorktreeInfo[];
   tags: TagInfo[];
   commits: CommitNode[];
   hasMoreCommits: boolean;

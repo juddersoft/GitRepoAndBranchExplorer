@@ -154,6 +154,7 @@ const snapshot: RepoSnapshot = {
   isDetachedHead: false,
   localBranches: [main, feature, orphan],
   remoteGroups: [{ remoteName: 'origin', branches: [originMain] }],
+  worktrees: [],
   tags: [],
   commits: [
     commit(M, [B, F2], "Merge branch 'feature'", [{ kind: 'head', label: 'HEAD' }, { kind: 'localBranch', label: 'main' }]),

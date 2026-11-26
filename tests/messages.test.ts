@@ -40,6 +40,17 @@ describe('gitAction validation', () => {
     expect(isWebviewToExtensionMessage(gitAction({ action: 'openCommitInBrowser', target: 'main' }))).toBe(false);
   });
 
+  it('validates worktree actions while rejecting control-bearing paths', () => {
+    expect(isWebviewToExtensionMessage(gitAction({ action: 'createWorktree' }))).toBe(true);
+    expect(isWebviewToExtensionMessage(gitAction({ action: 'createWorktree', target: 'feature/x' }))).toBe(true);
+    for (const action of ['openWorktree', 'removeWorktree', 'copyWorktreePath'] as GitAction[]) {
+      expect(isWebviewToExtensionMessage(gitAction({ action, target: 'C:\\worktrees\\feature branch' }))).toBe(true);
+      expect(isWebviewToExtensionMessage(gitAction({ action, target: 'bad\0path' }))).toBe(false);
+      expect(isWebviewToExtensionMessage(gitAction({ action, target: 'bad\npath' }))).toBe(false);
+      expect(isWebviewToExtensionMessage(gitAction({ action }))).toBe(false);
+    }
+  });
+
   it.each(['merge', 'rebase', 'deleteBranch', 'checkoutRemoteBranch', 'renameBranch', 'untrackBranch'] as GitAction[])('requires a safe ref target for %s', (action) => {
     expect(isWebviewToExtensionMessage(gitAction({ action, target: 'origin/feature/x' }))).toBe(true);
     expect(isWebviewToExtensionMessage(gitAction({ action }))).toBe(false);

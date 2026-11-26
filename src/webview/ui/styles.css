@@ -538,6 +538,22 @@ button {
   font-size: 0.82em;
 }
 
+.worktree-badge {
+  flex: 0 0 auto;
+  padding: 0 3px;
+  border-radius: 3px;
+  color: var(--vscode-descriptionForeground);
+  background: var(--vscode-badge-background);
+  font-size: 8px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  line-height: 13px;
+}
+
+.worktree-row .tree-label {
+  color: var(--vscode-descriptionForeground);
+}
+
 .tree-group {
   margin-left: calc(11px + var(--tree-depth, 0) * 16px);
   border-left: 1px solid var(--vscode-tree-indentGuidesStroke, rgba(128, 128, 128, 0.25));

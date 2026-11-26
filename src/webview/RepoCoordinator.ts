@@ -118,8 +118,7 @@ function isNotFullyMergedError(err: unknown): boolean {
 /** The two webviews the coordinator keeps in step: the Activity Bar branch tree and the editor timeline. */
 export type SurfaceId = 'sidebar' | 'editor';
 
-/** `leaveInWorktree` will be added once Git Worktrees are supported. */
-export type DirtyWorktreeAction = 'bring' | 'stash' | 'discard' | 'cancel';
+export type DirtyWorktreeAction = 'bring' | 'stash' | 'discard' | 'leaveInWorktree' | 'cancel';
 
 export interface WebviewSurface {
   readonly id: SurfaceId;
@@ -516,6 +515,7 @@ export class RepoCoordinator implements vscode.Disposable {
     title: string,
     operation: (repoRoot: string) => Promise<void>,
     failureHint?: string,
+    onError?: (error: unknown) => void,
   ): Promise<boolean> {
     if (!this.ensureTrustedWorkspace()) {
       return false;
@@ -538,6 +538,7 @@ export class RepoCoordinator implements vscode.Disposable {
       );
       return true;
     } catch (err) {
+      onError?.(err);
       void vscode.window.showErrorMessage(
         `${title} failed: ${describeError(err)}${failureHint === undefined ? '' : ` ${failureHint}`}`,
       );
@@ -568,6 +569,12 @@ export class RepoCoordinator implements vscode.Disposable {
       return;
     }
     if (branch.isCurrent) {
+      return;
+    }
+    if (branch.worktreePath) {
+      void vscode.window.showWarningMessage(
+        `Branch "${ref}" is already checked out in another worktree: ${branch.worktreePath}`,
+      );
       return;
     }
     await this.runGitOperation(`Checking out ${ref}`, (root) => this.gitService.checkoutBranch(root, ref));
@@ -642,6 +649,250 @@ export class RepoCoordinator implements vscode.Disposable {
       case 'resetHard':
         await this.handleReset(target, 'hard');
         break;
+      case 'createWorktree':
+        await this.handleCreateWorktree(target);
+        break;
+      case 'openWorktree':
+        await this.handleOpenWorktree(target);
+        break;
+      case 'copyWorktreePath':
+        await this.handleCopyWorktreePath(target);
+        break;
+      case 'removeWorktree':
+        await this.handleRemoveWorktree(target);
+        break;
+    }
+  }
+
+  private resolveSnapshotWorktree(target: string | undefined) {
+    if (!target || !this.lastSnapshot) {
+      return undefined;
+    }
+    const normalized = canonicalizeRepoPath(target);
+    return this.lastSnapshot.worktrees.find(
+      (worktree) => canonicalizeRepoPath(worktree.path) === normalized,
+    );
+  }
+
+  private async handleOpenWorktree(target: string | undefined): Promise<void> {
+    const worktree = this.resolveSnapshotWorktree(target);
+    if (!worktree) {
+      void vscode.window.showWarningMessage('That worktree is not part of the loaded repository.');
+      return;
+    }
+    await vscode.commands.executeCommand(
+      'vscode.openFolder',
+      vscode.Uri.file(worktree.path),
+      { forceNewWindow: true },
+    );
+  }
+
+  private async handleCopyWorktreePath(target: string | undefined): Promise<void> {
+    const worktree = this.resolveSnapshotWorktree(target);
+    if (!worktree) {
+      void vscode.window.showWarningMessage('That worktree is not part of the loaded repository.');
+      return;
+    }
+    await vscode.env.clipboard.writeText(worktree.path);
+  }
+
+  private async handleRemoveWorktree(target: string | undefined): Promise<void> {
+    const snapshot = this.lastSnapshot;
+    const worktree = this.resolveSnapshotWorktree(target);
+    if (!snapshot || !worktree) {
+      void vscode.window.showWarningMessage('That worktree is not part of the loaded repository.');
+      return;
+    }
+    if (worktree.isMain) {
+      void vscode.window.showWarningMessage('The main worktree cannot be removed.');
+      return;
+    }
+    if (worktree.isCurrent) {
+      void vscode.window.showWarningMessage('The currently open worktree cannot be removed.');
+      return;
+    }
+    const branchLabel = worktree.branchName ?? `detached @ ${worktree.headHash.slice(0, 8)}`;
+    const confirmation = await vscode.window.showQuickPick(
+      [
+        { label: 'Remove Worktree', detail: `${branchLabel}\n${worktree.path}` },
+        { label: 'Cancel' },
+      ],
+      {
+        title: `Remove Worktree "${branchLabel}"`,
+        placeHolder: `Remove ${worktree.path}?`,
+        ignoreFocusOut: true,
+      },
+    );
+    if (confirmation?.label !== 'Remove Worktree') {
+      return;
+    }
+
+    let removalError: unknown;
+    const removed = await this.runGitOperation(
+      `Removing worktree ${branchLabel}`,
+      (root) => this.gitService.removeWorktree(root, worktree.path, false),
+      undefined,
+      (error) => {
+        removalError = error;
+      },
+    );
+    if (
+      removed ||
+      !(removalError instanceof GitExecutionError) ||
+      !/(modified|untracked|locked|contains modified or untracked files)/i.test(removalError.stderr)
+    ) {
+      return;
+    }
+    const forceChoice = await vscode.window.showQuickPick(
+      [{ label: 'Force Remove Worktree' }, { label: 'Cancel' }],
+      {
+        title: `Force Remove Worktree "${branchLabel}"`,
+        placeHolder: 'Git could not remove this worktree. Force removal only if you accept losing its uncommitted files.',
+        ignoreFocusOut: true,
+      },
+    );
+    if (forceChoice?.label === 'Force Remove Worktree') {
+      await this.runGitOperation(
+        `Force-removing worktree ${branchLabel}`,
+        (root) => this.gitService.removeWorktree(root, worktree.path, true),
+      );
+    }
+  }
+
+  private async handleCreateWorktree(target: string | undefined): Promise<void> {
+    const snapshot = this.lastSnapshot;
+    if (!snapshot) {
+      return;
+    }
+    let branchName = target;
+    let createBranch = false;
+    if (branchName !== undefined) {
+      const branch = snapshot.localBranches.find((candidate) => candidate.name === branchName);
+      if (!branch || branch.worktreePath) {
+        void vscode.window.showWarningMessage(
+          !branch
+            ? `"${branchName}" is not a local branch in this repository.`
+            : `Branch "${branchName}" is already checked out in worktree: ${branch.worktreePath}`,
+        );
+        return;
+      }
+    } else {
+      const available = snapshot.localBranches.filter((branch) => !branch.worktreePath);
+      const createNewLabel = 'Create New Branch in Worktree…';
+      const choice = await vscode.window.showQuickPick(
+        [
+          ...available.map((branch) => ({ label: branch.name, description: 'Existing branch' })),
+          { label: createNewLabel },
+        ],
+        { title: 'Create Worktree', placeHolder: 'Choose an available local branch or create a new branch', ignoreFocusOut: true },
+      );
+      if (!choice) {
+        return;
+      }
+      if (choice.label === createNewLabel) {
+        const input = await vscode.window.showInputBox({
+          title: 'Create New Branch in Worktree',
+          prompt: 'New branch name',
+          validateInput: (value) => {
+            try {
+              validateGitRef(value);
+              return null;
+            } catch (err) {
+              return describeError(err);
+            }
+          },
+        });
+        if (input === undefined) {
+          return;
+        }
+        branchName = validateGitRef(input);
+        createBranch = true;
+      } else {
+        branchName = choice.label;
+      }
+    }
+    if (!branchName) {
+      return;
+    }
+    await this.createWorktreeAtPath(snapshot, branchName, createBranch);
+  }
+
+  private async createWorktreeAtPath(
+    snapshot: RepoSnapshot,
+    branchName: string,
+    createBranch: boolean,
+    startPoint?: string,
+  ): Promise<void> {
+    const targetPath = await this.pickWorktreePath(snapshot, branchName);
+    if (!targetPath) {
+      return;
+    }
+    const created = await this.runGitOperation(`Creating worktree for ${branchName}`, (root) =>
+      this.gitService.addWorktree(root, targetPath, { branchName, createBranch, startPoint }),
+    );
+    if (created) {
+      await this.offerOpenWorktree(targetPath);
+    }
+  }
+
+  private async pickWorktreePath(snapshot: RepoSnapshot, branchName: string): Promise<string | undefined> {
+    const parent = await vscode.window.showOpenDialog({
+      canSelectFiles: false,
+      canSelectFolders: true,
+      canSelectMany: false,
+      defaultUri: vscode.Uri.file(path.dirname(snapshot.repoRoot)),
+      openLabel: 'Select Parent Folder for Worktree',
+    });
+    if (!parent?.[0]) {
+      return undefined;
+    }
+    const sanitized = branchName.replace(/[\\/<>:"|?*\x00-\x1f]/g, '-');
+    const folderName = await vscode.window.showInputBox({
+      title: 'Worktree Folder Name',
+      prompt: `Folder inside ${parent[0].fsPath}`,
+      value: `${snapshot.repoName}-${sanitized}`,
+      validateInput: (value) => {
+        if (!value.trim()) {
+          return 'Enter a folder name.';
+        }
+        if (value === '.' || value.includes('..') || value.includes('/') || value.includes('\\')) {
+          return 'Enter a folder name, not a path.';
+        }
+        if (/[<>:"|?*\x00-\x1f]/.test(value)) {
+          return 'The folder name contains invalid filename characters.';
+        }
+        return null;
+      },
+      ignoreFocusOut: true,
+    });
+    if (folderName === undefined) {
+      return undefined;
+    }
+    const targetPath = path.join(parent[0].fsPath, folderName);
+    try {
+      await fs.promises.stat(targetPath);
+      void vscode.window.showWarningMessage(`That path already exists: ${targetPath}`);
+      return undefined;
+    } catch (err) {
+      const code = err instanceof Error && 'code' in err ? String(err.code) : '';
+      if (code !== 'ENOENT') {
+        throw err;
+      }
+    }
+    return targetPath;
+  }
+
+  private async offerOpenWorktree(targetPath: string): Promise<void> {
+    const choice = await vscode.window.showQuickPick(
+      [{ label: 'Open Worktree in New Window' }, { label: 'Stay Here' }],
+      { title: 'Worktree Created', placeHolder: targetPath, ignoreFocusOut: true },
+    );
+    if (choice?.label === 'Open Worktree in New Window') {
+      await vscode.commands.executeCommand(
+        'vscode.openFolder',
+        vscode.Uri.file(targetPath),
+        { forceNewWindow: true },
+      );
     }
   }
 
@@ -905,6 +1156,12 @@ export class RepoCoordinator implements vscode.Disposable {
     if (snapshot?.isDetachedHead || target.branch?.isCurrent) {
       void vscode.window.showWarningMessage(
         target.branch?.isCurrent ? 'The checked-out branch cannot be deleted.' : 'Check out a branch before deleting branches.',
+      );
+      return;
+    }
+    if (target.branch?.worktreePath) {
+      void vscode.window.showWarningMessage(
+        `Branch "${target.name}" is already checked out in another worktree: ${target.branch.worktreePath}`,
       );
       return;
     }
@@ -1620,6 +1877,10 @@ export class RepoCoordinator implements vscode.Disposable {
                 label: 'Discard Changes & Switch',
                 detail: 'Permanently discard all uncommitted and untracked changes (cannot be undone)',
               },
+              {
+                label: 'Leave Changes Here & Create Worktree…',
+                detail: 'Keep uncommitted files here and create the new branch in a separate worktree',
+              },
               { label: 'Cancel' },
             ],
             {
@@ -1636,7 +1897,9 @@ export class RepoCoordinator implements vscode.Disposable {
                 ? 'stash'
                 : choice?.label === 'Discard Changes & Switch'
                   ? 'discard'
-                  : 'cancel';
+                  : choice?.label === 'Leave Changes Here & Create Worktree…'
+                    ? 'leaveInWorktree'
+                    : 'cancel';
         }
       } catch (err) {
         void vscode.window.showErrorMessage(`Could not inspect the working tree: ${describeError(err)}`);
@@ -1644,6 +1907,10 @@ export class RepoCoordinator implements vscode.Disposable {
       }
     }
     if (dirtyAction === 'cancel') {
+      return;
+    }
+    if (dirtyAction === 'leaveInWorktree') {
+      await this.createWorktreeAtPath(snapshot, name, true, resolvedStartPoint);
       return;
     }
     if (dirtyAction === 'discard') {
@@ -2066,6 +2333,7 @@ export class RepoCoordinator implements vscode.Disposable {
       this.gitDiffProvider?.setAllowedRepoRoots(new Set([
         ...this.discoveredRepos.map((repo) => repo.repoRoot),
         snapshot.repoRoot,
+        ...snapshot.worktrees?.map((worktree) => worktree.path) ?? [],
       ]));
       // Each webview reconciles its own selection with the snapshot identically, so no extra sync message is needed.
       this.selection = normalizeSelection(snapshot, this.selection);

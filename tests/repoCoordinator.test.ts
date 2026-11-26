@@ -1,5 +1,6 @@
 import * as path from 'path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { GitExecutionError } from '../src/git/gitExecutor';
 import type { BranchInfo, RepoSnapshot } from '../src/types/git';
 import type { ExtensionToWebviewMessage, SyncStatePayload } from '../src/types/messages';
 
@@ -28,6 +29,9 @@ const mocks = vi.hoisted(() => ({
   resolveCommitHash: vi.fn(),
   stashChanges: vi.fn(),
   discardWorkingTreeChanges: vi.fn(),
+  addWorktree: vi.fn(),
+  removeWorktree: vi.fn(),
+  clipboardWriteText: vi.fn(),
   renameLocalBranch: vi.fn(),
   unsetBranchUpstream: vi.fn(),
   addRemote: vi.fn(),
@@ -94,7 +98,7 @@ vi.mock('vscode', () => {
       file: (fsPath: string) => ({ scheme: 'file', fsPath }),
       parse: (url: string, strict: boolean) => ({ url, strict }),
     },
-    env: { openExternal: mocks.openExternal },
+    env: { openExternal: mocks.openExternal, clipboard: { writeText: mocks.clipboardWriteText } },
     commands: {
       getCommands: mocks.getCommands,
       executeCommand: mocks.executeCommand,
@@ -128,6 +132,8 @@ vi.mock('../src/git/gitService', () => ({
     resolveCommitHash = mocks.resolveCommitHash;
     stashChanges = mocks.stashChanges;
     discardWorkingTreeChanges = mocks.discardWorkingTreeChanges;
+    addWorktree = mocks.addWorktree;
+    removeWorktree = mocks.removeWorktree;
     renameLocalBranch = mocks.renameLocalBranch;
     unsetBranchUpstream = mocks.unsetBranchUpstream;
     addRemote = mocks.addRemote;
@@ -197,6 +203,7 @@ function makeSnapshot(branches: BranchInfo[]): RepoSnapshot {
     isDetachedHead: false,
     localBranches: branches,
     remoteGroups: [],
+    worktrees: [],
     tags: [{ name: 'v1', fullName: 'refs/tags/v1', targetHash: sha('a') }],
     commits: [],
     hasMoreCommits: false,
@@ -284,6 +291,9 @@ describe('RepoCoordinator', () => {
     mocks.hasWorkingTreeChanges.mockResolvedValue(false);
     mocks.resolveCommitHash.mockResolvedValue(sha('a'));
     mocks.createBranch.mockResolvedValue(undefined);
+    mocks.addWorktree.mockResolvedValue(undefined);
+    mocks.removeWorktree.mockResolvedValue(undefined);
+    mocks.clipboardWriteText.mockResolvedValue(undefined);
     mocks.stashChanges.mockResolvedValue(undefined);
     mocks.discardWorkingTreeChanges.mockResolvedValue(undefined);
     mocks.renameLocalBranch.mockResolvedValue(undefined);
@@ -1652,5 +1662,200 @@ describe('RepoCoordinator', () => {
     coordinator.detach(editor);
     coordinator.handleMessage('sidebar', { type: 'requestRefresh' });
     await vi.waitFor(() => expect(replacement.ofType('repoSnapshot')).toHaveLength(1));
+  });
+
+  it('allows opening, copying and removing only exact paths from the loaded worktree snapshot', async () => {
+    const linkedPath = '/repos/wt';
+    mocks.getRepoSnapshot.mockResolvedValue({
+      ...MAIN_AND_FEATURE(),
+      worktrees: [
+        {
+          path: '/repo', headHash: sha('a'), branchName: 'main', isDetached: false, isBare: false,
+          isMain: true, isCurrent: true, isLocked: false, isPrunable: false,
+        },
+        {
+          path: linkedPath, headHash: sha('b'), branchName: 'feature', isDetached: false, isBare: false,
+          isMain: false, isCurrent: false, isLocked: false, isPrunable: false,
+        },
+      ],
+    });
+    await openBoth();
+    mocks.executeCommand.mockClear();
+
+    for (const action of ['openWorktree', 'copyWorktreePath', 'removeWorktree'] as const) {
+      coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action, target: '/repos/wt-evil' },
+      });
+    }
+    await vi.waitFor(() => expect(mocks.showWarningMessage).toHaveBeenCalledTimes(3));
+    expect(mocks.executeCommand).not.toHaveBeenCalledWith('vscode.openFolder', expect.anything(), expect.anything());
+    expect(mocks.clipboardWriteText).not.toHaveBeenCalled();
+    expect(mocks.removeWorktree).not.toHaveBeenCalled();
+
+    coordinator.handleMessage('sidebar', {
+      type: 'gitAction',
+      payload: { action: 'openWorktree', target: linkedPath },
+    });
+    coordinator.handleMessage('sidebar', {
+      type: 'gitAction',
+      payload: { action: 'copyWorktreePath', target: linkedPath },
+    });
+    await vi.waitFor(() => expect(mocks.clipboardWriteText).toHaveBeenCalledWith(linkedPath));
+    expect(mocks.executeCommand).toHaveBeenCalledWith(
+      'vscode.openFolder',
+      expect.objectContaining({ fsPath: linkedPath }),
+      { forceNewWindow: true },
+    );
+  });
+
+  it('adds all loaded worktree roots to the diff allowlist', async () => {
+    const diffProvider = { setAllowedRepoRoots: vi.fn(), clearAllowedRepoRoots: vi.fn() };
+    mocks.discoverWorkspaceRepositories.mockResolvedValue([
+      { repoRoot: '/repo', repoName: 'repo', commonDir: '/repo/.git', currentBranch: 'main' },
+      { repoRoot: '/other', repoName: 'other', commonDir: '/other/.git', currentBranch: 'dev' },
+    ]);
+    mocks.getRepoSnapshot.mockResolvedValue({
+      ...MAIN_AND_FEATURE(),
+      worktrees: [
+        {
+          path: '/repo', headHash: sha('a'), branchName: 'main', isDetached: false, isBare: false,
+          isMain: true, isCurrent: true, isLocked: false, isPrunable: false,
+        },
+        {
+          path: '/linked', headHash: sha('b'), branchName: 'feature', isDetached: false, isBare: false,
+          isMain: false, isCurrent: false, isLocked: false, isPrunable: false,
+        },
+      ],
+    });
+    coordinator = new RepoCoordinator(host, diffProvider as never);
+    await openBoth();
+    expect([...diffProvider.setAllowedRepoRoots.mock.calls[0][0]]).toEqual(['/repo', '/other', '/linked']);
+  });
+
+  it("supports leaveInWorktree without changing or stashing the current worktree", async () => {
+    mocks.hasWorkingTreeChanges.mockResolvedValue(true);
+    mocks.showQuickPick
+      .mockResolvedValueOnce({ label: 'Leave Changes Here & Create Worktree…' })
+      .mockResolvedValueOnce({ label: 'Stay Here' });
+    mocks.showOpenDialog.mockResolvedValueOnce([{ fsPath: '/worktrees' }]);
+    mocks.showInputBox.mockResolvedValueOnce('repo-feature-new');
+    mocks.stat.mockRejectedValueOnce(Object.assign(new Error('missing'), { code: 'ENOENT' }));
+    await openBoth();
+
+    coordinator.handleMessage('sidebar', {
+      type: 'submitCreateBranch',
+      payload: { branchName: 'feature/new', checkout: true, track: false },
+    });
+    await vi.waitFor(() => expect(mocks.addWorktree).toHaveBeenCalledWith(
+      '/repo',
+      path.join('/worktrees', 'repo-feature-new'),
+      { branchName: 'feature/new', createBranch: true, startPoint: undefined },
+    ));
+    expect(mocks.createBranch).not.toHaveBeenCalled();
+    expect(mocks.stashChanges).not.toHaveBeenCalled();
+    expect(mocks.discardWorkingTreeChanges).not.toHaveBeenCalled();
+  });
+
+  it('blocks main and current worktree removal without prompting or invoking Git', async () => {
+    mocks.getRepoSnapshot.mockResolvedValue({
+      ...MAIN_AND_FEATURE(),
+      worktrees: [
+        {
+          path: '/repo', headHash: sha('a'), branchName: 'main', isDetached: false, isBare: false,
+          isMain: true, isCurrent: true, isLocked: false, isPrunable: false,
+        },
+        {
+          path: '/linked-current', headHash: sha('b'), branchName: 'feature', isDetached: false, isBare: false,
+          isMain: false, isCurrent: true, isLocked: false, isPrunable: false,
+        },
+      ],
+    });
+    await openBoth();
+
+    for (const target of ['/repo', '/linked-current']) {
+      coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'removeWorktree', target },
+      });
+    }
+    await vi.waitFor(() => expect(mocks.showWarningMessage).toHaveBeenCalledTimes(2));
+    expect(mocks.showQuickPick).not.toHaveBeenCalled();
+    expect(mocks.removeWorktree).not.toHaveBeenCalled();
+    expect(mocks.showWarningMessage.mock.calls.map((call) => call[0])).toEqual(expect.arrayContaining([
+      'The main worktree cannot be removed.',
+      'The currently open worktree cannot be removed.',
+    ]));
+  });
+
+  it('requires silent force confirmation after a dirty worktree removal fails', async () => {
+    const linkedPath = '/repos/dirty';
+    mocks.getRepoSnapshot.mockResolvedValue({
+      ...MAIN_AND_FEATURE(),
+      worktrees: [
+        {
+          path: '/repo', headHash: sha('a'), branchName: 'main', isDetached: false, isBare: false,
+          isMain: true, isCurrent: true, isLocked: false, isPrunable: false,
+        },
+        {
+          path: linkedPath, headHash: sha('b'), branchName: 'feature', isDetached: false, isBare: false,
+          isMain: false, isCurrent: false, isLocked: false, isPrunable: false,
+        },
+      ],
+    });
+    mocks.removeWorktree
+      .mockRejectedValueOnce(new GitExecutionError(
+        'dirty worktree',
+        'COMMAND_FAILED',
+        128,
+        'fatal: working trees containing modified or untracked files cannot be moved',
+      ));
+    mocks.showQuickPick
+      .mockResolvedValueOnce({ label: 'Remove Worktree' })
+      .mockResolvedValueOnce({ label: 'Force Remove Worktree' });
+    await openBoth();
+
+    coordinator.handleMessage('sidebar', {
+      type: 'gitAction',
+      payload: { action: 'removeWorktree', target: linkedPath },
+    });
+
+    await vi.waitFor(() => expect(mocks.removeWorktree).toHaveBeenCalledTimes(2));
+    expect(mocks.removeWorktree).toHaveBeenNthCalledWith(1, '/repo', linkedPath, false);
+    expect(mocks.removeWorktree).toHaveBeenNthCalledWith(2, '/repo', linkedPath, true);
+    expect(mocks.showQuickPick).toHaveBeenNthCalledWith(
+      2,
+      [{ label: 'Force Remove Worktree' }, { label: 'Cancel' }],
+      expect.objectContaining({ title: 'Force Remove Worktree "feature"' }),
+    );
+  });
+
+  it('blocks checkout and deletion for a local branch checked out in another worktree', async () => {
+    mocks.getRepoSnapshot.mockResolvedValue({
+      ...MAIN_AND_FEATURE(),
+      localBranches: [
+        branch('main', true),
+        { ...branch('feature', false), worktreePath: '/repos/feature' },
+      ],
+    });
+    await openBoth();
+
+    coordinator.handleMessage('sidebar', {
+      type: 'checkoutBranch',
+      payload: { branchName: 'feature' },
+    });
+    coordinator.handleMessage('sidebar', {
+      type: 'gitAction',
+      payload: { action: 'deleteBranch', target: 'feature' },
+    });
+
+    await vi.waitFor(() => expect(mocks.showWarningMessage).toHaveBeenCalledTimes(2));
+    expect(mocks.checkoutBranch).not.toHaveBeenCalled();
+    expect(mocks.deleteLocalBranch).not.toHaveBeenCalled();
+    expect(mocks.showQuickPick).not.toHaveBeenCalled();
+    expect(mocks.showWarningMessage.mock.calls.map((call) => call[0])).toEqual([
+      'Branch "feature" is already checked out in another worktree: /repos/feature',
+      'Branch "feature" is already checked out in another worktree: /repos/feature',
+    ]);
   });
 });

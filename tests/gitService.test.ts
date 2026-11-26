@@ -17,6 +17,7 @@ import {
   parseForEachRefOutput,
   parseGitLogOutput,
   parseUpstreamTrack,
+  parseWorktreeListPorcelain,
   validateRevSpec,
   WORKTREE_GIT_TIMEOUT_MS,
 } from '../src/git/gitService';
@@ -100,6 +101,77 @@ describe('parseUpstreamTrack', () => {
     ['', { ahead: 0, behind: 0, upstreamGone: false }],
   ])('parses %j', (track, expected) => {
     expect(parseUpstreamTrack(track)).toEqual(expected);
+  });
+
+  describe('parseWorktreeListPorcelain', () => {
+    it('parses linked, detached, bare, locked and prunable CRLF stanzas with paths containing spaces', () => {
+      const output = [
+        `worktree C:\\Repos\\Main Repo`,
+        `HEAD ${sha('a')}`,
+        'branch refs/heads/main',
+        '',
+        'worktree c:/worktrees/feature branch',
+        `HEAD ${sha('b')}`,
+        'branch refs/heads/feature/branch',
+        'locked stale lock',
+        'prunable gitdir file points to non-existent location',
+        '',
+        'worktree C:/Repos/detached',
+        `HEAD ${sha('c')}`,
+        'detached',
+        '',
+        'worktree C:/Repos/bare.git',
+        'bare',
+        '',
+      ].join('\r\n');
+
+      expect(parseWorktreeListPorcelain(output, 'c:/repos/main repo')).toEqual([
+        {
+          path: 'C:\\Repos\\Main Repo',
+          headHash: sha('a'),
+          branchName: 'main',
+          isDetached: false,
+          isBare: false,
+          isMain: true,
+          isCurrent: true,
+          isLocked: false,
+          isPrunable: false,
+        },
+        {
+          path: 'c:/worktrees/feature branch',
+          headHash: sha('b'),
+          branchName: 'feature/branch',
+          isDetached: false,
+          isBare: false,
+          isMain: false,
+          isCurrent: false,
+          isLocked: true,
+          isPrunable: true,
+        },
+        {
+          path: 'C:/Repos/detached',
+          headHash: sha('c'),
+          branchName: null,
+          isDetached: true,
+          isBare: false,
+          isMain: false,
+          isCurrent: false,
+          isLocked: false,
+          isPrunable: false,
+        },
+        {
+          path: 'C:/Repos/bare.git',
+          headHash: '',
+          branchName: null,
+          isDetached: false,
+          isBare: true,
+          isMain: false,
+          isCurrent: false,
+          isLocked: false,
+          isPrunable: false,
+        },
+      ]);
+    });
   });
 });
 
@@ -460,6 +532,24 @@ describe('GitService operations (fake runner)', () => {
   function remoteGroup(remoteName: string): RemoteGroup {
     return { remoteName, branches: [] };
   }
+
+  it('adds and removes worktrees using validated argument arrays', async () => {
+    const { calls, service } = recorder();
+    await service.addWorktree(ROOT, path.join(ROOT, 'feature worktree'), {
+      branchName: 'feature/work',
+      createBranch: true,
+      startPoint: 'main',
+    });
+    await service.addWorktree(ROOT, path.join(ROOT, 'release-worktree'), { branchName: 'release' });
+    await service.removeWorktree(ROOT, path.join(ROOT, 'release-worktree'), true);
+
+    expect(calls.map((call) => call.args)).toEqual([
+      ['worktree', 'add', '-b', 'feature/work', path.join(ROOT, 'feature worktree'), 'main'],
+      ['worktree', 'add', path.join(ROOT, 'release-worktree'), 'release'],
+      ['worktree', 'remove', '--force', path.join(ROOT, 'release-worktree')],
+    ]);
+    await expect(service.addWorktree(ROOT, '--option', { branchName: 'main' })).rejects.toThrow(/path/i);
+  });
 
   it('reads date-ordered commit pages with N+1 overfetch and skip', async () => {
     const hashes = ['1', '2', '3'].map((char) => sha(char));
@@ -1034,6 +1124,79 @@ describe.skipIf(!isGitAvailable())('GitService against real repositories', () =>
     const snapshot = await service.getRepoSnapshot(dir);
     expect(snapshot.currentBranch).toBe('feature/from-head');
     expect(snapshot.localBranches.map((b) => b.name)).toEqual(['feature/from-first', 'feature/from-head', 'main']);
+  });
+
+  it('manages clean and dirty linked worktrees through their full lifecycle', async () => {
+    const parent = makeTempDir();
+    const mainRoot = path.join(parent, 'main repo');
+    const cleanRoot = path.join(parent, 'linked clean worktree');
+    const dirtyRoot = path.join(parent, 'linked dirty worktree');
+    fs.mkdirSync(mainRoot);
+    await git(mainRoot, 'init', '-b', 'main');
+    fs.writeFileSync(path.join(mainRoot, 'tracked.txt'), 'initial\n');
+    await git(mainRoot, 'add', 'tracked.txt');
+    await git(mainRoot, 'commit', '-m', 'initial');
+
+    await service.addWorktree(mainRoot, cleanRoot, {
+      branchName: 'feature/clean',
+      createBranch: true,
+      startPoint: 'main',
+    });
+
+    const mixedMainRoot = process.platform === 'win32'
+      ? mainRoot.replace(/^([a-z]):/i, (_match, drive: string) => `${drive.toLowerCase()}:`).replace(/\\/g, '/')
+      : mainRoot;
+    const mixedCleanRoot = process.platform === 'win32'
+      ? cleanRoot.replace(/^([a-z]):/i, (_match, drive: string) => `${drive.toUpperCase()}:`).replace(/\\/g, '/')
+      : cleanRoot;
+
+    const fromMain = await service.listWorktrees(mixedMainRoot);
+    const fromLinked = await service.listWorktrees(mixedCleanRoot);
+    expect(fromMain).toHaveLength(2);
+    expect(fromMain[0]).toMatchObject({ isMain: true, isCurrent: true });
+    expect(path.normalize(fromMain[0].path)).toBe(path.normalize(mainRoot));
+    expect(fromMain[1]).toMatchObject({ isMain: false, isCurrent: false });
+    expect(path.normalize(fromMain[1].path)).toBe(path.normalize(cleanRoot));
+    const mainFromLinked = fromLinked.find((worktree) => worktree.isMain);
+    expect(mainFromLinked).toMatchObject({ isCurrent: false });
+    expect(path.normalize(mainFromLinked?.path ?? '')).toBe(path.normalize(mainRoot));
+    const cleanFromLinked = fromLinked.find((worktree) => !worktree.isMain);
+    expect(cleanFromLinked).toMatchObject({ isCurrent: true, branchName: 'feature/clean' });
+    expect(path.normalize(cleanFromLinked?.path ?? '')).toBe(path.normalize(cleanRoot));
+
+    const mainSnapshot = await service.getRepoSnapshot(mixedMainRoot);
+    expect(mainSnapshot.worktrees).toHaveLength(2);
+    expect(mainSnapshot.worktrees.filter((worktree) => worktree.isMain && worktree.isCurrent)).toHaveLength(1);
+    expect(path.normalize(
+      mainSnapshot.localBranches.find((branch) => branch.name === 'feature/clean')?.worktreePath ?? '',
+    )).toBe(path.normalize(cleanRoot));
+
+    const linkedSnapshot = await service.getRepoSnapshot(mixedCleanRoot);
+    expect(linkedSnapshot.worktrees.filter((worktree) => !worktree.isMain && worktree.isCurrent)).toHaveLength(1);
+    const linkedBranch = linkedSnapshot.localBranches.find((branch) => branch.name === 'feature/clean');
+    expect(linkedBranch).toMatchObject({ isCurrent: true });
+    expect(path.normalize(linkedBranch?.worktreePath ?? '')).toBe(path.normalize(cleanRoot));
+
+    await service.removeWorktree(mainRoot, cleanRoot);
+    expect(fs.existsSync(cleanRoot)).toBe(false);
+    expect((await service.listWorktrees(mainRoot))).toHaveLength(1);
+
+    await service.addWorktree(mainRoot, dirtyRoot, {
+      branchName: 'feature/dirty',
+      createBranch: true,
+    });
+    fs.writeFileSync(path.join(dirtyRoot, 'tracked.txt'), 'dirty tracked content\n');
+    fs.writeFileSync(path.join(dirtyRoot, 'untracked.txt'), 'dirty untracked content\n');
+
+    const cleanRemoval = await service.removeWorktree(mainRoot, dirtyRoot).catch((err: unknown) => err);
+    expect(cleanRemoval).toBeInstanceOf(GitExecutionError);
+    expect((cleanRemoval as GitExecutionError).stderr).toMatch(/modified|untracked/i);
+    expect(fs.existsSync(dirtyRoot)).toBe(true);
+
+    await service.removeWorktree(mainRoot, dirtyRoot, true);
+    expect(fs.existsSync(dirtyRoot)).toBe(false);
+    expect((await service.listWorktrees(mainRoot)).every((worktree) => !worktree.branchName?.includes('dirty')))
+      .toBe(true);
   });
 
   it('reset --mixed moves HEAD back and leaves the later file change unstaged', async () => {

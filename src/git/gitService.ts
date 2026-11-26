@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import type { BranchInfo, ChangedFileEntry, CommitDetails, CommitNode, RefBadge, RemoteGroup, RepoSnapshot, TagInfo } from '../types/git';
+import type { BranchInfo, ChangedFileEntry, CommitDetails, CommitNode, RefBadge, RemoteGroup, RepoSnapshot, TagInfo, WorktreeInfo } from '../types/git';
 import { isChangedFileStatus, isSafeRepoRelativePath } from '../types/messages';
 import type { ExecGitOptions } from './gitExecutor';
 import { execGit, GitExecutionError, validateGitRef } from './gitExecutor';
@@ -44,6 +44,69 @@ export const WORKTREE_GIT_TIMEOUT_MS = 120_000;
 export interface CreateBranchOptions {
   readonly checkout?: boolean;
   readonly track?: boolean;
+}
+
+function normalizeWorktreePath(value: string): string {
+  const normalized = path.normalize(value).replace(/[\\/]+$/, '').replace(/\\/g, '/');
+  return /^[A-Za-z]:/.test(normalized) ? normalized.toLowerCase() : normalized;
+}
+
+function validateWorktreePath(worktreePath: string): string {
+  if (
+    worktreePath.length === 0 ||
+    !worktreePath.trim() ||
+    worktreePath.startsWith('-') ||
+    /[\x00-\x1f\x7f]/.test(worktreePath)
+  ) {
+    throw new Error('Invalid worktree path.');
+  }
+  return worktreePath;
+}
+
+/** Parses `git worktree list --porcelain`, preserving paths containing spaces. */
+export function parseWorktreeListPorcelain(output: string, activeRepoRoot: string): WorktreeInfo[] {
+  const activePath = normalizeWorktreePath(activeRepoRoot);
+  const stanzas = output.replace(/\r\n/g, '\n').trim().split(/\n{2,}/).filter(Boolean);
+  return stanzas.map((stanza, index) => {
+    let worktreePath = '';
+    let headHash = '';
+    let branchName: string | null = null;
+    let isDetached = false;
+    let isBare = false;
+    let isLocked = false;
+    let isPrunable = false;
+
+    for (const line of stanza.split('\n')) {
+      if (line.startsWith('worktree ')) {
+        worktreePath = line.slice('worktree '.length);
+      } else if (line.startsWith('HEAD ')) {
+        headHash = line.slice('HEAD '.length);
+      } else if (line.startsWith('branch ')) {
+        const ref = line.slice('branch '.length);
+        branchName = ref.startsWith(LOCAL_PREFIX) ? ref.slice(LOCAL_PREFIX.length) : ref;
+      } else if (line === 'detached') {
+        isDetached = true;
+      } else if (line === 'bare') {
+        isBare = true;
+      } else if (line === 'locked' || line.startsWith('locked ')) {
+        isLocked = true;
+      } else if (line === 'prunable' || line.startsWith('prunable ')) {
+        isPrunable = true;
+      }
+    }
+
+    return {
+      path: worktreePath,
+      headHash,
+      branchName,
+      isDetached,
+      isBare,
+      isMain: index === 0,
+      isCurrent: normalizeWorktreePath(worktreePath) === activePath,
+      isLocked,
+      isPrunable,
+    };
+  }).filter((worktree) => worktree.path.length > 0);
 }
 
 const STRICT_COMMIT_HASH = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i;
@@ -332,12 +395,32 @@ export class GitService {
     const topLevel = await this.runGit(['rev-parse', '--show-toplevel'], workspaceFolderPath);
     const repoRoot = path.normalize(topLevel.trim());
 
-    const [refOutput, head, remoteOutput] = await Promise.all([
+    const [refOutput, head, remoteOutput, worktreesResult] = await Promise.all([
       this.runGit(['for-each-ref', `--format=${FOR_EACH_REF_FORMAT}`, 'refs/heads', 'refs/remotes', 'refs/tags'], repoRoot),
       this.resolveHead(repoRoot),
       this.runGit(['remote', '-v'], repoRoot),
+      this.listWorktrees(repoRoot).catch(() => null),
     ]);
     const refs = parseForEachRefOutput(refOutput);
+    const worktrees = worktreesResult === null
+      ? [{
+          path: repoRoot,
+          headHash: head.hash ?? '',
+          branchName: head.branch,
+          isDetached: head.branch === null,
+          isBare: false,
+          isMain: true,
+          isCurrent: true,
+          isLocked: false,
+          isPrunable: false,
+        }]
+      : worktreesResult;
+    const worktreesByBranch = new Map(
+      worktrees.flatMap((worktree) => worktree.branchName === null ? [] : [[worktree.branchName, worktree.path] as const]),
+    );
+    refs.localBranches.forEach((branch) => {
+      branch.worktreePath = worktreesByBranch.get(branch.name) ?? null;
+    });
     const remoteDestinations = this.parseRemoteDestinations(remoteOutput);
     const remoteNames = [...remoteDestinations.keys()].sort(compareStrings);
     const remoteGroupNames = [...new Set([
@@ -372,9 +455,37 @@ export class GitService {
       remotes: remoteNames,
       localBranches: refs.localBranches,
       remoteGroups,
+      worktrees,
       tags: refs.tags,
       ...page,
     };
+  }
+
+  public async listWorktrees(repoRoot: string): Promise<WorktreeInfo[]> {
+    const output = await this.runGit(['worktree', 'list', '--porcelain'], repoRoot);
+    return parseWorktreeListPorcelain(output, repoRoot);
+  }
+
+  public async addWorktree(
+    repoRoot: string,
+    targetPath: string,
+    options: { branchName: string; createBranch?: boolean; startPoint?: string },
+  ): Promise<void> {
+    const branchName = validateGitRef(options.branchName);
+    const startPoint = options.startPoint === undefined ? undefined : validateGitRef(options.startPoint);
+    const validatedPath = validateWorktreePath(targetPath);
+    const args = options.createBranch
+      ? ['worktree', 'add', '-b', branchName, validatedPath, ...(startPoint === undefined ? [] : [startPoint])]
+      : ['worktree', 'add', validatedPath, branchName];
+    await this.runGit(args, repoRoot);
+  }
+
+  public async removeWorktree(repoRoot: string, worktreePath: string, force = false): Promise<void> {
+    const validatedPath = validateWorktreePath(worktreePath);
+    await this.runGit(
+      ['worktree', 'remove', ...(force ? ['--force'] : []), validatedPath],
+      repoRoot,
+    );
   }
 
   private parseRemoteDestinations(rawOutput: string): Map<string, string> {

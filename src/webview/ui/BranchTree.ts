@@ -1,4 +1,4 @@
-import type { BranchInfo, RemoteGroup, RepoSnapshot, TagInfo } from '../../types/git';
+import type { BranchInfo, RemoteGroup, RepoSnapshot, TagInfo, WorktreeInfo } from '../../types/git';
 import type { TrackingIndicatorOrder } from '../../types/messages';
 import { buildBranchFolderTree, type BranchTreeNode } from './branchFolderTree';
 import { button, createSearchBox, el, icon, type IconName, rebuildPreservingFocus } from './dom';
@@ -25,6 +25,8 @@ export interface BranchTreeCallbacks {
   /** Single-click / Enter: inspect this ref and focus the history on it. */
   onSelectRef(target: RefTarget): void;
   onContextMenu(target: RefTarget, x: number, y: number): void;
+  onWorktreeContextMenu(worktree: WorktreeInfo, x: number, y: number): void;
+  onOpenWorktree(worktreePath: string): void;
   /** Right-click / Shift+F10 / Menu key on the repository row. */
   onRepoContextMenu(x: number, y: number): void;
   onSelectRepository(repoRoot: string): void;
@@ -112,6 +114,7 @@ export class BranchTree {
   private readonly treeScroll: HTMLElement;
   private readonly resizeObserver: ResizeObserver | undefined;
   private refTargets = new Map<string, RefTarget>();
+  private worktrees = new Map<string, WorktreeInfo>();
   private trackingOrder: TrackingIndicatorOrder = 'vscode';
   private lastState: ExplorerUiState | undefined;
 
@@ -180,6 +183,7 @@ export class BranchTree {
     this.busyEl.hidden = !state.isBusy;
     this.busyEl.textContent = state.isBusy ? state.busyMessage ?? 'Working\u2026' : '';
     this.refTargets = new Map();
+    this.worktrees = new Map();
 
     rebuildPreservingFocus(this.treeEl, () => {
       if (state.workspaceRepos.length === 0 && !state.snapshot) {
@@ -274,6 +278,7 @@ export class BranchTree {
           item.append(
             el('ul', { className: 'tree', attrs: { role: 'group' } }, [
               this.renderBranchesNode(state.snapshot, state),
+              ...this.renderWorktreesNode(state.snapshot, state),
               ...this.renderTagsNode(state.snapshot, state),
             ]),
           );
@@ -441,6 +446,72 @@ export class BranchTree {
     ];
   }
 
+  private renderWorktreesNode(snapshot: RepoSnapshot, state: ExplorerUiState): HTMLLIElement[] {
+    if (snapshot.worktrees.length <= 1) {
+      return [];
+    }
+    const filter = state.branchFilterText.trim().toLocaleLowerCase();
+    const worktrees = filter
+      ? snapshot.worktrees.filter((worktree) =>
+          `${worktree.branchName ?? ''} ${worktree.path}`.toLocaleLowerCase().includes(filter),
+        )
+      : snapshot.worktrees;
+    if (filter && worktrees.length === 0) {
+      return [];
+    }
+    return [
+      this.renderGroup({
+        key: 'worktrees',
+        label: 'Worktrees',
+        iconName: 'worktree',
+        depth: 1,
+        open: filter.length > 0 || state.expandedNodes.has('worktrees'),
+        children: worktrees.map((worktree) => this.renderWorktree(worktree, 2)),
+      }),
+    ];
+  }
+
+  private renderWorktree(worktree: WorktreeInfo, depth: number): HTMLLIElement {
+    this.worktrees.set(worktree.path, worktree);
+    const label = worktree.branchName ?? `detached @ ${worktree.headHash.slice(0, 8)}`;
+    const suffix = worktree.isCurrent ? ' (current)' : worktree.isMain ? ' (main)' : '';
+    const row = el(
+      'div',
+      { className: 'tree-row tree-leaf worktree-row', title: worktree.path },
+      [
+        el('span', { className: 'twisty-spacer' }),
+        icon('worktree'),
+        el('span', { className: 'tree-label', text: label + suffix }),
+      ],
+    );
+    this.setTreeDepth(row, depth);
+    row.addEventListener('dblclick', () => {
+      if (!worktree.isCurrent) {
+        this.callbacks.onOpenWorktree(worktree.path);
+      }
+    });
+    row.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      this.callbacks.onWorktreeContextMenu(worktree, event.clientX, event.clientY);
+    });
+    return el(
+      'li',
+      {
+        className: 'tree-node tree-worktree',
+        attrs: {
+          role: 'treeitem',
+          'aria-level': String(depth + 1),
+          'aria-label': `${label}${suffix}`,
+          'aria-haspopup': 'menu',
+          tabindex: '-1',
+          'data-focus-key': `worktree:${worktree.path}`,
+          'data-worktree-path': worktree.path,
+        },
+      },
+      [row],
+    );
+  }
+
   private renderRemote(
     group: RemoteGroup,
     state: ExplorerUiState,
@@ -567,6 +638,13 @@ export class BranchTree {
       ...(branch.isCurrent && state.showCheckedOutBadge
         ? [el('span', { className: 'checked-out-badge', text: 'Checked Out', title: 'This branch is checked out (HEAD)' })]
         : []),
+      ...(branch.worktreePath && !branch.isCurrent
+        ? [el('span', {
+            className: 'worktree-badge',
+            text: 'WORKTREE',
+            title: `Checked out in worktree: ${branch.worktreePath}`,
+          })]
+        : []),
       ...(tracking ? [trackingElement(tracking, this.trackingOrder)] : []),
       eye,
     ]);
@@ -682,6 +760,8 @@ export class BranchTree {
     const repoRoot = target.dataset.repoRoot;
     const isRepoNode = nodeKey?.startsWith('repo:') === true;
     const fullName = target.dataset.fullName;
+    const worktreePath = target.dataset.worktreePath;
+    const worktree = worktreePath ? this.worktrees.get(worktreePath) : undefined;
     const ref = fullName ? this.refTargets.get(fullName) : undefined;
     const expanded = target.getAttribute('aria-expanded') === 'true';
 
@@ -737,6 +817,10 @@ export class BranchTree {
       case 'Enter':
         if (repoRoot) {
           this.callbacks.onSelectRepository(repoRoot);
+        } else if (worktree) {
+          if (!worktree.isCurrent) {
+            this.callbacks.onOpenWorktree(worktree.path);
+          }
         } else if (nodeKey) {
           this.callbacks.onToggleNode(nodeKey);
         } else if (ref) {
@@ -762,12 +846,16 @@ export class BranchTree {
         break;
       case 'ContextMenu':
       case 'F10':
-        if (!ref || (event.key === 'F10' && !event.shiftKey)) {
+        if ((!ref && !worktree) || (event.key === 'F10' && !event.shiftKey)) {
           return;
         }
         {
           const rect = target.getBoundingClientRect();
-          this.callbacks.onContextMenu(ref, rect.left + 24, rect.bottom);
+          if (worktree) {
+            this.callbacks.onWorktreeContextMenu(worktree, rect.left + 24, rect.bottom);
+          } else if (ref) {
+            this.callbacks.onContextMenu(ref, rect.left + 24, rect.bottom);
+          }
         }
         break;
       default:

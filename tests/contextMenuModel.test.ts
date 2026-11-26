@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { BranchInfo, CommitNode, RepoSnapshot } from '../src/types/git';
-import { buildCommitMenu, buildRefMenu, buildRepoMenu, buildSettingsMenu, clampMenuPosition, pullPushDisabledReason } from '../src/webview/ui/contextMenuModel';
+import { buildCommitMenu, buildRefMenu, buildRepoMenu, buildSettingsMenu, buildWorktreeMenu, clampMenuPosition, pullPushDisabledReason } from '../src/webview/ui/contextMenuModel';
 import type { MenuActionId, MenuEntry } from '../src/webview/ui/contextMenuModel';
 import type { ExplorerUiState } from '../src/webview/ui/state';
 import { branchRefTarget, createInitialState, tagRefTarget } from '../src/webview/ui/state';
@@ -70,6 +70,7 @@ const snapshot: RepoSnapshot = {
   isDetachedHead: false,
   localBranches: [main, feature, release],
   remoteGroups: [{ remoteName: 'origin', branches: [originFeature] }],
+  worktrees: [],
   tags: [{ name: 'v1', fullName: 'refs/tags/v1', targetHash: A }],
   commits: [commit(G, [D, B]), commit(M, [C]), commit(D, [C]), commit(C, [B]), commit(B, [A]), commit(A, [])],
   hasMoreCommits: false,
@@ -93,7 +94,7 @@ describe('buildRefMenu: local branches', () => {
     expect(ids(buildRefMenu(snapshot, state(), branchRefTarget(feature)))).toEqual([
       'checkout', 'merge', 'rebase', 'resetMixed', 'resetHard',
       'pull', 'push', 'pushAndOpenPr', 'fetch', 'createPrInBrowser', 'openBranchInBrowser',
-      'createBranchHere', 'renameBranch', 'untrackBranch', 'isolate', 'deleteBranch',
+      'createBranchHere', 'createWorktree', 'renameBranch', 'untrackBranch', 'isolate', 'deleteBranch',
     ]);
   });
 
@@ -101,7 +102,7 @@ describe('buildRefMenu: local branches', () => {
     const menu = buildRefMenu(snapshot, state(), branchRefTarget(feature));
     expect(enabled(menu)).toEqual([
       'checkout', 'merge', 'rebase', 'resetMixed', 'resetHard',
-      'push', 'fetch', 'createBranchHere', 'renameBranch', 'isolate', 'deleteBranch',
+      'push', 'fetch', 'createBranchHere', 'createWorktree', 'renameBranch', 'isolate', 'deleteBranch',
     ]);
     expect(item(menu, 'pull').reason).toMatch(/check out/i);
     expect(item(menu, 'merge').reason).toBeUndefined();
@@ -166,6 +167,25 @@ describe('buildRefMenu: local branches', () => {
     expect(item(buildRefMenu(snapshot, state(), branchRefTarget(feature)), 'isolate').label).toBe('Show Only This Branch in History');
     const pinned = state({ pinnedBranchFullNames: new Set([feature.fullName]) });
     expect(item(buildRefMenu(snapshot, pinned, branchRefTarget(feature)), 'isolate').label).toBe('Stop Isolating in History');
+  });
+
+  it('guards branches checked out in another worktree and links to that worktree', () => {
+    const linked = { ...feature, worktreePath: '/worktrees/feature' };
+    const menu = buildRefMenu(snapshot, state(), branchRefTarget(linked));
+    expect(item(menu, 'checkout').reason).toBe('Checked out in another worktree');
+    expect(item(menu, 'deleteBranch').reason).toBe('Cannot delete a branch checked out in a worktree');
+    expect(item(menu, 'openWorktree')).toMatchObject({ enabled: true, label: 'Open Worktree in New Window' });
+    expect(ids(menu)).not.toContain('createWorktree');
+  });
+
+  it('builds guarded worktree menus for main, current and linked worktrees', () => {
+    const mainWorktree = {
+      path: '/repo', headHash: M, branchName: 'main', isDetached: false, isBare: false,
+      isMain: true, isCurrent: true, isLocked: false, isPrunable: false,
+    };
+    expect(item(buildWorktreeMenu(mainWorktree), 'openWorktree').reason).toBe('Already open in this window');
+    expect(item(buildWorktreeMenu(mainWorktree), 'removeWorktree').reason).toBe('Cannot remove the main worktree');
+    expect(item(buildWorktreeMenu({ ...mainWorktree, isMain: false, isCurrent: false, path: '/feature' }), 'removeWorktree').enabled).toBe(true);
   });
 });
 
@@ -307,10 +327,10 @@ describe('buildRepoMenu', () => {
     const menu = menuFor(snapshot);
     expect(ids(menu)).toEqual([
       'fetchTracked', 'pull', 'push', 'pushAndOpenPr', 'createPrInBrowser', 'openRepoInBrowser',
-      'newBranch', 'refresh',
+      'newBranch', 'createWorktree', 'refresh',
     ]);
     expect(enabled(menu)).toEqual([
-      'fetchTracked', 'pull', 'push', 'newBranch', 'refresh',
+      'fetchTracked', 'pull', 'push', 'newBranch', 'createWorktree', 'refresh',
     ]);
     expect(item(menu, 'push').label).toBe('Push');
   });

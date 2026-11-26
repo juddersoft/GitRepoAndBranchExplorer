@@ -1,4 +1,4 @@
-import type { CommitNode, RepoSnapshot } from '../../types/git';
+import type { CommitNode, RepoSnapshot, WorktreeInfo } from '../../types/git';
 import type { TrackingIndicatorOrder } from '../../types/messages';
 import { planTrackedFetch } from '../../git/trackedFetch';
 import type { ExplorerUiState, RefTarget } from './state';
@@ -26,6 +26,10 @@ export type MenuActionId =
   | 'publishRepository'
   | 'isolate'
   | 'deleteBranch'
+  | 'createWorktree'
+  | 'openWorktree'
+  | 'removeWorktree'
+  | 'copyWorktreePath'
   | 'cherryPick'
   | 'revert'
   | 'revertMerge'
@@ -74,6 +78,8 @@ export function buildRefMenu(snapshot: RepoSnapshot, state: ExplorerUiState, tar
   const busy = state.isBusy && BUSY_REASON;
   const detached = snapshot.isDetachedHead;
   const isCheckedOut = target.kind === 'local' && target.branch?.isCurrent === true;
+  const isCheckedOutInOtherWorktree =
+    target.kind === 'local' && Boolean(target.branch?.worktreePath) && !target.branch?.isCurrent;
   const hasCurrentBranch = !detached && snapshot.localBranches.some((branch) => branch.isCurrent);
   const currentName = detached ? 'Current Branch' : snapshot.currentBranch;
 
@@ -137,7 +143,14 @@ export function buildRefMenu(snapshot: RepoSnapshot, state: ExplorerUiState, tar
     !state.integrations.remoteWebUrl && 'This repository has no supported remote web URL.',
   );
   return [
-    item('checkout', 'Check Out', firstReason(busy, isCheckedOut && 'Already checked out.')),
+    item(
+      'checkout',
+      'Check Out',
+      firstReason(busy, isCheckedOut && 'Already checked out.', isCheckedOutInOtherWorktree && 'Checked out in another worktree'),
+    ),
+    ...(isCheckedOutInOtherWorktree
+      ? [item('openWorktree', 'Open Worktree in New Window', firstReason(busy))]
+      : []),
     SEPARATOR,
     merge,
     rebase,
@@ -157,6 +170,9 @@ export function buildRefMenu(snapshot: RepoSnapshot, state: ExplorerUiState, tar
     item('openBranchInBrowser', 'Open Branch in Browser', trackedWebReason),
     SEPARATOR,
     createBranch,
+    ...(!isCheckedOut && !isCheckedOutInOtherWorktree
+      ? [item('createWorktree', 'Create Worktree…', firstReason(busy))]
+      : []),
     item('renameBranch', 'Rename Branch\u2026', firstReason(busy)),
     item(
       'untrackBranch',
@@ -168,7 +184,12 @@ export function buildRefMenu(snapshot: RepoSnapshot, state: ExplorerUiState, tar
     item(
       'deleteBranch',
       'Delete Branch\u2026',
-      firstReason(busy, isCheckedOut && 'Cannot delete the checked-out branch.', detached && DETACHED_REASON),
+      firstReason(
+        busy,
+        isCheckedOut && 'Cannot delete the checked-out branch.',
+        isCheckedOutInOtherWorktree && 'Cannot delete a branch checked out in a worktree',
+        detached && DETACHED_REASON,
+      ),
     ),
   ];
 }
@@ -214,8 +235,30 @@ export function buildRepoMenu(
     ),
     SEPARATOR,
     item('newBranch', 'New Branch\u2026', firstReason(busy)),
+    item('createWorktree', 'New Worktree\u2026', firstReason(busy)),
     SEPARATOR,
     item('refresh', 'Refresh'),
+  ];
+}
+
+export function buildWorktreeMenu(worktree: WorktreeInfo): MenuEntry[] {
+  return [
+    item(
+      'openWorktree',
+      'Open in New Window',
+      worktree.isCurrent ? 'Already open in this window' : undefined,
+    ),
+    item('copyWorktreePath', 'Copy Worktree Path'),
+    SEPARATOR,
+    item(
+      'removeWorktree',
+      'Remove Worktree…',
+      worktree.isMain
+        ? 'Cannot remove the main worktree'
+        : worktree.isCurrent
+          ? 'Cannot remove the currently open worktree'
+          : undefined,
+    ),
   ];
 }
 
