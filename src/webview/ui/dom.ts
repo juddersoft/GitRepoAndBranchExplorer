@@ -59,6 +59,10 @@ const ICONS = {
     { tag: 'circle', cx: 8, cy: 8, r: 2 },
   ],
   fetch: [{ tag: 'path', d: 'M8 2v7M5 6l3 3 3-3M2.5 10.5v3h11v-3' }],
+  clone: [
+    { tag: 'path', d: 'M8 1.5v7M5 5.5l3 3 3-3' },
+    { tag: 'path', d: 'M2 9.5v4h12v-4M4.5 11.5h7' },
+  ],
   pull: [{ tag: 'path', d: 'M8 2v10M4 8l4 4 4-4M3 14h10' }],
   push: [{ tag: 'path', d: 'M8 14V4M4 8l4-4 4 4M3 2h10' }],
   settings: [

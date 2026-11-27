@@ -1,7 +1,7 @@
 import { spawn } from 'child_process';
 import * as fs from 'fs';
 
-export type GitErrorCode = 'NOT_A_REPO' | 'GIT_NOT_FOUND' | 'TIMEOUT' | 'COMMAND_FAILED';
+export type GitErrorCode = 'NOT_A_REPO' | 'GIT_NOT_FOUND' | 'TIMEOUT' | 'COMMAND_FAILED' | 'CANCELLED';
 
 export class GitExecutionError extends Error {
   constructor(
@@ -20,6 +20,7 @@ export interface ExecGitOptions {
   timeoutMs?: number;
   maxStdoutBytes?: number;
   maxStderrBytes?: number;
+  signal?: AbortSignal;
 }
 
 export const DEFAULT_GIT_TIMEOUT_MS = 15_000;
@@ -98,6 +99,9 @@ export function execGit(args: readonly string[], cwd: string, options: ExecGitOp
   const timeoutMs = options.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS;
   const maxStdoutBytes = options.maxStdoutBytes ?? DEFAULT_MAX_STDOUT_BYTES;
   const maxStderrBytes = options.maxStderrBytes ?? DEFAULT_MAX_STDERR_BYTES;
+  if (options.signal?.aborted) {
+    return Promise.reject(new GitExecutionError('Git command cancelled.', 'CANCELLED', null, ''));
+  }
 
   return new Promise<string>((resolve, reject) => {
     const stdout: Buffer[] = [];
@@ -105,6 +109,14 @@ export function execGit(args: readonly string[], cwd: string, options: ExecGitOp
     let stdoutBytes = 0;
     let stderrBytes = 0;
     let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const onAbort = (): void => {
+      settle(() => {
+        child.kill();
+        reject(new GitExecutionError('Git command cancelled.', 'CANCELLED', null, decode(stderr)));
+      });
+    };
 
     const child = spawn('git', ['-c', 'color.ui=false', '-c', 'protocol.ext.allow=never', ...args], {
       cwd,
@@ -120,7 +132,7 @@ export function execGit(args: readonly string[], cwd: string, options: ExecGitOp
       },
     });
 
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       settle(() => {
         child.kill();
         reject(
@@ -139,7 +151,10 @@ export function execGit(args: readonly string[], cwd: string, options: ExecGitOp
         return;
       }
       settled = true;
-      clearTimeout(timer);
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+      options.signal?.removeEventListener('abort', onAbort);
       action();
     }
 
@@ -188,5 +203,10 @@ export function execGit(args: readonly string[], cwd: string, options: ExecGitOp
         }
       }),
     );
+
+    options.signal?.addEventListener('abort', onAbort, { once: true });
+    if (options.signal?.aborted) {
+      onAbort();
+    }
   });
 }

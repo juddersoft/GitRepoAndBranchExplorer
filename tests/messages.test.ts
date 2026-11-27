@@ -14,6 +14,17 @@ const SHA256 = 'B'.repeat(64);
 
 const gitAction = (payload: unknown): unknown => ({ type: 'gitAction', payload });
 
+describe('cloneRepository message validation', () => {
+  it('accepts the exact clone message and rejects extra or polluted keys', () => {
+    expect(isWebviewToExtensionMessage({ type: 'cloneRepository' })).toBe(true);
+    expect(isWebviewToExtensionMessage({ type: 'cloneRepository', url: 'x' })).toBe(false);
+    expect(isWebviewToExtensionMessage(JSON.parse('{"type":"cloneRepository","__proto__":{"polluted":true}}')))
+      .toBe(false);
+    expect(isWebviewToExtensionMessage(JSON.parse('{"type":"cloneRepository","constructor":{"polluted":true}}')))
+      .toBe(false);
+  });
+});
+
 describe('gitAction validation', () => {
   it('declares a target kind and label for every action', () => {
     expect(Object.keys(GIT_ACTION_TARGETS).sort()).toEqual(Object.keys(GIT_ACTION_LABELS).sort());

@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { validateGitRef } from '../src/git/gitExecutor';
-import { parseRemoteHostInfo } from '../src/git/remoteUrlBuilder';
+import { parseRemoteHostInfo, validateCloneUrl } from '../src/git/remoteUrlBuilder';
 import { buildGitHubCommitUrl, buildRefMap, isValidCommitHash, parseForEachRefOutput, parseGitLogOutput } from '../src/git/gitService';
 import { isExtensionToWebviewMessage, isValidWebviewMessage, isWebviewToExtensionMessage } from '../src/types/messages';
 import { buildCspHeader, getNonce } from '../src/webview/security';
@@ -161,6 +161,18 @@ describe('static hover trust regression guard', () => {
 });
 
 describe('static webview sink and Git spawning audit', () => {
+  it('rejects clone URL command-injection forms', () => {
+    for (const url of [
+      'ext::sh -c id',
+      '-c',
+      '--upload-pack=sh -c id',
+      'https://example.com/repo.git\x00bad',
+      'https://example.com/repo.git\nbad',
+    ]) {
+      expect(validateCloneUrl(url).valid, url).toBe(false);
+    }
+  });
+
   it('contains no dangerous DOM/execution sinks under src/webview/ui', () => {
     const uiRoot = path.resolve('src/webview/ui');
     const files = fs.readdirSync(uiRoot, { recursive: true })

@@ -282,6 +282,7 @@ const branchTree = new BranchTree({
     vscode.postMessage({ type: 'selectRepository', payload: { repoRoot } });
   },
   onSettingsMenu: showSettingsMenu,
+  onCloneRepository: () => vscode.postMessage({ type: 'cloneRepository' }),
   onOpenTimeline: () => vscode.postMessage({ type: 'openRepositoryPanel' }),
 });
 

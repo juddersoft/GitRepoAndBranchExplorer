@@ -64,6 +64,16 @@ const mocks = vi.hoisted(() => ({
   executeCommand: vi.fn(),
   discoverWorkspaceRepositories: vi.fn(),
   createFileSystemWatcher: vi.fn(),
+  cloneRepository: vi.fn(),
+  listGitHubRepos: vi.fn(),
+  listGitHubEnterpriseRepos: vi.fn(),
+  listAzureDevOpsOrganizations: vi.fn(),
+  listAzureDevOpsRepos: vi.fn(),
+  getAuthenticationSession: vi.fn(),
+  fsExistsSync: vi.fn(),
+  fsStatSync: vi.fn(),
+  getConfiguration: vi.fn(),
+  cancellationListener: undefined as (() => void) | undefined,
 }));
 
 vi.mock('vscode', () => {
@@ -86,8 +96,9 @@ vi.mock('vscode', () => {
         return disposable;
       },
       onDidChangeConfiguration: () => disposable,
-      getConfiguration: () => ({ get: (_key: string, fallback: string) => fallback }),
+      getConfiguration: mocks.getConfiguration,
       createFileSystemWatcher: mocks.createFileSystemWatcher,
+      updateWorkspaceFolders: vi.fn(),
     },
     extensions: { onDidChange: () => disposable },
     window: {
@@ -97,7 +108,15 @@ vi.mock('vscode', () => {
       showQuickPick: mocks.showQuickPick,
       showInputBox: mocks.showInputBox,
       showOpenDialog: mocks.showOpenDialog,
-      withProgress: (_options: unknown, task: () => Promise<void>) => task(),
+      withProgress: (_options: unknown, task: (progress: unknown, token: unknown) => Promise<unknown>) => task(
+        {},
+        {
+          onCancellationRequested: (listener: () => void) => {
+            mocks.cancellationListener = listener;
+            return { dispose: (): void => undefined };
+          },
+        },
+      ),
       showTextDocument: mocks.showTextDocument,
     },
     Uri: {
@@ -105,6 +124,7 @@ vi.mock('vscode', () => {
       parse: (url: string, strict: boolean) => ({ url, strict }),
     },
     env: { openExternal: mocks.openExternal, clipboard: { writeText: mocks.clipboardWriteText } },
+    authentication: { getSession: mocks.getAuthenticationSession },
     commands: {
       getCommands: mocks.getCommands,
       executeCommand: mocks.executeCommand,
@@ -157,11 +177,24 @@ vi.mock('../src/git/gitService', () => ({
     checkoutRemoteBranch = mocks.checkoutRemoteBranch;
     resetCurrentBranch = mocks.resetCurrentBranch;
     revertMergeCommit = mocks.revertMergeCommit;
+    cloneRepository = mocks.cloneRepository;
   },
   isValidCommitHash: (value: string): boolean => /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value),
 }));
 
-vi.mock('fs', () => ({ promises: { stat: mocks.stat, readdir: mocks.readdir } }));
+vi.mock('fs', () => ({
+  existsSync: mocks.fsExistsSync,
+  statSync: mocks.fsStatSync,
+  promises: { stat: mocks.stat, readdir: mocks.readdir },
+}));
+vi.mock('../src/git/cloneDiscoveryService', () => ({
+  CloneDiscoveryService: class {
+    listGitHubRepos = mocks.listGitHubRepos;
+    listGitHubEnterpriseRepos = mocks.listGitHubEnterpriseRepos;
+    listAzureDevOpsOrganizations = mocks.listAzureDevOpsOrganizations;
+    listAzureDevOpsRepos = mocks.listAzureDevOpsRepos;
+  },
+}));
 vi.mock('../src/github/githubService', () => ({
   GitHubService: class {
     openCommit = mocks.openGitHubCommit;
@@ -278,6 +311,21 @@ describe('RepoCoordinator', () => {
     vi.clearAllMocks();
     mocks.isTrusted = true;
     mocks.trustGrantedListeners.length = 0;
+    mocks.cancellationListener = undefined;
+    mocks.getConfiguration.mockImplementation((section: string) => ({
+      get: (_key: string, fallback: unknown) => {
+        if (section === 'gitRepoAndBranchExplorer' && _key === 'workspaceRoot') return '/repo';
+        return fallback;
+      },
+    }));
+    mocks.fsExistsSync.mockImplementation((value: string) => value === '/repo');
+    mocks.fsStatSync.mockImplementation(() => ({ isDirectory: () => true }));
+    mocks.cloneRepository.mockResolvedValue('/repo/cloned');
+    mocks.listGitHubRepos.mockResolvedValue([]);
+    mocks.listGitHubEnterpriseRepos.mockResolvedValue([]);
+    mocks.listAzureDevOpsOrganizations.mockResolvedValue([]);
+    mocks.listAzureDevOpsRepos.mockResolvedValue([]);
+    mocks.getAuthenticationSession.mockResolvedValue({ accessToken: 'token' });
     mocks.getRepoSnapshot.mockImplementation(async () => MAIN_AND_FEATURE());
     mocks.createFileSystemWatcher.mockImplementation(() => ({
       onDidCreate: () => ({ dispose: (): void => undefined }),
@@ -2393,6 +2441,142 @@ describe('RepoCoordinator', () => {
       [{ label: 'Force Remove Worktree' }, { label: 'Cancel' }],
       expect.objectContaining({ title: 'Force Remove Worktree "feature"' }),
     );
+  });
+
+  it('rejects clone requests in untrusted workspaces', async () => {
+    mocks.isTrusted = false;
+    await coordinator.cloneRepository();
+    expect(mocks.showWarningMessage).toHaveBeenCalledWith(
+      'Trust this workspace in VS Code before using Git Repo & Branch Explorer. Git commands are disabled in untrusted workspaces.',
+    );
+  });
+
+  it('blocks a second clone while clone operation is in progress', async () => {
+    let resolveClone!: (path: string) => void;
+    mocks.cloneRepository.mockImplementation(() => new Promise<string>((resolve) => { resolveClone = resolve; }));
+    mocks.showQuickPick
+      .mockResolvedValueOnce({ label: 'Clone from URL…', value: 'url' })
+      .mockResolvedValueOnce({ label: 'Clone into Workspace Root', detail: '/repo', useWorkspaceRoot: true })
+      .mockResolvedValueOnce({ label: 'Open in Git Repo & Branch Explorer (Stay in Window)', action: 'stay', detail: '/repo/slow' });
+    mocks.showInputBox
+      .mockResolvedValueOnce('https://github.com/owner/slow.git')
+      .mockResolvedValueOnce('slow');
+    const first = coordinator.cloneRepository();
+    await vi.waitFor(() => expect(mocks.cloneRepository).toHaveBeenCalled());
+    await coordinator.cloneRepository();
+    expect(mocks.showInformationMessage).toHaveBeenCalledWith('Another Git operation is already running.');
+    resolveClone('/repo/slow');
+    await first;
+  });
+
+  it('clones a pasted URL into the workspace root and opens it in place', async () => {
+    mocks.cloneRepository.mockResolvedValue('/repo/project');
+    mocks.showQuickPick
+      .mockResolvedValueOnce({ label: 'Clone from URL…', value: 'url' })
+      .mockResolvedValueOnce({ label: 'Clone into Workspace Root', detail: '/repo', useWorkspaceRoot: true })
+      .mockResolvedValueOnce({ label: 'Open in Git Repo & Branch Explorer (Stay in Window)', action: 'stay', detail: '/repo/project' });
+    mocks.showInputBox
+      .mockResolvedValueOnce('https://github.com/owner/project.git')
+      .mockResolvedValueOnce('project');
+
+    await coordinator.cloneRepository();
+
+    expect(mocks.cloneRepository).toHaveBeenCalledWith(
+      'https://github.com/owner/project.git',
+      '/repo',
+      'project',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(mocks.showInformationMessage).toHaveBeenCalledWith('Opened project in Git Repo & Branch Explorer.');
+  });
+
+  it('browses GitHub repositories', async () => {
+    mocks.listGitHubRepos.mockResolvedValue([
+      { provider: 'github', fullName: 'owner/project', cloneUrl: 'https://github.com/owner/project.git' },
+    ]);
+    mocks.showQuickPick
+      .mockResolvedValueOnce({ label: 'Browse GitHub (github.com)', value: 'github' })
+      .mockResolvedValueOnce({
+        label: 'owner/project',
+        repo: { provider: 'github', fullName: 'owner/project', cloneUrl: 'https://github.com/owner/project.git' },
+      })
+      .mockResolvedValueOnce({ label: 'Clone into Workspace Root', detail: '/repo', useWorkspaceRoot: true })
+      .mockResolvedValueOnce(undefined);
+    mocks.showInputBox.mockResolvedValueOnce('project');
+    await coordinator.cloneRepository();
+    expect(mocks.listGitHubRepos).toHaveBeenCalledWith('token');
+  });
+
+  it('prompts for an Enterprise URI and browses GitHub Enterprise repositories', async () => {
+    mocks.getConfiguration.mockImplementation((section: string) => ({
+      get: (_key: string, fallback: unknown) =>
+        section === 'gitRepoAndBranchExplorer' && _key === 'workspaceRoot' ? '/repo' :
+          section === 'github-enterprise' && _key === 'uri' ? '' : fallback,
+    }));
+    mocks.listGitHubEnterpriseRepos.mockResolvedValue([
+      { provider: 'githubEnterprise', fullName: 'acme/project', cloneUrl: 'https://git.corp.example.com/acme/project.git' },
+    ]);
+    mocks.showQuickPick
+      .mockResolvedValueOnce({ label: 'Browse GitHub Enterprise (*.ghe.com / Server)', value: 'githubEnterprise' })
+      .mockResolvedValueOnce({
+        label: 'acme/project',
+        repo: { provider: 'githubEnterprise', fullName: 'acme/project', cloneUrl: 'https://git.corp.example.com/acme/project.git' },
+      })
+      .mockResolvedValueOnce({ label: 'Clone into Workspace Root', detail: '/repo', useWorkspaceRoot: true })
+      .mockResolvedValueOnce(undefined);
+    mocks.showInputBox
+      .mockResolvedValueOnce('https://git.corp.example.com')
+      .mockResolvedValueOnce('project');
+    await coordinator.cloneRepository();
+    expect(mocks.listGitHubEnterpriseRepos).toHaveBeenCalledWith('https://git.corp.example.com', 'token');
+  });
+
+  it('falls back to manual Azure DevOps organization after discovery fails', async () => {
+    mocks.listAzureDevOpsOrganizations.mockRejectedValue(new Error('profile unavailable'));
+    mocks.listAzureDevOpsRepos.mockResolvedValue([
+      { provider: 'azureDevOps', fullName: 'Project/repo', cloneUrl: 'https://dev.azure.com/acme/Project/_git/repo' },
+    ]);
+    mocks.showQuickPick
+      .mockResolvedValueOnce({ label: 'Browse Azure DevOps', value: 'azureDevOps' })
+      .mockResolvedValueOnce({
+        label: 'Project/repo',
+        detail: 'https://dev.azure.com/acme/Project/_git/repo',
+        repo: { provider: 'azureDevOps', fullName: 'Project/repo', cloneUrl: 'https://dev.azure.com/acme/Project/_git/repo' },
+      })
+      .mockResolvedValueOnce({ label: 'Clone into Workspace Root', detail: '/repo', useWorkspaceRoot: true })
+      .mockResolvedValueOnce(undefined);
+    mocks.showInputBox
+      .mockResolvedValueOnce('acme')
+      .mockResolvedValueOnce('repo');
+    await coordinator.cloneRepository();
+    expect(mocks.showInformationMessage).toHaveBeenCalledWith(
+      expect.stringContaining('Azure DevOps organization discovery was unavailable'),
+    );
+    expect(mocks.listAzureDevOpsRepos).toHaveBeenCalledWith('acme', 'token');
+  });
+
+  it('shows Clone cancelled and resets operation state after cancellation', async () => {
+    mocks.cloneRepository.mockRejectedValue(new GitExecutionError(
+      'Git command cancelled.',
+      'CANCELLED',
+      null,
+      '',
+    ));
+    mocks.showQuickPick
+      .mockResolvedValueOnce({ label: 'Clone from URL…', value: 'url' })
+      .mockResolvedValueOnce({ label: 'Clone into Workspace Root', detail: '/repo', useWorkspaceRoot: true });
+    mocks.showInputBox
+      .mockResolvedValueOnce('https://github.com/owner/repo.git')
+      .mockResolvedValueOnce('repo');
+    await coordinator.cloneRepository();
+    expect(mocks.showInformationMessage).toHaveBeenCalledWith('Clone cancelled.');
+    expect(mocks.showErrorMessage).not.toHaveBeenCalled();
+
+    mocks.showQuickPick.mockReset();
+    mocks.showQuickPick.mockResolvedValueOnce({ label: 'Clone from URL…', value: 'url' });
+    mocks.showInputBox.mockReset();
+    mocks.showInputBox.mockResolvedValueOnce(undefined);
+    await coordinator.cloneRepository();
   });
 
   it('blocks checkout and deletion for a local branch checked out in another worktree', async () => {

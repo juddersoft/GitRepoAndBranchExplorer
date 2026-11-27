@@ -34,6 +34,7 @@ export interface BranchTreeCallbacks {
   onRepoContextMenu(x: number, y: number): void;
   onSelectRepository(repoRoot: string): void;
   onSettingsMenu(x: number, y: number): void;
+  onCloneRepository(): void;
   /** Reopens the editor timeline tab (for when it was closed while the tree is still showing). */
   onOpenTimeline(): void;
 }
@@ -140,6 +141,13 @@ export class BranchTree {
       icon: 'graph',
     });
     this.graphButton.addEventListener('click', () => callbacks.onOpenTimeline());
+    const clone = button({
+      className: 'icon-button clone-repository-button',
+      label: 'Clone Repository',
+      title: 'Clone Repository…',
+      icon: 'clone',
+    });
+    clone.addEventListener('click', () => callbacks.onCloneRepository());
 
     this.search = createSearchBox('Filter', (value) => callbacks.onFilterChange(value));
     this.busyEl = el('div', { className: 'sidebar-status busy-indicator', attrs: { role: 'status', 'aria-live': 'polite' } });
@@ -152,8 +160,9 @@ export class BranchTree {
     this.element = el('aside', { className: 'pane pane-left', attrs: { 'aria-label': 'Branch explorer' } }, [
       el('div', { className: 'sidebar-utility-bar' }, [settings, this.graphButton]),
       el('div', { className: 'sidebar-filter' }, [this.search.element]),
-      el('div', { className: 'sidebar-header' }, [
+      el('div', { className: 'sidebar-header repos-header-row' }, [
         el('span', { className: 'sidebar-heading', text: 'Repos:' }),
+        clone,
       ]),
       this.busyEl,
       this.treeScroll,
@@ -192,7 +201,22 @@ export class BranchTree {
 
     rebuildPreservingFocus(this.treeEl, () => {
       if (state.workspaceRepos.length === 0 && !state.snapshot) {
-        return [this.placeholder(state.errorMessage ? 'Unavailable' : 'Loading\u2026', 0)];
+        const placeholder = this.placeholder(state.errorMessage ? 'Unavailable' : 'Loading\u2026', 0);
+        if (state.errorMessage?.includes('Trust this workspace') || state.isLoading) {
+          return [placeholder];
+        }
+        const clone = button({
+          className: 'empty-clone-repository-button',
+          label: 'Clone Repository…',
+          title: 'Clone Repository…',
+          icon: 'clone',
+          showLabel: true,
+        });
+        clone.addEventListener('click', () => this.callbacks.onCloneRepository());
+        return [
+          placeholder,
+          el('li', { className: 'tree-node empty-clone-node', attrs: { role: 'none' } }, [clone]),
+        ];
       }
       return this.renderRepositories(state);
     });

@@ -125,6 +125,7 @@ export type WebviewToExtensionMessage =
   | { type: 'webviewReady' }
   | { type: 'openRepositoryPanel' }
   | { type: 'requestRefresh' }
+  | { type: 'cloneRepository' }
   | { type: 'selectRepository'; payload: { repoRoot: string } }
   | { type: 'loadMoreCommits' }
   | { type: 'syncState'; payload: SyncStatePayload }
@@ -374,6 +375,7 @@ export function isWebviewToExtensionMessage(value: unknown): value is WebviewToE
     case 'requestRefresh':
     case 'loadMoreCommits':
     case 'stashChanges':
+    case 'cloneRepository':
       return hasOnlyFields(value, ['type']);
     case 'inspectStash':
       return (

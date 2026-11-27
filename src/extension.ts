@@ -9,7 +9,12 @@ import {
   registerGitShowContentProvider,
 } from './git/gitDiffProvider';
 import { isValidCommitHash } from './git/gitService';
-import { GitRepoPanel, OPEN_REPOSITORY_COMMAND, REFRESH_COMMAND } from './webview/GitRepoPanel';
+import {
+  CLONE_REPOSITORY_COMMAND,
+  GitRepoPanel,
+  OPEN_REPOSITORY_COMMAND,
+  REFRESH_COMMAND,
+} from './webview/GitRepoPanel';
 import { SidebarViewProvider } from './webview/SidebarViewProvider';
 
 function commandPayload(value: unknown): Record<string, unknown> | null {
@@ -34,6 +39,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand(REFRESH_COMMAND, () => {
       GitRepoPanel.refresh();
     }),
+    vscode.commands.registerCommand(CLONE_REPOSITORY_COMMAND, () => GitRepoPanel.cloneRepository()),
     vscode.commands.registerCommand(
       'gitRepoAndBranchExplorer.toggleInlineBlame',
       () => blameController.toggleEnabled(),

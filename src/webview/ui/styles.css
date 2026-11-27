@@ -629,6 +629,34 @@ button {
   padding: 0 4px 0 8px;
 }
 
+.repos-header-row {
+  justify-content: space-between;
+}
+
+.repos-header-row .clone-repository-button {
+  flex: 0 0 auto;
+}
+
+.empty-clone-node {
+  padding: 4px 8px;
+}
+
+.empty-clone-repository-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 3px;
+  background: var(--vscode-button-secondaryBackground, var(--vscode-button-background));
+  color: var(--vscode-button-secondaryForeground, var(--vscode-button-foreground));
+  cursor: pointer;
+}
+
+.empty-clone-repository-button:hover {
+  background: var(--vscode-button-secondaryHoverBackground, var(--vscode-button-hoverBackground));
+}
+
 .sidebar-utility-bar {
   display: flex;
   align-items: center;

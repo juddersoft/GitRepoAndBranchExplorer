@@ -6,7 +6,13 @@ import type { ExecGitOptions } from './gitExecutor';
 import { execGit, GitExecutionError, validateGitRef } from './gitExecutor';
 import type { TrackedFetchResult } from './trackedFetch';
 import { planTrackedFetch } from './trackedFetch';
-import { buildRemoteCommitUrl, classifyRemoteDestination, parseRemoteHostInfo } from './remoteUrlBuilder.js';
+import {
+  buildRemoteCommitUrl,
+  classifyRemoteDestination,
+  parseRemoteHostInfo,
+  validateCloneFolderName,
+  validateCloneUrl,
+} from './remoteUrlBuilder.js';
 
 const FIELD_SEP = '\x1f';
 const RECORD_SEP = '\x1e';
@@ -479,6 +485,41 @@ function isExpectedFailure(err: unknown): boolean {
 
 export class GitService {
   constructor(private readonly runGit: GitRunner = execGit) {}
+
+  public async cloneRepository(
+    rawUrl: string,
+    parentDir: string,
+    folderName: string,
+    options: { signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<string> {
+    const validatedUrl = validateCloneUrl(rawUrl);
+    if (!validatedUrl.valid || validatedUrl.normalized === undefined) {
+      throw new Error(validatedUrl.error ?? 'Repository URL is invalid.');
+    }
+    const folderValidation = validateCloneFolderName(folderName);
+    if (!folderValidation.valid) {
+      throw new Error(folderValidation.error ?? 'Folder name is invalid.');
+    }
+    let parentStat: fs.Stats;
+    try {
+      parentStat = fs.statSync(parentDir);
+    } catch (err) {
+      throw new Error(`Clone destination folder does not exist: ${parentDir}`, { cause: err });
+    }
+    if (!parentStat.isDirectory()) {
+      throw new Error(`Clone destination is not a folder: ${parentDir}`);
+    }
+    const targetPath = path.join(parentDir, folderName);
+    if (fs.existsSync(targetPath)) {
+      throw new Error(`Clone destination already exists: ${targetPath}`);
+    }
+    await this.runGit(
+      ['clone', '--', validatedUrl.normalized, folderName],
+      parentDir,
+      { timeoutMs: options.timeoutMs ?? 300_000, signal: options.signal },
+    );
+    return targetPath;
+  }
 
   public async getRepoSnapshot(workspaceFolderPath: string): Promise<RepoSnapshot> {
     const topLevel = await this.runGit(['rev-parse', '--show-toplevel'], workspaceFolderPath);

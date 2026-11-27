@@ -6,12 +6,16 @@ import {
   buildRemoteRepoUrl,
   classifyRemoteDestination,
   encodeBranchPath,
+  extractCloneFolderName,
   isDefaultBranchName,
   isUpstreamMismatchError,
   parseRemoteHostInfo,
   parseUpstreamRef,
+  resolveGitHubEnterpriseApiBaseUrl,
   validateGitHubRepoName,
   validateLocalBareRepoFolderName,
+  validateCloneFolderName,
+  validateCloneUrl,
 } from '../src/git/remoteUrlBuilder';
 
 describe('remote destination classification', () => {
@@ -201,6 +205,88 @@ describe('remote URL builders', () => {
     'rejects invalid hash %j',
     (hash) => expect(buildRemoteCommitUrl(github, hash)).toBeNull(),
   );
+});
+
+describe('clone URL and folder validation', () => {
+  it.each([
+    'https://github.com/owner/repo.git',
+    'http://example.com/owner/repo.git',
+    'ssh://git@example.com/owner/repo.git',
+    'git@host:owner/repo.git',
+    String.raw`C:\My Repos\project`,
+    '/srv/git/My Repos/project',
+    './local repo',
+  ])('accepts valid clone URL %s', (url) => {
+    expect(validateCloneUrl(url)).toMatchObject({ valid: true });
+  });
+
+  it.each([
+    '',
+    '   ',
+    'x'.repeat(2049),
+    'https://example.com/repo\nbad',
+    '--upload-pack=sh -c id',
+    '-u evil',
+    'ext::sh -c id',
+    'fd::0',
+    'javascript:alert(1)',
+    'data:text/plain,hi',
+  ])('rejects unsafe clone URL %j', (url) => {
+    expect(validateCloneUrl(url).valid).toBe(false);
+  });
+
+  it.each([
+    ['https://github.com/owner/repo.git', 'repo'],
+    ['https://github.com/owner/repo.git?ref=main', 'repo'],
+    ['https://github.com/owner/repo.git#readme', 'repo'],
+    ['git@host:org/repo.git', 'repo'],
+    ['git@host:org/REPO.GIT', 'REPO'],
+    [String.raw`C:\Repos\My Project\repo.git`, 'repo'],
+    ['/srv/git/My Project.git/', 'My Project'],
+  ])('extracts folder name from %s', (url, name) => {
+    expect(extractCloneFolderName(url)).toBe(name);
+  });
+
+  it.each(['', '.', '..', '-bad', '/', '///'])(
+    'falls back to repository for %j',
+    (url) => expect(extractCloneFolderName(url)).toBe('repository'),
+  );
+
+  it.each(['repo', 'My Repo', 'project.v2', 'under_score'])('accepts folder name %j', (name) => {
+    expect(validateCloneFolderName(name).valid).toBe(true);
+  });
+
+  it.each(['', '   ', '.', '..', '-bad', 'a/b', 'a\\b', 'bad\x00name', 'bad:name', 'bad*name', 'bad?name'])(
+    'rejects folder name %j',
+    (name) => expect(validateCloneFolderName(name).valid).toBe(false),
+  );
+});
+
+describe('GitHub Enterprise endpoint resolution', () => {
+  it('resolves GitHub Enterprise Cloud and Server hosts', () => {
+    expect(resolveGitHubEnterpriseApiBaseUrl('https://acme.ghe.com')).toEqual({
+      apiBaseUrl: 'https://api.acme.ghe.com',
+      webBaseUrl: 'https://acme.ghe.com',
+      hostname: 'acme.ghe.com',
+    });
+    expect(resolveGitHubEnterpriseApiBaseUrl('https://git.corp.example.com')).toEqual({
+      apiBaseUrl: 'https://git.corp.example.com/api/v3',
+      webBaseUrl: 'https://git.corp.example.com',
+      hostname: 'git.corp.example.com',
+    });
+  });
+
+  it.each([
+    'http://acme.ghe.com',
+    'https://github.com',
+    'https://ghe.com',
+    'https://user:pass@acme.ghe.com',
+    'https://acme.ghe.com?x=1',
+    'https://acme.ghe.com#x',
+    'https://127.0.0.1',
+  ])('rejects invalid Enterprise URI %s', (uri) => {
+    expect(resolveGitHubEnterpriseApiBaseUrl(uri)).toBeNull();
+  });
 });
 
 describe('push and upstream helpers', () => {

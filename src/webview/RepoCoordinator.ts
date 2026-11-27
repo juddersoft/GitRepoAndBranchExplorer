@@ -4,6 +4,7 @@ import * as vscode from 'vscode';
 import type { GitShowContentProvider } from '../git/gitDiffProvider';
 import { buildShowUri, normalizeRepoRootPath, openCommitFileDiff } from '../git/gitDiffProvider';
 import { GitExecutionError, validateGitRef } from '../git/gitExecutor';
+import { CloneDiscoveryService } from '../git/cloneDiscoveryService';
 import { findGitGraphExtensionId, openInGitGraph } from '../git/gitGraphInterop';
 import { canonicalizeRepoPath, discoverWorkspaceRepositories } from '../git/repoDiscovery';
 import { GitService, isValidCommitHash } from '../git/gitService';
@@ -15,8 +16,12 @@ import {
   classifyRemoteDestination,
   isDefaultBranchName,
   isUpstreamMismatchError,
+  extractCloneFolderName,
   parseRemoteHostInfo,
   parseUpstreamRef,
+  resolveGitHubEnterpriseApiBaseUrl,
+  validateCloneFolderName,
+  validateCloneUrl,
   validateGitHubRepoName,
   validateLocalBareRepoFolderName,
 } from '../git/remoteUrlBuilder';
@@ -161,6 +166,12 @@ export interface RepoCoordinatorHost {
   onCurrentBranchChange(currentBranch: string | null): void;
 }
 
+export interface RepoCoordinatorDependencies {
+  readonly gitService?: GitService;
+  readonly githubService?: GitHubService;
+  readonly cloneDiscoveryService?: CloneDiscoveryService;
+}
+
 const EMPTY_SELECTION: SyncStatePayload = { selectedBranchFullName: null, selectedBranchRef: null, pinnedBranchFullNames: [] };
 const MAX_REVEAL_SEARCH_PAGES = 10;
 
@@ -174,8 +185,9 @@ export class RepoCoordinator implements vscode.Disposable {
   private readonly readySurfaces = new Set<SurfaceId>();
   private readonly disposables: vscode.Disposable[] = [];
   private readonly repositoryChangeListeners = new Set<(repoRoot: string | null) => void>();
-  private readonly gitService = new GitService();
-  private readonly githubService = new GitHubService();
+  private readonly gitService: GitService;
+  private readonly githubService: GitHubService;
+  private readonly cloneDiscoveryService: CloneDiscoveryService;
   private loadSequence = 0;
   private disposed = false;
   private lastSnapshot: RepoSnapshot | null = null;
@@ -207,7 +219,11 @@ export class RepoCoordinator implements vscode.Disposable {
   constructor(
     private readonly host: RepoCoordinatorHost,
     private readonly gitDiffProvider?: GitShowContentProvider,
+    dependencies: RepoCoordinatorDependencies = {},
   ) {
+    this.gitService = dependencies.gitService ?? new GitService();
+    this.githubService = dependencies.githubService ?? new GitHubService();
+    this.cloneDiscoveryService = dependencies.cloneDiscoveryService ?? new CloneDiscoveryService();
     vscode.workspace.onDidChangeWorkspaceFolders(() => this.refreshIfAttached(), null, this.disposables);
     vscode.workspace.onDidGrantWorkspaceTrust(() => this.refreshIfAttached(), null, this.disposables);
     vscode.workspace.onDidChangeConfiguration(
@@ -339,6 +355,9 @@ export class RepoCoordinator implements vscode.Disposable {
       case 'requestRefresh':
         void this.loadRepository();
         break;
+      case 'cloneRepository':
+        void this.cloneRepository();
+        break;
       case 'selectRepository':
         this.handleSelectRepository(message.payload.repoRoot);
         break;
@@ -443,6 +462,386 @@ export class RepoCoordinator implements vscode.Disposable {
       this.host.getShowFolderCounts(),
       this.host.getTrackingOrder(),
     );
+  }
+
+  public async cloneRepository(): Promise<void> {
+    if (!vscode.workspace.isTrusted) {
+      void vscode.window.showWarningMessage(WORKSPACE_TRUST_ERROR_MESSAGE);
+      return;
+    }
+    if (this.operationInProgress) {
+      void vscode.window.showInformationMessage('Another Git operation is already running.');
+      return;
+    }
+
+    const source = await vscode.window.showQuickPick(
+      [
+        { label: 'Clone from URL…', value: 'url' as const },
+        { label: 'Browse GitHub (github.com)', value: 'github' as const },
+        { label: 'Browse GitHub Enterprise (*.ghe.com / Server)', value: 'githubEnterprise' as const },
+        { label: 'Browse Azure DevOps', value: 'azureDevOps' as const },
+      ],
+      { title: 'Clone Repository', ignoreFocusOut: true },
+    );
+    if (!source) {
+      return;
+    }
+
+    const resolved = await this.resolveCloneSource(source.value);
+    if (!resolved) {
+      return;
+    }
+    const parentDir = await this.chooseCloneParentFolder();
+    if (!parentDir) {
+      return;
+    }
+    const folderName = await vscode.window.showInputBox({
+      title: 'Clone Repository',
+      prompt: 'Folder name',
+      value: resolved.defaultFolderName,
+      ignoreFocusOut: true,
+      validateInput: (name) => {
+        const validation = validateCloneFolderName(name);
+        if (!validation.valid) {
+          return validation.error;
+        }
+        return fs.existsSync(path.join(parentDir, name)) ? 'A file or folder with that name already exists.' : undefined;
+      },
+    });
+    if (folderName === undefined) {
+      return;
+    }
+
+    this.operationInProgress = true;
+    this.postActionStatus(true, `Cloning ${folderName}…`);
+    let clonedPath: string;
+    try {
+      clonedPath = await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: `Cloning ${folderName}…`,
+          cancellable: true,
+        },
+        async (_progress, token) => {
+          const controller = new AbortController();
+          const cancellation = token.onCancellationRequested(() => controller.abort());
+          try {
+            return await this.gitService.cloneRepository(
+              resolved.cloneUrl,
+              parentDir,
+              folderName,
+              { signal: controller.signal },
+            );
+          } finally {
+            cancellation.dispose();
+          }
+        },
+      );
+    } catch (err) {
+      if (err instanceof GitExecutionError && err.code === 'CANCELLED') {
+        void vscode.window.showInformationMessage('Clone cancelled.');
+        return;
+      }
+      void vscode.window.showErrorMessage(`Could not clone repository: ${describeError(err)}`);
+      return;
+    } finally {
+      this.operationInProgress = false;
+      this.postActionStatus(false);
+    }
+    await this.offerPostCloneActions(clonedPath);
+  }
+
+  private async resolveCloneSource(
+    source: 'url' | 'github' | 'githubEnterprise' | 'azureDevOps',
+  ): Promise<{ cloneUrl: string; defaultFolderName: string; displayLabel: string } | null> {
+    if (source === 'url') {
+      const cloneUrl = await vscode.window.showInputBox({
+        title: 'Clone Repository',
+        prompt: 'Paste a repository URL or local path',
+        ignoreFocusOut: true,
+        validateInput: (value) => validateCloneUrl(value).error,
+      });
+      if (cloneUrl === undefined) {
+        return null;
+      }
+      const validated = validateCloneUrl(cloneUrl);
+      if (!validated.valid || validated.normalized === undefined) {
+        void vscode.window.showWarningMessage(validated.error ?? 'Repository URL is invalid.');
+        return null;
+      }
+      return {
+        cloneUrl: validated.normalized,
+        defaultFolderName: extractCloneFolderName(validated.normalized),
+        displayLabel: validated.normalized,
+      };
+    }
+
+    if (source === 'github') {
+      const session = await this.getAuthenticationSession('github', ['repo', 'read:org']);
+      if (!session) {
+        return null;
+      }
+      const repos = await this.loadCloneRepositories(
+        'Loading GitHub repositories…',
+        () => this.cloneDiscoveryService.listGitHubRepos(session.accessToken),
+      );
+      return repos === null ? null : this.pickCloneRepository(repos, 'Choose GitHub Repository');
+    }
+
+    if (source === 'githubEnterprise') {
+      const configured = vscode.workspace
+        .getConfiguration('github-enterprise')
+        .get<string>('uri', '')
+        .trim();
+      let enterpriseUri = resolveGitHubEnterpriseApiBaseUrl(configured) ? configured : '';
+      if (!enterpriseUri) {
+        const entered = await vscode.window.showInputBox({
+          title: 'GitHub Enterprise',
+          prompt: 'GitHub Enterprise server URL',
+          placeHolder: 'https://your-company.ghe.com',
+          value: configured,
+          ignoreFocusOut: true,
+          validateInput: (value) =>
+            resolveGitHubEnterpriseApiBaseUrl(value)
+              ? undefined
+              : 'Enter a valid GitHub Enterprise HTTPS URL.',
+        });
+        if (entered === undefined) {
+          return null;
+        }
+        enterpriseUri = entered.trim();
+      }
+      const session = await this.getAuthenticationSession('github-enterprise', ['repo', 'read:org']);
+      if (!session) {
+        return null;
+      }
+      const repos = await this.loadCloneRepositories(
+        'Loading GitHub Enterprise repositories…',
+        () => this.cloneDiscoveryService.listGitHubEnterpriseRepos(enterpriseUri, session.accessToken),
+      );
+      return repos === null ? null : this.pickCloneRepository(repos, 'Choose GitHub Enterprise Repository');
+    }
+
+    const session = await this.getAuthenticationSession(
+      'microsoft',
+      ['499b84ac-1321-427f-aa17-267ca6975798/.default'],
+    );
+    if (!session) {
+      return null;
+    }
+    let organizations: Awaited<ReturnType<CloneDiscoveryService['listAzureDevOpsOrganizations']>> = [];
+    try {
+      organizations = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: 'Loading Azure DevOps organizations…' },
+        () => this.cloneDiscoveryService.listAzureDevOpsOrganizations(session.accessToken),
+      );
+    } catch (err) {
+      void vscode.window.showInformationMessage(
+        `Azure DevOps organization discovery was unavailable: ${describeError(err)} Enter an organization name to continue.`,
+      );
+    }
+    const orgName = await this.pickAzureDevOpsOrganization(organizations);
+    if (!orgName) {
+      return null;
+    }
+    const repos = await this.loadCloneRepositories(
+      `Loading repositories from ${orgName}…`,
+      () => this.cloneDiscoveryService.listAzureDevOpsRepos(orgName, session.accessToken),
+    );
+    if (repos === null) {
+      return null;
+    }
+    const selected = await vscode.window.showQuickPick(
+      repos.map((repo) => ({ label: repo.fullName, detail: repo.cloneUrl, repo })),
+      { title: 'Choose Azure DevOps Repository', matchOnDetail: true, ignoreFocusOut: true },
+    );
+    if (!selected) {
+      return null;
+    }
+    return {
+      cloneUrl: selected.repo.cloneUrl,
+      defaultFolderName: extractCloneFolderName(selected.repo.cloneUrl),
+      displayLabel: selected.label,
+    };
+  }
+
+  private async getAuthenticationSession(
+    providerId: string,
+    scopes: readonly string[],
+  ): Promise<vscode.AuthenticationSession | undefined> {
+    try {
+      return await vscode.authentication.getSession(providerId, scopes, { createIfNone: true });
+    } catch (err) {
+      void vscode.window.showWarningMessage(`Authentication was not completed: ${describeError(err)}`);
+      return undefined;
+    }
+  }
+
+  private async loadCloneRepositories(
+    title: string,
+    load: () => Promise<Awaited<ReturnType<CloneDiscoveryService['listGitHubRepos']>>>,
+  ): Promise<Awaited<ReturnType<CloneDiscoveryService['listGitHubRepos']>> | null> {
+    try {
+      return await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title }, load);
+    } catch (err) {
+      void vscode.window.showErrorMessage(`Could not load repositories: ${describeError(err)}`);
+      return null;
+    }
+  }
+
+  private async pickCloneRepository(
+    repos: Awaited<ReturnType<CloneDiscoveryService['listGitHubRepos']>>,
+    title: string,
+  ): Promise<{ cloneUrl: string; defaultFolderName: string; displayLabel: string } | null> {
+    const selected = await vscode.window.showQuickPick(
+      repos.map((repo) => ({
+        label: repo.fullName,
+        description: repo.isPrivate ? 'Private' : 'Public',
+        detail: repo.description,
+        repo,
+      })),
+      { title, matchOnDescription: true, matchOnDetail: true, ignoreFocusOut: true },
+    );
+    if (!selected) {
+      return null;
+    }
+    return {
+      cloneUrl: selected.repo.cloneUrl,
+      defaultFolderName: extractCloneFolderName(selected.repo.cloneUrl),
+      displayLabel: selected.label,
+    };
+  }
+
+  private async pickAzureDevOpsOrganization(
+    organizations: readonly { accountName: string; accountUri: string }[],
+  ): Promise<string | null> {
+    if (organizations.length > 0) {
+      const selected = await vscode.window.showQuickPick(
+        [
+          ...organizations.map((org) => ({
+            label: org.accountName,
+            detail: org.accountUri,
+            orgName: org.accountName,
+          })),
+          { label: 'Enter Azure DevOps organization name…', orgName: '' },
+        ],
+        { title: 'Choose Azure DevOps Organization', ignoreFocusOut: true },
+      );
+      if (!selected) {
+        return null;
+      }
+      if (selected.orgName.length > 0) {
+        return selected.orgName;
+      }
+    }
+    return this.promptAzureDevOpsOrganizationName();
+  }
+
+  private async promptAzureDevOpsOrganizationName(): Promise<string | null> {
+    const orgName = await vscode.window.showInputBox({
+      title: 'Azure DevOps Organization',
+      prompt: 'Organization name',
+      placeHolder: 'your-organization',
+      ignoreFocusOut: true,
+      validateInput: (value) =>
+        /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(value)
+          ? undefined
+          : 'Enter a valid Azure DevOps organization name.',
+    });
+    return orgName ?? null;
+  }
+
+  private async chooseCloneParentFolder(): Promise<string | null> {
+    const workspaceRoot = vscode.workspace
+      .getConfiguration('gitRepoAndBranchExplorer')
+      .get<string>('workspaceRoot', '')
+      .trim();
+    let workspaceRootIsDirectory = false;
+    if (workspaceRoot.length > 0 && fs.existsSync(workspaceRoot)) {
+      workspaceRootIsDirectory = fs.statSync(workspaceRoot).isDirectory();
+    }
+    if (workspaceRootIsDirectory) {
+      const destination = await vscode.window.showQuickPick(
+        [
+          { label: 'Clone into Workspace Root', detail: workspaceRoot, useWorkspaceRoot: true },
+          { label: 'Choose another folder…', useWorkspaceRoot: false },
+        ],
+        { title: 'Clone Destination', ignoreFocusOut: true },
+      );
+      if (!destination) {
+        return null;
+      }
+      if (destination.useWorkspaceRoot) {
+        return workspaceRoot;
+      }
+    }
+    const [folder] = await vscode.window.showOpenDialog({
+      canSelectFolders: true,
+      canSelectFiles: false,
+      canSelectMany: false,
+      openLabel: 'Select Destination Folder',
+    }) ?? [];
+    return folder?.fsPath ?? null;
+  }
+
+  private async offerPostCloneActions(clonedPath: string): Promise<void> {
+    const configuredRoot = vscode.workspace
+      .getConfiguration('gitRepoAndBranchExplorer')
+      .get<string>('workspaceRoot', '')
+      .trim();
+    const workspaceRoots = [
+      ...(configuredRoot.length > 0 ? [configuredRoot] : []),
+      ...(vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? []),
+    ];
+    const clonedInsideWorkspace = workspaceRoots.some((root) => this.isPathInsideRepo(
+      canonicalizeRepoPath(root),
+      canonicalizeRepoPath(clonedPath),
+    ));
+    const action = await vscode.window.showQuickPick(
+      [
+        ...(clonedInsideWorkspace
+          ? [{
+              label: 'Open in Git Repo & Branch Explorer (Stay in Window)',
+              detail: clonedPath,
+              action: 'stay' as const,
+            }]
+          : []),
+        { label: 'Add to Workspace', detail: clonedPath, action: 'add' as const },
+        { label: 'Open in New Window', detail: clonedPath, action: 'newWindow' as const },
+        { label: 'Open in Current Window', detail: clonedPath, action: 'currentWindow' as const },
+      ],
+      { title: 'Repository Cloned', ignoreFocusOut: true },
+    );
+    if (!action) {
+      return;
+    }
+    switch (action.action) {
+      case 'stay':
+        this.selectedRepoRoot = clonedPath;
+        await this.loadRepository();
+        void vscode.window.showInformationMessage(`Opened ${path.basename(clonedPath)} in Git Repo & Branch Explorer.`);
+        break;
+      case 'add': {
+        const added = vscode.workspace.updateWorkspaceFolders(
+          vscode.workspace.workspaceFolders?.length ?? 0,
+          0,
+          { uri: vscode.Uri.file(clonedPath) },
+        );
+        if (!added) {
+          void vscode.window.showWarningMessage('VS Code could not add the cloned repository to the workspace.');
+          return;
+        }
+        this.selectedRepoRoot = clonedPath;
+        await this.loadRepository();
+        break;
+      }
+      case 'newWindow':
+        await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(clonedPath), { forceNewWindow: true });
+        break;
+      case 'currentWindow':
+        await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(clonedPath), { forceNewWindow: false });
+        break;
+    }
   }
 
   /**

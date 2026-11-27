@@ -1,8 +1,9 @@
 import { execFileSync } from 'child_process';
 import * as fs from 'fs';
+import * as net from 'net';
 import * as os from 'os';
 import * as path from 'path';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import { execGit, GitExecutionError, validateGitRef } from '../src/git/gitExecutor';
 import type { GitRunner } from '../src/git/gitService';
 import {
@@ -31,7 +32,106 @@ const RS = '\x1e';
 
 const sha = (char: string): string => char.repeat(40);
 
+describe('GitService cloneRepository', () => {
+  it('rejects unsafe URLs and folder names before spawning Git', async () => {
+    const runGit = vi.fn<(args: readonly string[], cwd: string, options?: { signal?: AbortSignal }) => Promise<string>>();
+    const service = new GitService(runGit);
+    const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'git-clone-validation-'));
+    try {
+      await expect(service.cloneRepository('ext::sh -c id', parent, 'repo')).rejects.toThrow();
+      await expect(service.cloneRepository('https://example.com/owner/repo.git', parent, '../escape')).rejects.toThrow();
+      await expect(service.cloneRepository('https://example.com/owner/repo.git', parent, '-bad')).rejects.toThrow();
+      expect(runGit).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects an existing target folder before spawning Git', async () => {
+    const runGit = vi.fn(async () => '');
+    const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'git-clone-existing-'));
+    const target = path.join(parent, 'repo');
+    fs.mkdirSync(target);
+    try {
+      await expect(new GitService(runGit).cloneRepository(
+        'https://example.com/owner/repo.git',
+        parent,
+        'repo',
+      )).rejects.toThrow('Clone destination already exists');
+      expect(runGit).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('clones a local bare repository to disk', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'git-clone-integration-'));
+    const bare = path.join(root, 'source.git');
+    const work = path.join(root, 'work');
+    const parent = path.join(root, 'dest');
+    fs.mkdirSync(work);
+    fs.mkdirSync(parent);
+    execFileSync('git', ['init', '--bare', '--quiet', bare]);
+    execFileSync('git', ['init', '--quiet', work]);
+    execFileSync('git', ['-C', work, '-c', 'user.name=Test', '-c', 'user.email=test@example.com',
+      'commit', '--allow-empty', '-m', 'initial'], { stdio: 'ignore' });
+    execFileSync('git', ['-C', work, 'remote', 'add', 'origin', bare]);
+    execFileSync('git', ['-C', work, 'push', '-u', 'origin', 'HEAD:main'], { stdio: 'ignore' });
+
+    try {
+      const cloned = await new GitService().cloneRepository(bare, parent, 'cloned');
+      expect(cloned).toBe(path.join(parent, 'cloned'));
+      expect(fs.existsSync(path.join(cloned, '.git'))).toBe(true);
+      expect(execFileSync('git', ['-C', cloned, 'rev-parse', '--is-inside-work-tree'], { encoding: 'utf8' }).trim())
+        .toBe('true');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('execGit process hardening', () => {
+  it('rejects an already-aborted signal before spawning', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const error = await execGit(['status'], process.cwd(), { signal: controller.signal })
+      .catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(GitExecutionError);
+    expect(error).toMatchObject({ code: 'CANCELLED' });
+  });
+
+  it('kills a mid-flight child and rejects with CANCELLED', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'git-abort-'));
+    execFileSync('git', ['init', '--bare', '--quiet', dir]);
+    const portProbe = net.createServer();
+    await new Promise<void>((resolve, reject) => {
+      portProbe.once('error', reject);
+      portProbe.listen(0, '127.0.0.1', resolve);
+    });
+    const address = portProbe.address();
+    const port = typeof address === 'object' && address ? address.port : 0;
+    await new Promise<void>((resolve) => portProbe.close(() => resolve()));
+    const controller = new AbortController();
+    const promise = execGit([
+      'daemon',
+      `--listen=127.0.0.1`,
+      `--port=${port}`,
+      `--base-path=${dir}`,
+      '--export-all',
+      dir,
+    ], dir, { signal: controller.signal });
+    setTimeout(() => controller.abort(), 50);
+    const error = await promise.catch((err: unknown) => err);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    try {
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    } catch {
+      // The OS may retain the daemon socket briefly after child termination.
+    }
+    expect(error).toBeInstanceOf(GitExecutionError);
+    expect(error).toMatchObject({ code: 'CANCELLED' });
+  });
+
   it('disables the ext:: transport for every invocation', async () => {
     await expect(execGit(['config', '--get', 'protocol.ext.allow'], process.cwd())).resolves.toBe('never\n');
   });

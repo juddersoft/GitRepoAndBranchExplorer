@@ -15,6 +15,18 @@ export interface RemoteDestinationInfo {
   readonly providerName?: string;
 }
 
+export interface CloneUrlValidationResult {
+  readonly valid: boolean;
+  readonly normalized?: string;
+  readonly error?: string;
+}
+
+export interface ParsedGitHubEnterpriseEndpoint {
+  readonly apiBaseUrl: string;
+  readonly webBaseUrl: string;
+  readonly hostname: string;
+}
+
 const NAME_SEGMENT = /^[A-Za-z0-9_.-]+$/;
 const COMMIT_HASH = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i;
 const CONTROL_CHARS = /[\x00-\x1f\x7f]/;
@@ -178,6 +190,129 @@ export function classifyRemoteDestination(rawUrl: string): RemoteDestinationInfo
     return { kind: 'localPath', rawUrl, displayLabel: `Local drive: ${rawUrl}` };
   }
   return { kind: 'other', rawUrl, displayLabel: rawUrl };
+}
+
+export function validateCloneUrl(rawUrl: string): CloneUrlValidationResult {
+  const normalized = rawUrl.trim();
+  if (normalized.length === 0) {
+    return { valid: false, error: 'Repository URL is required.' };
+  }
+  if (normalized.length > 2048) {
+    return { valid: false, error: 'Repository URL must be 2,048 characters or fewer.' };
+  }
+  if (CONTROL_CHARS.test(rawUrl)) {
+    return { valid: false, error: 'Repository URL must not contain control characters.' };
+  }
+  if (normalized.startsWith('-')) {
+    return { valid: false, error: 'Repository URL must not start with "-".' };
+  }
+  if (/^(?:ext::|fd::|javascript:|data:)/i.test(normalized)) {
+    return { valid: false, error: 'Repository URL uses an unsafe scheme.' };
+  }
+  if (/^(?:https?|ssh):\/\//i.test(normalized)) {
+    if (/\s/.test(normalized)) {
+      return { valid: false, error: 'Repository URL must not contain whitespace.' };
+    }
+    try {
+      const url = new URL(normalized);
+      if (!['http:', 'https:', 'ssh:'].includes(url.protocol) || url.hostname.length === 0) {
+        return { valid: false, error: 'Repository URL must be a valid HTTP or SSH URL.' };
+      }
+      return { valid: true, normalized };
+    } catch {
+      return { valid: false, error: 'Repository URL is not valid.' };
+    }
+  }
+  const scp = /^([A-Za-z0-9._-]+)@([A-Za-z0-9.-]+):([^\s]+)$/.exec(normalized);
+  if (scp) {
+    if (scp[1].startsWith('-') || scp[2].startsWith('-') || scp[3].startsWith('-')) {
+      return { valid: false, error: 'SSH repository host and path must not start with "-".' };
+    }
+    return { valid: true, normalized };
+  }
+  if (classifyRemoteDestination(normalized).kind === 'localPath') {
+    return { valid: true, normalized };
+  }
+  return { valid: false, error: 'Enter an HTTPS, HTTP, SSH, SCP-style SSH URL, or local repository path.' };
+}
+
+export function extractCloneFolderName(rawUrl: string): string {
+  const withoutQuery = rawUrl.trim().replace(/[?#].*$/, '').replace(/[\\/]+$/, '').replace(/\.git$/i, '');
+  const segment = withoutQuery.split(/[\\/:]/).filter(Boolean).at(-1) ?? '';
+  const sanitized = segment.replace(/[<>:"/\\|?*\x00-\x1f\x7f]/g, '-');
+  return sanitized.length === 0 || sanitized === '.' || sanitized === '..' || sanitized.startsWith('-')
+    ? 'repository'
+    : sanitized;
+}
+
+export function validateCloneFolderName(folderName: string): { valid: boolean; error?: string } {
+  if (folderName.length === 0 || !folderName.trim()) {
+    return { valid: false, error: 'Folder name is required.' };
+  }
+  if (folderName === '.' || folderName === '..') {
+    return { valid: false, error: 'Folder name cannot be "." or "..".' };
+  }
+  if (folderName.startsWith('-')) {
+    return { valid: false, error: 'Folder name must not start with "-".' };
+  }
+  if (/[/\\]/.test(folderName)) {
+    return { valid: false, error: 'Folder name must not contain path separators.' };
+  }
+  if (/[\x00-\x1f\x7f]/.test(folderName)) {
+    return { valid: false, error: 'Folder name must not contain control characters.' };
+  }
+  if (/[<>:"|?*]/.test(folderName)) {
+    return { valid: false, error: 'Folder name contains characters that are not valid in Windows filenames.' };
+  }
+  return { valid: true };
+}
+
+function isValidRfc1123MultiLabelHostname(hostname: string): boolean {
+  const labels = hostname.split('.');
+  return (
+    labels.length >= 2 &&
+    hostname.length <= 253 &&
+    !/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/.test(hostname) &&
+    labels.every((label) =>
+      label.length > 0 &&
+      label.length <= 63 &&
+      /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/.test(label))
+  );
+}
+
+export function resolveGitHubEnterpriseApiBaseUrl(rawUri: string): ParsedGitHubEnterpriseEndpoint | null {
+  let url: URL;
+  try {
+    url = new URL(rawUri.trim());
+  } catch {
+    return null;
+  }
+  if (
+    url.protocol !== 'https:' ||
+    url.username.length > 0 ||
+    url.password.length > 0 ||
+    url.search.length > 0 ||
+    url.hash.length > 0 ||
+    url.port.length > 0
+  ) {
+    return null;
+  }
+  const hostname = url.hostname.toLowerCase();
+  if (
+    hostname === 'github.com' ||
+    hostname === 'ghe.com' ||
+    !isValidRfc1123MultiLabelHostname(hostname)
+  ) {
+    return null;
+  }
+  const webBaseUrl = `https://${hostname}`;
+  return {
+    webBaseUrl,
+    hostname,
+    apiBaseUrl: isGitHubEnterpriseCloudHost(hostname)
+      ? `https://api.${hostname}`
+      : `${webBaseUrl}/api/v3`,
+  };
 }
 
 function validateSimpleName(name: string, kind: 'GitHub repository' | 'Local bare repository folder'): string | null {
