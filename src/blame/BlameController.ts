@@ -1,7 +1,7 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
 import type { BlameLineInfo, FileBlameMap } from '../git/blameParser';
-import { formatInlineBlame } from '../git/blameParser';
+import { escapeMarkdownText, formatInlineBlame } from '../git/blameParser';
 import type { GitBlameService } from '../git/gitBlameService';
 import type { RepoCoordinator } from '../webview/RepoCoordinator';
 import { resolveBlameRepository } from './blameRepoResolution';
@@ -15,9 +15,22 @@ import {
   type BlameAgeBucket,
   buildBlameGutterEntries,
 } from './blameGutter';
+import {
+  computeSymbolInsight,
+  findEnclosingSymbol,
+  flattenInsightSymbols,
+  formatSymbolInsightCompact,
+  type SimpleDocumentSymbol,
+  type SymbolBlameInsight,
+} from './symbolInsights';
+import {
+  fetchDocumentInsightSymbols,
+  SymbolInsightsCodeLensProvider,
+} from './symbolInsightsProvider';
 
 const TOGGLE_INLINE_BLAME_COMMAND = 'gitRepoAndBranchExplorer.toggleInlineBlame';
 const SELECTION_DEBOUNCE_MS = 120;
+const SYMBOL_CACHE_MAX_ENTRIES = 30;
 
 const GUTTER_BUCKET_STYLES: Record<BlameAgeBucket, { border: string; backgroundColor: string }> = {
   uncommitted: {
@@ -56,6 +69,13 @@ interface BlameConfiguration {
   enabled: boolean;
   ignoreWhitespace: boolean;
   showStatusBar: boolean;
+  symbolInsights: {
+    enabled: boolean;
+    hover: boolean;
+    declarationInline: boolean;
+    statusBarTooltip: boolean;
+    codeLens: boolean;
+  };
 }
 
 function readConfiguration(): BlameConfiguration {
@@ -64,6 +84,13 @@ function readConfiguration(): BlameConfiguration {
     enabled: configuration.get<boolean>('enabled', true),
     ignoreWhitespace: configuration.get<boolean>('ignoreWhitespace', false),
     showStatusBar: configuration.get<boolean>('showStatusBar', true),
+    symbolInsights: {
+      enabled: configuration.get<boolean>('symbolInsights.enabled', true),
+      hover: configuration.get<boolean>('symbolInsights.hover', true),
+      declarationInline: configuration.get<boolean>('symbolInsights.declarationInline', false),
+      statusBarTooltip: configuration.get<boolean>('symbolInsights.statusBarTooltip', false),
+      codeLens: configuration.get<boolean>('symbolInsights.codeLens', false),
+    },
   };
 }
 
@@ -112,7 +139,19 @@ export class BlameController implements vscode.Disposable {
       margin: '0 0 0 24px',
     },
   });
+  private readonly declarationDecorationType = vscode.window.createTextEditorDecorationType({
+    after: {
+      color: new vscode.ThemeColor('editorCodeLens.foreground'),
+      fontStyle: 'italic',
+      margin: '0 0 0 24px',
+    },
+  });
   private readonly gutterDecorationTypes: ReadonlyMap<BlameAgeBucket, vscode.TextEditorDecorationType>;
+  private readonly codeLensProvider: SymbolInsightsCodeLensProvider;
+  private readonly symbolCache = new Map<
+    string,
+    { version: number; symbols: SimpleDocumentSymbol[] }
+  >();
   private readonly annotatedDocuments = new Set<string>();
   private readonly statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   private readonly disposables: vscode.Disposable[] = [];
@@ -124,6 +163,7 @@ export class BlameController implements vscode.Disposable {
   private gutterRenderToken = 0;
   private selectionTimer: ReturnType<typeof setTimeout> | undefined;
   private decoratedEditor: vscode.TextEditor | undefined;
+  private declarationDecoratedEditor: vscode.TextEditor | undefined;
   private reloadingAfterRepositoryRelease = false;
   private disposed = false;
 
@@ -145,7 +185,20 @@ export class BlameController implements vscode.Disposable {
         }),
       ] as const;
     }));
+    this.codeLensProvider = new SymbolInsightsCodeLensProvider({
+      isEnabled: () =>
+        vscode.workspace.isTrusted &&
+        this.configuration.enabled &&
+        this.configuration.symbolInsights.enabled &&
+        this.configuration.symbolInsights.codeLens,
+      getBlameForDocument: (document) => this.getBlameForDocument(document),
+      getSymbolsForDocument: (document) => this.getSymbolsForDocument(document),
+    });
     this.disposables.push(
+      vscode.languages.registerCodeLensProvider(
+        { scheme: 'file' },
+        this.codeLensProvider,
+      ),
       vscode.window.onDidChangeActiveTextEditor(() => void this.refreshActiveEditor()),
       vscode.window.onDidChangeVisibleTextEditors(() => void this.refreshAnnotatedEditors()),
       vscode.window.onDidChangeTextEditorSelection((event) => {
@@ -178,20 +231,24 @@ export class BlameController implements vscode.Disposable {
           }
         }
         void this.refreshAnnotatedEditors();
+        this.codeLensProvider.refresh();
       }),
       vscode.workspace.onDidCloseTextDocument((document) => {
         this.annotatedDocuments.delete(document.uri.toString());
+        this.symbolCache.delete(document.uri.toString());
       }),
       vscode.workspace.onDidChangeConfiguration((event) => {
         if (event.affectsConfiguration('gitRepoAndBranchExplorer.blame')) {
           this.configuration = readConfiguration();
           void this.refreshActiveEditor();
           void this.refreshAnnotatedEditors();
+          this.codeLensProvider.refresh();
         }
       }),
       vscode.workspace.onDidGrantWorkspaceTrust(() => {
         void this.refreshActiveEditor();
         void this.refreshAnnotatedEditors();
+        this.codeLensProvider.refresh();
       }),
       this.coordinator.onDidRepositoryChange((repoRoot) => {
         if (repoRoot === null) {
@@ -206,6 +263,7 @@ export class BlameController implements vscode.Disposable {
         }
         void this.refreshActiveEditor();
         void this.refreshAnnotatedEditors();
+        this.codeLensProvider.refresh();
       }),
     );
     this.coordinator.refresh();
@@ -264,11 +322,14 @@ export class BlameController implements vscode.Disposable {
     this.clearSelectionTimer();
     this.clearPresentation();
     this.clearAllGutterDecorations();
+    this.symbolCache.clear();
     this.decorationType.dispose();
+    this.declarationDecorationType.dispose();
     for (const decorationType of this.gutterDecorationTypes.values()) {
       decorationType.dispose();
     }
     this.statusBarItem.dispose();
+    this.codeLensProvider.dispose();
     while (this.disposables.length > 0) {
       this.disposables.pop()?.dispose();
     }
@@ -322,6 +383,22 @@ export class BlameController implements vscode.Disposable {
       return;
     }
 
+    let symbols: SimpleDocumentSymbol[] = [];
+    let enclosingInsight: SymbolBlameInsight | null = null;
+    const symbolInsights = this.configuration.symbolInsights;
+    const needsActiveSymbolInsight = symbolInsights.enabled &&
+      (symbolInsights.hover || symbolInsights.statusBarTooltip || symbolInsights.declarationInline);
+    if (needsActiveSymbolInsight && blameMap !== undefined) {
+      symbols = await this.getSymbolsForDocument(editor.document);
+      if (token !== this.requestToken || this.disposed || editor !== vscode.window.activeTextEditor) {
+        return;
+      }
+      const enclosingSymbol = findEnclosingSymbol(symbols, lineNumber);
+      enclosingInsight = enclosingSymbol === null
+        ? null
+        : computeSymbolInsight(enclosingSymbol, blameMap);
+    }
+
     const cachedInfo = blameMap?.get(lineNumber);
     const info =
       editor.document.isDirty && (
@@ -332,7 +409,22 @@ export class BlameController implements vscode.Disposable {
         ? uncommittedLineInfo(lineNumber, relativePath, lineText)
         : cachedInfo ?? uncommittedLineInfo(lineNumber, relativePath, lineText);
 
-    const hover = await this.createHoverMarkdown(info, repoRoot, relativePath);
+    const hover = await this.createHoverMarkdown(
+      info,
+      repoRoot,
+      relativePath,
+      symbolInsights.hover ? enclosingInsight ?? undefined : undefined,
+    );
+    const statusBarHover = symbolInsights.statusBarTooltip
+      ? enclosingInsight === null
+        ? await this.createHoverMarkdown(info, repoRoot, relativePath)
+        : await this.createHoverMarkdown(info, repoRoot, relativePath, enclosingInsight)
+      : symbolInsights.hover && enclosingInsight !== null
+        ? await this.createHoverMarkdown(info, repoRoot, relativePath)
+        : hover;
+    if (token !== this.requestToken || this.disposed || editor !== vscode.window.activeTextEditor) {
+      return;
+    }
     if (this.annotatedDocuments.has(editor.document.uri.toString())) {
       editor.setDecorations(this.decorationType, []);
       if (this.decoratedEditor === editor) {
@@ -352,7 +444,14 @@ export class BlameController implements vscode.Disposable {
       }]);
       this.decoratedEditor = editor;
     }
-    this.updateStatusBar(info, hover);
+    this.updateDeclarationDecorations(
+      editor,
+      symbols,
+      blameMap,
+      symbolInsights.declarationInline && symbolInsights.enabled,
+      lineNumber,
+    );
+    this.updateStatusBar(info, statusBarHover);
   }
 
   private async renderAnnotateGutter(editor: vscode.TextEditor): Promise<void> {
@@ -436,6 +535,7 @@ export class BlameController implements vscode.Disposable {
     info: BlameLineInfo,
     repoRoot: string,
     relativePath: string,
+    symbolInsight?: SymbolBlameInsight,
   ): Promise<vscode.MarkdownString> {
     const githubRemoteUrl = await this.coordinator.getGithubRemoteUrlForRepo(repoRoot);
     const hover = new vscode.MarkdownString(
@@ -444,11 +544,117 @@ export class BlameController implements vscode.Disposable {
         repoRoot,
         relativePath,
         ...(githubRemoteUrl === undefined ? {} : { githubRemoteUrl }),
+        ...(symbolInsight === undefined ? {} : { symbolInsight }),
       }),
     );
     hover.supportThemeIcons = true;
     hover.isTrusted = { enabledCommands: [...BLAME_HOVER_ALLOWED_COMMANDS] };
     return hover;
+  }
+
+  private async getSymbolsForDocument(
+    document: vscode.TextDocument,
+  ): Promise<SimpleDocumentSymbol[]> {
+    const key = document.uri.toString();
+    const cached = this.symbolCache.get(key);
+    if (cached !== undefined && cached.version === document.version) {
+      this.symbolCache.delete(key);
+      this.symbolCache.set(key, cached);
+      return cached.symbols;
+    }
+
+    const symbols = await fetchDocumentInsightSymbols(document.uri);
+    this.symbolCache.delete(key);
+    this.symbolCache.set(key, { version: document.version, symbols });
+    while (this.symbolCache.size > SYMBOL_CACHE_MAX_ENTRIES) {
+      const oldestKey = this.symbolCache.keys().next().value;
+      if (oldestKey === undefined) {
+        break;
+      }
+      this.symbolCache.delete(oldestKey);
+    }
+    return symbols;
+  }
+
+  private async getBlameForDocument(
+    document: vscode.TextDocument,
+  ): Promise<{ repoRoot: string; blameMap: FileBlameMap } | null> {
+    if (document.uri.scheme !== 'file' || !vscode.workspace.isTrusted) {
+      return null;
+    }
+    const repoRoot = resolveBlameRepository(this.coordinator, document.uri.fsPath);
+    const relativePath = repoRoot === null
+      ? null
+      : repositoryRelativePath(repoRoot, document.uri.fsPath);
+    if (repoRoot === null || relativePath === null) {
+      return null;
+    }
+    const blameMap = this.blameService.getCachedFileBlame(
+      repoRoot,
+      relativePath,
+      { ignoreWhitespace: this.configuration.ignoreWhitespace },
+    );
+    return blameMap === undefined ? null : { repoRoot, blameMap };
+  }
+
+  private updateDeclarationDecorations(
+    editor: vscode.TextEditor,
+    symbols: readonly SimpleDocumentSymbol[],
+    blameMap: FileBlameMap | undefined,
+    enabled: boolean,
+    activeLine: number,
+  ): void {
+    if (blameMap === undefined || !enabled) {
+      editor.setDecorations(this.declarationDecorationType, []);
+      if (this.declarationDecoratedEditor === editor) {
+        this.declarationDecoratedEditor = undefined;
+      }
+      return;
+    }
+
+    const regularInlineRendersOnActiveLine =
+      this.configuration.enabled &&
+      !this.annotatedDocuments.has(editor.document.uri.toString());
+    const symbolsByLine = new Map<number, SimpleDocumentSymbol>();
+    for (const symbol of flattenInsightSymbols(symbols)) {
+      const existing = symbolsByLine.get(symbol.selectionLine);
+      if (
+        existing === undefined ||
+        symbol.endLine - symbol.startLine > existing.endLine - existing.startLine
+      ) {
+        symbolsByLine.set(symbol.selectionLine, symbol);
+      }
+    }
+    const decorations: vscode.DecorationOptions[] = [];
+    for (const symbol of symbolsByLine.values()) {
+      if (regularInlineRendersOnActiveLine && symbol.selectionLine === activeLine) {
+        continue;
+      }
+      const insight = computeSymbolInsight(symbol, blameMap);
+      if (insight === null) {
+        continue;
+      }
+      const line = insight.selectionLine - 1;
+      if (line < 0 || line >= editor.document.lineCount) {
+        continue;
+      }
+      const hoverMessage = new vscode.MarkdownString(
+        `**$(symbol-method) \`${escapeMarkdownText(insight.name)}\`** — ${escapeMarkdownText(formatSymbolInsightCompact(insight))}`,
+      );
+      hoverMessage.supportThemeIcons = true;
+      decorations.push({
+        range: new vscode.Range(
+          line,
+          editor.document.lineAt(line).text.length,
+          line,
+          editor.document.lineAt(line).text.length,
+        ),
+        hoverMessage,
+        renderOptions: { after: { contentText: `  ${formatSymbolInsightCompact(insight)}` } },
+      });
+    }
+    editor.setDecorations(this.declarationDecorationType, decorations);
+    this.declarationDecoratedEditor = editor;
   }
 
   private isCurrentGutterRender(
@@ -532,6 +738,13 @@ export class BlameController implements vscode.Disposable {
       this.decoratedEditor = undefined;
       this.statusBarItem.hide();
     }
+    if (
+      this.declarationDecoratedEditor !== undefined &&
+      this.declarationDecoratedEditor !== editor
+    ) {
+      this.declarationDecoratedEditor.setDecorations(this.declarationDecorationType, []);
+      this.declarationDecoratedEditor = undefined;
+    }
   }
 
   private clearPresentation(): void {
@@ -540,6 +753,12 @@ export class BlameController implements vscode.Disposable {
       this.decoratedEditor = undefined;
     } else {
       vscode.window.activeTextEditor?.setDecorations(this.decorationType, []);
+    }
+    if (this.declarationDecoratedEditor !== undefined) {
+      this.declarationDecoratedEditor.setDecorations(this.declarationDecorationType, []);
+      this.declarationDecoratedEditor = undefined;
+    } else {
+      vscode.window.activeTextEditor?.setDecorations(this.declarationDecorationType, []);
     }
     this.statusBarItem.hide();
   }

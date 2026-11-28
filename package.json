@@ -206,6 +206,31 @@
           "type": "boolean",
           "default": true,
           "description": "Show active-line Git blame summary in the status bar."
+        },
+        "gitRepoAndBranchExplorer.blame.symbolInsights.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Master switch for Git Symbol Insights (author count, commit count, and last modified info per function/class/method, computed from cached blame with zero extra Git processes)."
+        },
+        "gitRepoAndBranchExplorer.blame.symbolInsights.hover": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show enclosing symbol authorship summary inside the active-line Git blame hover (non-intrusive, default on)."
+        },
+        "gitRepoAndBranchExplorer.blame.symbolInsights.declarationInline": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show subtle inline ghost text at the end of symbol declaration lines (classes, functions, methods)."
+        },
+        "gitRepoAndBranchExplorer.blame.symbolInsights.statusBarTooltip": {
+          "type": "boolean",
+          "default": false,
+          "description": "Include the enclosing symbol authorship summary in the Git blame status bar tooltip."
+        },
+        "gitRepoAndBranchExplorer.blame.symbolInsights.codeLens": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show opt-in CodeLens above symbol declarations with authorship summary and click-to-reveal."
         }
       }
     }
