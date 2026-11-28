@@ -134,10 +134,11 @@ describe('gitAction validation', () => {
     });
   });
 
-  it.each(['cherryPick', 'revert', 'revertMerge'] as GitAction[])('requires a full commit hash for %s', (action) => {
+  it.each(['cherryPick', 'cherryPickIntoWorktree', 'revert', 'revertMerge'] as GitAction[])('requires a full commit hash for %s', (action) => {
     expect(isWebviewToExtensionMessage(gitAction({ action, target: HASH }))).toBe(true);
     expect(isWebviewToExtensionMessage(gitAction({ action, target: SHA256 }))).toBe(true);
     expect(isWebviewToExtensionMessage(gitAction({ action, target: 'HEAD' }))).toBe(false);
+    expect(isWebviewToExtensionMessage(gitAction({ action, target: 'main' }))).toBe(false);
     expect(isWebviewToExtensionMessage(gitAction({ action, target: HASH.slice(0, 8) }))).toBe(false);
     expect(isWebviewToExtensionMessage(gitAction({ action }))).toBe(false);
   });
@@ -160,6 +161,32 @@ describe('gitAction validation', () => {
     }
     expect(isWebviewToExtensionMessage({ type: 'gitAction' })).toBe(false);
     expect(isWebviewToExtensionMessage(gitAction({ action: 'publishRepository', extra: true }))).toBe(false);
+  });
+
+  it('validates cherryPickIntoWorktree payloads strictly', () => {
+    for (const target of [HASH, SHA256]) {
+      expect(isWebviewToExtensionMessage(gitAction({
+        action: 'cherryPickIntoWorktree',
+        target,
+      }))).toBe(true);
+    }
+    for (const target of [undefined, 'main', 'HEAD', '0'.repeat(39), 'g'.repeat(40), 'a'.repeat(63), 'a'.repeat(65)]) {
+      expect(isWebviewToExtensionMessage(gitAction({
+        action: 'cherryPickIntoWorktree',
+        target,
+      }))).toBe(false);
+    }
+    expect(isWebviewToExtensionMessage(gitAction({
+      action: 'cherryPickIntoWorktree',
+      target: HASH,
+      extra: true,
+    }))).toBe(false);
+    for (const key of ['__proto__', 'constructor', 'prototype']) {
+      const payload = JSON.parse(
+        `{"action":"cherryPickIntoWorktree","target":"${HASH}","${key}":{"polluted":true}}`,
+      ) as unknown;
+      expect(isWebviewToExtensionMessage({ type: 'gitAction', payload })).toBe(false);
+    }
   });
 });
 

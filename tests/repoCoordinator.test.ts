@@ -1840,6 +1840,190 @@ describe('RepoCoordinator', () => {
     expect(reopened.ofType('syncState')).toEqual([]);
   });
 
+  describe('cherryPickIntoWorktree', () => {
+    const targetHash = sha('a');
+    const worktreeSnapshot = (parents: string[] = [], eligible = true): RepoSnapshot => {
+      const snapshot = MAIN_AND_FEATURE();
+      return {
+        ...snapshot,
+        commits: [{ ...commitNode(targetHash), parents }],
+        worktrees: [
+          {
+            path: '/repo',
+            headHash: sha('b'),
+            branchName: 'main',
+            isDetached: false,
+            isBare: false,
+            isMain: true,
+            isCurrent: true,
+            isLocked: false,
+            isPrunable: false,
+          },
+          eligible
+            ? {
+                path: '/repo-feature',
+                headHash: sha('c'),
+                branchName: 'feature',
+                isDetached: false,
+                isBare: false,
+                isMain: false,
+                isCurrent: false,
+                isLocked: false,
+                isPrunable: false,
+              }
+            : {
+                path: '/repo-locked',
+                headHash: sha('c'),
+                branchName: 'locked',
+                isDetached: false,
+                isBare: true,
+                isMain: false,
+                isCurrent: false,
+                isLocked: true,
+                isPrunable: true,
+              },
+        ],
+      };
+    };
+    const send = (hash = targetHash): void => {
+      coordinator.handleMessage('editor', {
+        type: 'gitAction',
+        payload: { action: 'cherryPickIntoWorktree', target: hash },
+      });
+    };
+
+    it('rejects untrusted workspaces without calling Git', async () => {
+      await openBoth();
+      mocks.getRepoSnapshot.mockClear();
+      mocks.isTrusted = false;
+      mocks.getRepoSnapshot.mockResolvedValue(worktreeSnapshot());
+
+      send();
+
+      await vi.waitFor(() => expect(mocks.cherryPickCommit).not.toHaveBeenCalled());
+      expect(mocks.showQuickPick).not.toHaveBeenCalled();
+      expect(mocks.getRepoSnapshot).not.toHaveBeenCalled();
+      expect(mocks.cherryPickCommit).not.toHaveBeenCalled();
+    });
+
+    it('warns for merge commits and does not open QuickPick or call cherryPickCommit', async () => {
+      mocks.getRepoSnapshot.mockResolvedValue(worktreeSnapshot([sha('b'), sha('c')]));
+      await openBoth();
+
+      send();
+
+      await vi.waitFor(() => expect(mocks.showWarningMessage).toHaveBeenCalledWith(
+        'Merge commits cannot be cherry-picked.',
+      ));
+      expect(mocks.showQuickPick).not.toHaveBeenCalled();
+      expect(mocks.cherryPickCommit).not.toHaveBeenCalled();
+    });
+
+    it('warns when no eligible worktrees exist', async () => {
+      mocks.getRepoSnapshot.mockResolvedValue(worktreeSnapshot([], false));
+      await openBoth();
+
+      send();
+
+      await vi.waitFor(() => expect(mocks.showWarningMessage).toHaveBeenCalledWith(
+        'No other unlocked, active worktrees are available.',
+      ));
+      expect(mocks.showQuickPick).not.toHaveBeenCalled();
+      expect(mocks.cherryPickCommit).not.toHaveBeenCalled();
+    });
+
+    it('exits cleanly when QuickPick is cancelled', async () => {
+      mocks.getRepoSnapshot.mockResolvedValue(worktreeSnapshot());
+      mocks.showQuickPick.mockResolvedValue(undefined);
+      await openBoth();
+
+      send();
+
+      await vi.waitFor(() => expect(mocks.showQuickPick).toHaveBeenCalled());
+      expect(mocks.hasWorkingTreeChanges).not.toHaveBeenCalled();
+      expect(mocks.cherryPickCommit).not.toHaveBeenCalled();
+    });
+
+    it('warns for dirty destinations and opens the selected worktree when requested', async () => {
+      const snapshot = worktreeSnapshot();
+      mocks.getRepoSnapshot.mockResolvedValue(snapshot);
+      mocks.showQuickPick.mockResolvedValue({
+        label: 'feature',
+        description: 'Linked worktree',
+        detail: '/repo-feature',
+        worktree: snapshot.worktrees[1],
+      });
+      mocks.hasWorkingTreeChanges.mockResolvedValue(true);
+      mocks.showWarningMessage.mockResolvedValue('Open Worktree in New Window');
+      await openBoth();
+
+      send();
+
+      await vi.waitFor(() => expect(mocks.showWarningMessage).toHaveBeenCalledWith(
+        expect.stringMatching(/uncommitted changes/i),
+        'Open Worktree in New Window',
+      ));
+      await vi.waitFor(() => expect(mocks.executeCommand).toHaveBeenCalledWith(
+        'vscode.openFolder',
+        expect.objectContaining({ fsPath: '/repo-feature' }),
+        { forceNewWindow: true },
+      ));
+      expect(mocks.cherryPickCommit).not.toHaveBeenCalled();
+    });
+
+    it('cherry-picks into the linked worktree, refreshes, and offers to open it', async () => {
+      const snapshot = worktreeSnapshot();
+      mocks.getRepoSnapshot.mockResolvedValue(snapshot);
+      mocks.showQuickPick.mockResolvedValue({
+        label: 'feature',
+        description: 'Linked worktree',
+        detail: '/repo-feature',
+        worktree: snapshot.worktrees[1],
+      });
+      mocks.hasWorkingTreeChanges.mockResolvedValue(false);
+      mocks.cherryPickCommit.mockResolvedValue(undefined);
+      mocks.showInformationMessage.mockResolvedValue(undefined);
+      await openBoth();
+      mocks.getRepoSnapshot.mockClear();
+
+      send(targetHash.toUpperCase());
+
+      await vi.waitFor(() => expect(mocks.cherryPickCommit).toHaveBeenCalledWith(
+        '/repo-feature',
+        targetHash,
+      ));
+      await vi.waitFor(() => expect(mocks.getRepoSnapshot).toHaveBeenCalled());
+      expect(mocks.showInformationMessage).toHaveBeenCalledWith(
+        expect.stringMatching(/cherry-picked/i),
+        'Open Worktree in New Window',
+      );
+    });
+
+    it('shows a single conflict/error notification with an open-worktree action', async () => {
+      const snapshot = worktreeSnapshot();
+      mocks.getRepoSnapshot.mockResolvedValue(snapshot);
+      mocks.showQuickPick.mockResolvedValue({
+        label: 'feature',
+        description: 'Linked worktree',
+        detail: '/repo-feature',
+        worktree: snapshot.worktrees[1],
+      });
+      mocks.hasWorkingTreeChanges.mockResolvedValue(false);
+      mocks.cherryPickCommit.mockRejectedValue(new Error('cherry-pick conflict'));
+      mocks.showWarningMessage.mockResolvedValue(undefined);
+      await openBoth();
+
+      send();
+
+      await vi.waitFor(() => expect(mocks.showWarningMessage).toHaveBeenCalledWith(
+        expect.stringMatching(/failed cherry-pick/i),
+        'Open Worktree in New Window',
+      ));
+      expect(mocks.showErrorMessage).not.toHaveBeenCalled();
+      expect(mocks.cherryPickCommit).toHaveBeenCalledWith('/repo-feature', targetHash);
+    });
+  });
+
   describe('repository menu operations', () => {
     const tracking = (name: string, isCurrent: boolean, patch: Partial<BranchInfo> = {}): BranchInfo => ({
       ...branch(name, isCurrent),

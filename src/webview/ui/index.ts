@@ -111,6 +111,9 @@ function runCommitMenuAction(id: MenuActionId, commit: CommitNode): void {
     case 'createTag':
       postGitAction('createTag', commit.hash);
       break;
+    case 'cherryPickIntoWorktree':
+      postGitAction('cherryPickIntoWorktree', commit.hash);
+      break;
     case 'cherryPick':
     case 'revert':
     case 'revertMerge':

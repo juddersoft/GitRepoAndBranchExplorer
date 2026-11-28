@@ -1131,6 +1131,7 @@ export class RepoCoordinator implements vscode.Disposable {
     operation: (repoRoot: string) => Promise<void>,
     failureHint?: string,
     onError?: (error: unknown) => void,
+    suppressErrorNotification = false,
   ): Promise<boolean> {
     if (!this.ensureTrustedWorkspace()) {
       return false;
@@ -1154,9 +1155,11 @@ export class RepoCoordinator implements vscode.Disposable {
       return true;
     } catch (err) {
       onError?.(err);
-      void vscode.window.showErrorMessage(
-        `${title} failed: ${describeError(err)}${failureHint === undefined ? '' : ` ${failureHint}`}`,
-      );
+      if (!suppressErrorNotification) {
+        void vscode.window.showErrorMessage(
+          `${title} failed: ${describeError(err)}${failureHint === undefined ? '' : ` ${failureHint}`}`,
+        );
+      }
       return false;
     } finally {
       this.operationInProgress = false;
@@ -1251,6 +1254,9 @@ export class RepoCoordinator implements vscode.Disposable {
       case 'cherryPick':
       case 'revert':
         await this.handleCommitOperation(action, target);
+        break;
+      case 'cherryPickIntoWorktree':
+        await this.handleCherryPickIntoWorktree(target);
         break;
       case 'revertMerge':
         await this.handleRevertMerge(target);
@@ -2022,6 +2028,114 @@ export class RepoCoordinator implements vscode.Disposable {
         (root) => this.gitService.revertCommit(root, lower),
         conflictHint('revert'),
       );
+    }
+  }
+
+  private async handleCherryPickIntoWorktree(hash: string | undefined): Promise<void> {
+    if (!this.ensureTrustedWorkspace()) {
+      return;
+    }
+    const snapshot = this.lastSnapshot;
+    if (!snapshot) {
+      void vscode.window.showWarningMessage('No Git repository is loaded.');
+      return;
+    }
+    if (!isValidCommitHash(hash)) {
+      return;
+    }
+    const lower = hash.toLowerCase();
+    const commit = snapshot.commits.find((candidate) => candidate.hash === lower);
+    if (!commit) {
+      void vscode.window.showWarningMessage('That commit is not part of the loaded history.');
+      return;
+    }
+    if (commit.parents.length > 1) {
+      void vscode.window.showWarningMessage('Merge commits cannot be cherry-picked.');
+      return;
+    }
+
+    const eligibleWorktrees = snapshot.worktrees.filter(
+      (worktree) => !worktree.isCurrent && !worktree.isBare && !worktree.isLocked && !worktree.isPrunable,
+    );
+    if (eligibleWorktrees.length === 0) {
+      void vscode.window.showWarningMessage('No other unlocked, active worktrees are available.');
+      return;
+    }
+
+    const selected = await vscode.window.showQuickPick(
+      eligibleWorktrees.map((worktree) => ({
+        label: worktree.branchName ?? `Detached HEAD (${worktree.headHash.slice(0, 8)})`,
+        description: worktree.isMain ? 'Main worktree' : 'Linked worktree',
+        detail: worktree.path,
+        worktree,
+      })),
+      {
+        title: 'Cherry-Pick into Worktree',
+        placeHolder: `Select destination worktree for ${commit.shortHash}`,
+        ignoreFocusOut: true,
+      },
+    );
+    if (!selected) {
+      return;
+    }
+
+    const targetWorktree = this.resolveSnapshotWorktree(selected.worktree.path);
+    if (!targetWorktree) {
+      void vscode.window.showWarningMessage('That worktree is not part of the loaded repository.');
+      return;
+    }
+    const targetLabel =
+      targetWorktree.branchName ?? `Detached HEAD (${targetWorktree.headHash.slice(0, 8)})`;
+    const openWorktreeLabel = 'Open Worktree in New Window';
+    const openWorktree = async (): Promise<void> => {
+      await vscode.commands.executeCommand(
+        'vscode.openFolder',
+        vscode.Uri.file(targetWorktree.path),
+        { forceNewWindow: true },
+      );
+    };
+
+    const isDirty = await this.gitService.hasWorkingTreeChanges(targetWorktree.path);
+    if (isDirty) {
+      const choice = await vscode.window.showWarningMessage(
+        `Cannot cherry-pick into "${targetLabel}" because it has uncommitted changes. Commit or stash changes there first.`,
+        openWorktreeLabel,
+      );
+      if (choice === openWorktreeLabel) {
+        await openWorktree();
+      }
+      return;
+    }
+
+    let gitOperationFailed = false;
+    const succeeded = await this.runGitOperation(
+      `Cherry-picking ${commit.shortHash} into ${targetLabel}`,
+      () => this.gitService.cherryPickCommit(targetWorktree.path, lower),
+      'If conflicts occurred in that worktree, open it to resolve them or run git cherry-pick --abort.',
+      () => {
+        gitOperationFailed = true;
+      },
+      true,
+    );
+    if (!succeeded) {
+      if (gitOperationFailed) {
+        const choice = await vscode.window.showWarningMessage(
+          `Open "${targetLabel}" to inspect or resolve the failed cherry-pick.`,
+          openWorktreeLabel,
+        );
+        if (choice === openWorktreeLabel) {
+          await openWorktree();
+        }
+      }
+      return;
+    }
+
+    const choice = await vscode.window.showInformationMessage(
+      `Cherry-picked ${commit.shortHash} into ${targetLabel}.`,
+      openWorktreeLabel,
+    );
+    if (choice === openWorktreeLabel) {
+      await openWorktree();
     }
   }
 

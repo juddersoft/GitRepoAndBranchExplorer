@@ -41,6 +41,7 @@ export type MenuActionId =
   | 'popStash'
   | 'dropStash'
   | 'cherryPick'
+  | 'cherryPickIntoWorktree'
   | 'revert'
   | 'revertMerge'
   | 'resetMixed'
@@ -407,6 +408,9 @@ export function buildCommitMenu(snapshot: RepoSnapshot, state: ExplorerUiState, 
   const busy = state.isBusy && BUSY_REASON;
   const noHead = getHeadHash(snapshot) === null && 'No commit is checked out yet.';
   const isMerge = commit.parents.length > 1;
+  const eligibleWorktrees = snapshot.worktrees.filter(
+    (worktree) => !worktree.isCurrent && !worktree.isBare && !worktree.isLocked && !worktree.isPrunable,
+  );
   const hasCurrentBranch = !snapshot.isDetachedHead && snapshot.localBranches.some((branch) => branch.isCurrent);
   const currentLabel = snapshot.isDetachedHead ? 'Current Branch' : snapshot.currentBranch;
   const resetReason = firstReason(
@@ -430,6 +434,19 @@ export function buildCommitMenu(snapshot: RepoSnapshot, state: ExplorerUiState, 
         !noHead && isAncestorOfHead(snapshot, commit.hash) && 'Already part of the current branch history.',
       ),
     ),
+    ...(snapshot.worktrees.length > 1
+      ? [
+          item(
+            'cherryPickIntoWorktree',
+            'Cherry-Pick into Worktree\u2026',
+            firstReason(
+              state.isBusy && 'Another Git operation is already in progress.',
+              isMerge && 'Merge commits cannot be cherry-picked.',
+              eligibleWorktrees.length === 0 && 'No other unlocked, active worktrees are available.',
+            ),
+          ),
+        ]
+      : []),
     isMerge
       ? item('revertMerge', 'Revert Merge Commit (Mainline 1)…', firstReason(busy, noHead))
       : item('revert', 'Revert', firstReason(busy, noHead)),

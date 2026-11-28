@@ -351,6 +351,82 @@ describe('buildRefMenu: remote branches and tags', () => {
 
 describe('buildCommitMenu', () => {
   const find = (hash: string): CommitNode => snapshot.commits.find((c) => c.hash === hash) as CommitNode;
+  const worktree = (
+    path: string,
+    patch: Partial<RepoSnapshot['worktrees'][number]> = {},
+  ): RepoSnapshot['worktrees'][number] => ({
+    path,
+    headHash: M,
+    branchName: 'feature',
+    isDetached: false,
+    isBare: false,
+    isMain: false,
+    isCurrent: false,
+    isLocked: false,
+    isPrunable: false,
+    ...patch,
+  });
+
+  it('only shows cherryPickIntoWorktree for snapshots with more than one worktree and places it after cherryPick', () => {
+    expect(ids(buildCommitMenu(snapshot, state(), find(C)))).not.toContain('cherryPickIntoWorktree');
+
+    const withWorktrees: RepoSnapshot = {
+      ...snapshot,
+      worktrees: [
+        worktree('/repo', { branchName: 'main', isMain: true, isCurrent: true }),
+        worktree('/repo-feature'),
+      ],
+    };
+    const menu = buildCommitMenu(withWorktrees, state({ snapshot: withWorktrees }), find(C));
+    const menuIds = ids(menu);
+    expect(menuIds).toContain('cherryPickIntoWorktree');
+    expect(menuIds.indexOf('cherryPickIntoWorktree')).toBe(menuIds.indexOf('cherryPick') + 1);
+  });
+
+  it('keeps cherryPickIntoWorktree enabled for a commit already in current HEAD history', () => {
+    const withWorktrees: RepoSnapshot = {
+      ...snapshot,
+      worktrees: [
+        worktree('/repo', { branchName: 'main', isMain: true, isCurrent: true }),
+        worktree('/repo-feature'),
+      ],
+    };
+    const menu = buildCommitMenu(withWorktrees, state({ snapshot: withWorktrees }), find(C));
+    expect(item(menu, 'cherryPick').enabled).toBe(false);
+    expect(item(menu, 'cherryPickIntoWorktree')).toMatchObject({ enabled: true });
+  });
+
+  it('disables cherryPickIntoWorktree while busy or for a merge commit', () => {
+    const withWorktrees: RepoSnapshot = {
+      ...snapshot,
+      worktrees: [
+        worktree('/repo', { branchName: 'main', isMain: true, isCurrent: true }),
+        worktree('/repo-feature'),
+      ],
+    };
+    expect(item(buildCommitMenu(withWorktrees, state({ snapshot: withWorktrees, isBusy: true }), find(C)), 'cherryPickIntoWorktree'))
+      .toMatchObject({ enabled: false, reason: expect.stringMatching(/operation/i) });
+    expect(item(buildCommitMenu(withWorktrees, state({ snapshot: withWorktrees }), find(G)), 'cherryPickIntoWorktree'))
+      .toMatchObject({ enabled: false, reason: expect.stringMatching(/merge/i) });
+  });
+
+  it('disables cherryPickIntoWorktree when every other worktree is ineligible', () => {
+    for (const patch of [
+      { isLocked: true },
+      { isPrunable: true },
+      { isBare: true },
+    ]) {
+      const withWorktrees: RepoSnapshot = {
+        ...snapshot,
+        worktrees: [
+          worktree('/repo', { branchName: 'main', isMain: true, isCurrent: true }),
+          worktree('/repo-feature', patch),
+        ],
+      };
+      expect(item(buildCommitMenu(withWorktrees, state({ snapshot: withWorktrees }), find(C)), 'cherryPickIntoWorktree'))
+        .toMatchObject({ enabled: false, reason: expect.stringMatching(/no other/i) });
+    }
+  });
 
   it('enables cherry-pick for a commit outside HEAD history', () => {
     const detachedSide: RepoSnapshot = {

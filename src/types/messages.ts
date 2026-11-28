@@ -30,6 +30,7 @@ export type GitAction =
   | 'merge'
   | 'rebase'
   | 'cherryPick'
+  | 'cherryPickIntoWorktree'
   | 'revert'
   | 'revertMerge'
   | 'deleteBranch'
@@ -61,6 +62,7 @@ export const GIT_ACTION_LABELS: Readonly<Record<GitAction, string>> = {
   merge: 'Merge',
   rebase: 'Rebase',
   cherryPick: 'Cherry-Pick',
+  cherryPickIntoWorktree: 'Cherry-Pick into Worktree',
   revert: 'Revert',
   revertMerge: 'Revert Merge Commit',
   deleteBranch: 'Delete Branch',
@@ -96,6 +98,7 @@ export const GIT_ACTION_TARGETS: Readonly<Record<GitAction, GitActionTargetKind>
   merge: 'ref',
   rebase: 'ref',
   cherryPick: 'commit',
+  cherryPickIntoWorktree: 'commit',
   revert: 'commit',
   revertMerge: 'commit',
   deleteBranch: 'ref',
