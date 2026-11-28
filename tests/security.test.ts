@@ -267,6 +267,11 @@ describe('adversarial external navigation guards', () => {
 });
 
 describe('static hover trust regression guard', () => {
+  it('keeps symbolInsights pure and independent of vscode and Node built-ins', () => {
+    const source = fs.readFileSync(path.resolve('src/blame/symbolInsights.ts'), 'utf8');
+    expect(source).not.toMatch(/(?:from\s+['"](vscode|fs|path|child_process|os)['"]|require\s*\(\s*['"](vscode|fs|path|child_process|os)['"]\s*\))/);
+  });
+
   it('keeps the remote URL builder pure and independent of VS Code and Node', () => {
     const source = fs.readFileSync(path.resolve('src/git/remoteUrlBuilder.ts'), 'utf8');
     expect(source).not.toMatch(/(?:from\s+['"](?:vscode|fs|path|child_process)['"]|require\s*\()/);
@@ -290,6 +295,16 @@ describe('static hover trust regression guard', () => {
 });
 
 describe('static webview sink and Git spawning audit', () => {
+  it('accepts local clone filesystem paths with spaces and rejects unsafe clone prefixes', () => {
+    expect(validateCloneUrl('F:\\Syncthing\\TestRepos\\origin.git')).toEqual({
+      valid: true,
+      normalized: 'F:\\Syncthing\\TestRepos\\origin.git',
+    });
+    for (const source of ['-c', '--upload-pack=evil', 'ext::sh -c id', 'bad\u0000path']) {
+      expect(validateCloneUrl(source).valid, source).toBe(false);
+    }
+  });
+
   it('rejects clone URL command-injection forms', () => {
     for (const url of [
       'ext::sh -c id',

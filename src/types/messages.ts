@@ -30,6 +30,7 @@ export type GitAction =
   | 'renameBranch'
   | 'untrackBranch'
   | 'publishRepository'
+  | 'removeRepoFromWorkspace'
   | 'merge'
   | 'rebase'
   | 'cherryPick'
@@ -67,6 +68,7 @@ export const GIT_ACTION_LABELS: Readonly<Record<GitAction, string>> = {
   renameBranch: 'Rename Branch',
   untrackBranch: 'Untrack Remote Branch',
   publishRepository: 'Publish Repository / Add Remote',
+  removeRepoFromWorkspace: 'Remove Folder from Workspace',
   merge: 'Merge',
   rebase: 'Rebase',
   cherryPick: 'Cherry-Pick',
@@ -108,6 +110,7 @@ export const GIT_ACTION_TARGETS: Readonly<Record<GitAction, GitActionTargetKind>
   renameBranch: 'ref',
   untrackBranch: 'ref',
   publishRepository: 'none',
+  removeRepoFromWorkspace: 'path',
   merge: 'ref',
   rebase: 'ref',
   cherryPick: 'commit',
@@ -968,7 +971,14 @@ function isFileHistoryCommitShape(value: unknown): value is FileHistoryCommit {
 function isWorkspaceRepoInfoShape(value: unknown): value is WorkspaceRepoInfo {
   return (
     isSafeRecord(value) &&
-    hasOnlyFields(value, ['repoRoot', 'repoName', 'commonDir', 'currentBranch', 'isDetachedHead']) &&
+    hasOnlyFields(value, [
+      'repoRoot',
+      'repoName',
+      'commonDir',
+      'currentBranch',
+      'isDetachedHead',
+      'isWorkspaceFolder',
+    ]) &&
     typeof ownField(value, 'repoRoot') === 'string' &&
     ownField(value, 'repoRoot') !== '' &&
     typeof ownField(value, 'repoName') === 'string' &&
@@ -976,6 +986,7 @@ function isWorkspaceRepoInfoShape(value: unknown): value is WorkspaceRepoInfo {
     typeof ownField(value, 'commonDir') === 'string' &&
     ownField(value, 'commonDir') !== '' &&
     (ownField(value, 'currentBranch') === undefined || typeof ownField(value, 'currentBranch') === 'string') &&
-    (ownField(value, 'isDetachedHead') === undefined || typeof ownField(value, 'isDetachedHead') === 'boolean')
+    (ownField(value, 'isDetachedHead') === undefined || typeof ownField(value, 'isDetachedHead') === 'boolean') &&
+    (ownField(value, 'isWorkspaceFolder') === undefined || typeof ownField(value, 'isWorkspaceFolder') === 'boolean')
   );
 }

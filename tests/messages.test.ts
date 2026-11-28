@@ -169,6 +169,18 @@ describe('gitAction validation', () => {
     }
   });
 
+  it('requires a control-free path for workspace-folder removal', () => {
+    expect(isWebviewToExtensionMessage(gitAction({
+      action: 'removeRepoFromWorkspace',
+      target: 'C:\\Syncthing\\Project Repo',
+    }))).toBe(true);
+    expect(isWebviewToExtensionMessage(gitAction({ action: 'removeRepoFromWorkspace' }))).toBe(false);
+    expect(isWebviewToExtensionMessage(gitAction({
+      action: 'removeRepoFromWorkspace',
+      target: 'C:\\Repos\\bad\u0000path',
+    }))).toBe(false);
+  });
+
   it('validates tag action target kinds', () => {
     expect(isWebviewToExtensionMessage(gitAction({ action: 'createTag', target: HASH }))).toBe(true);
     expect(isWebviewToExtensionMessage(gitAction({ action: 'createTag', target: 'main' }))).toBe(false);

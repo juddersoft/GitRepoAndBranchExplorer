@@ -25,6 +25,18 @@ describe('repository discovery', () => {
     expect(canonicalizeRepoPath('C:\\Work\\Repo\\', 'C:\\base', 'win32')).toBe('c:\\work\\repo');
   });
 
+  it('discovers every direct repository in a multi-root untitled workspace', async () => {
+    const root = await tempDirectory();
+    const first = path.join(root, 'demo-app');
+    const second = path.join(root, 'origin-clone');
+    await Promise.all([first, second].map((directory) => fs.promises.mkdir(directory)));
+    await Promise.all([first, second].map((directory) => execGit(['init', '--initial-branch=main'], directory)));
+
+    const repositories = await discoverWorkspaceRepositories([first, second]);
+
+    expect(repositories.map((repository) => repository.repoName)).toEqual(['demo-app', 'origin-clone']);
+  });
+
   it('reads branch metadata and falls back to a detached short SHA', async () => {
     const directory = await tempDirectory();
     const attached: RepoGitRunner = async (args) => {

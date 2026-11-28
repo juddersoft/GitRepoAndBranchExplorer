@@ -173,6 +173,11 @@ export interface RepoCoordinatorDependencies {
   readonly cloneDiscoveryService?: CloneDiscoveryService;
 }
 
+interface RepositoryLoadOptions {
+  readonly preferredWorkspaceFolders?: readonly string[];
+  readonly additionalWorkspaceFolders?: readonly string[];
+}
+
 const EMPTY_SELECTION: SyncStatePayload = { selectedBranchFullName: null, selectedBranchRef: null, pinnedBranchFullNames: [] };
 const MAX_REVEAL_SEARCH_PAGES = 10;
 
@@ -192,6 +197,7 @@ export class RepoCoordinator implements vscode.Disposable {
   private loadSequence = 0;
   private disposed = false;
   private lastSnapshot: RepoSnapshot | null = null;
+  private lastError: RepoErrorPayload | null = null;
   private selection: SyncStatePayload = EMPTY_SELECTION;
   private status: ActionStatusPayload = { busy: false };
   private integrations: ExternalIntegrationsInfo = {
@@ -229,7 +235,11 @@ export class RepoCoordinator implements vscode.Disposable {
     this.gitService = dependencies.gitService ?? new GitService();
     this.githubService = dependencies.githubService ?? new GitHubService();
     this.cloneDiscoveryService = dependencies.cloneDiscoveryService ?? new CloneDiscoveryService();
-    vscode.workspace.onDidChangeWorkspaceFolders(() => this.refreshIfAttached(), null, this.disposables);
+    vscode.workspace.onDidChangeWorkspaceFolders(
+      (event) => this.handleWorkspaceFoldersChanged(event),
+      null,
+      this.disposables,
+    );
     vscode.workspace.onDidGrantWorkspaceTrust(() => this.refreshIfAttached(), null, this.disposables);
     vscode.workspace.onDidChangeConfiguration(
       (event) => {
@@ -518,24 +528,19 @@ export class RepoCoordinator implements vscode.Disposable {
       return;
     }
 
-    const source = await vscode.window.showQuickPick(
-      [
-        { label: 'Clone from URL…', value: 'url' as const },
-        { label: 'Browse GitHub (github.com)', value: 'github' as const },
-        { label: 'Browse GitHub Enterprise (*.ghe.com / Server)', value: 'githubEnterprise' as const },
-        { label: 'Browse Azure DevOps', value: 'azureDevOps' as const },
-      ],
-      { title: 'Clone Repository', ignoreFocusOut: true },
-    );
+    const source = await this.pickCloneSource();
     if (!source) {
       return;
     }
 
-    const resolved = await this.resolveCloneSource(source.value);
+    const resolved = await this.resolveCloneSource(source.value, source.cloneSource);
     if (!resolved) {
       return;
     }
-    const parentDir = await this.chooseCloneParentFolder();
+    const parentDir = await this.chooseCloneParentFolder(
+      resolved.defaultFolderName,
+      resolved.cloneUrl,
+    );
     if (!parentDir) {
       return;
     }
@@ -1238,13 +1243,87 @@ export class RepoCoordinator implements vscode.Disposable {
     }
   }
 
+  private async pickCloneSource(): Promise<{
+    readonly label: string;
+    readonly value: 'url' | 'direct' | 'github' | 'githubEnterprise' | 'azureDevOps';
+    readonly cloneSource?: string;
+  } | undefined> {
+    type CloneSourceItem = vscode.QuickPickItem & {
+      readonly value: 'url' | 'direct' | 'github' | 'githubEnterprise' | 'azureDevOps';
+      readonly cloneSource?: string;
+    };
+    const providers: readonly CloneSourceItem[] = [
+      { label: 'Clone from URL or Local Folder...', value: 'url' },
+      { label: 'Browse GitHub (github.com)', value: 'github' },
+      { label: 'Browse GitHub Enterprise (*.ghe.com / Server)', value: 'githubEnterprise' },
+      { label: 'Browse Azure DevOps', value: 'azureDevOps' },
+    ];
+    const providerLabels = new Set(providers.map((provider) => provider.label));
+    const quickPick = vscode.window.createQuickPick<CloneSourceItem>();
+    quickPick.title = 'Clone Repository';
+    quickPick.placeholder = 'Paste a repository URL or local folder path, or choose a provider below';
+    quickPick.ignoreFocusOut = true;
+    quickPick.items = providers;
+
+    return await new Promise<CloneSourceItem | undefined>((resolve) => {
+      let settled = false;
+      const finish = (item: CloneSourceItem | undefined): void => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        subscriptions.forEach((subscription) => subscription.dispose());
+        quickPick.dispose();
+        resolve(item);
+      };
+      const subscriptions: vscode.Disposable[] = [
+        quickPick.onDidChangeValue((value) => {
+          const trimmed = value.trim();
+          if (trimmed.length === 0 || providerLabels.has(trimmed)) {
+            quickPick.items = providers;
+            return;
+          }
+          quickPick.items = [
+            {
+              label: `Clone from "${trimmed}"`,
+              description: 'URL or Local Folder',
+              value: 'direct',
+              cloneSource: trimmed,
+              alwaysShow: true,
+            },
+            ...providers,
+          ];
+        }),
+        quickPick.onDidAccept(() => finish(quickPick.activeItems[0] ?? quickPick.items[0])),
+        quickPick.onDidHide(() => finish(undefined)),
+      ];
+      quickPick.show();
+    });
+  }
+
   private async resolveCloneSource(
-    source: 'url' | 'github' | 'githubEnterprise' | 'azureDevOps',
+    source: 'url' | 'direct' | 'github' | 'githubEnterprise' | 'azureDevOps',
+    cloneSource?: string,
   ): Promise<{ cloneUrl: string; defaultFolderName: string; displayLabel: string } | null> {
-    if (source === 'url') {
+    if (source === 'url' || source === 'direct') {
+      const directValidation = source === 'direct' && cloneSource !== undefined
+        ? validateCloneUrl(cloneSource)
+        : null;
+      if (directValidation?.valid && directValidation.normalized !== undefined) {
+        return {
+          cloneUrl: directValidation.normalized,
+          defaultFolderName: extractCloneFolderName(directValidation.normalized),
+          displayLabel: directValidation.normalized,
+        };
+      }
+      if (directValidation !== null && !directValidation.valid) {
+        void vscode.window.showWarningMessage(directValidation.error ?? 'Repository URL is invalid.');
+      }
       const cloneUrl = await vscode.window.showInputBox({
         title: 'Clone Repository',
-        prompt: 'Paste a repository URL or local path',
+        prompt: 'Enter the source repository URL (https://..., git@...) or local folder path to clone FROM.',
+        placeHolder: 'https://github.com/owner/repository.git or F:\\Syncthing\\TestRepos\\origin.git',
+        ...(cloneSource === undefined ? {} : { value: cloneSource }),
         ignoreFocusOut: true,
         validateInput: (value) => validateCloneUrl(value).error,
       });
@@ -1438,7 +1517,7 @@ export class RepoCoordinator implements vscode.Disposable {
     return orgName ?? null;
   }
 
-  private async chooseCloneParentFolder(): Promise<string | null> {
+  private async chooseCloneParentFolder(repoName: string, cloneSource: string): Promise<string | null> {
     const workspaceRoot = vscode.workspace
       .getConfiguration('gitRepoAndBranchExplorer')
       .get<string>('workspaceRoot', '')
@@ -1466,9 +1545,34 @@ export class RepoCoordinator implements vscode.Disposable {
       canSelectFolders: true,
       canSelectFiles: false,
       canSelectMany: false,
+      title: `Select Destination Folder to Clone "${repoName}" Into`,
       openLabel: 'Select Destination Folder',
+      defaultUri: this.defaultCloneDestinationUri(workspaceRoot, cloneSource),
     }) ?? [];
     return folder?.fsPath ?? null;
+  }
+
+  private defaultCloneDestinationUri(workspaceRoot: string, cloneSource: string): vscode.Uri | undefined {
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (workspaceRoot.length > 0) {
+      return vscode.Uri.file(workspaceRoot);
+    }
+    if (workspaceFolder) {
+      return vscode.Uri.file(path.dirname(workspaceFolder));
+    }
+    if (/^file:\/\//i.test(cloneSource)) {
+      return vscode.Uri.file(path.dirname(vscode.Uri.parse(cloneSource, true).fsPath));
+    }
+    if (
+      /^[A-Za-z]:[\\/]/.test(cloneSource) ||
+      /^(?:\\\\|\/\/)[^\\/]/.test(cloneSource) ||
+      cloneSource.startsWith('/') ||
+      cloneSource.startsWith('./') ||
+      cloneSource.startsWith('../')
+    ) {
+      return vscode.Uri.file(path.dirname(path.resolve(cloneSource)));
+    }
+    return undefined;
   }
 
   private async offerPostCloneActions(clonedPath: string): Promise<void> {
@@ -1519,7 +1623,7 @@ export class RepoCoordinator implements vscode.Disposable {
           return;
         }
         this.selectedRepoRoot = clonedPath;
-        await this.loadRepository();
+        await this.loadRepository({ additionalWorkspaceFolders: [clonedPath] });
         break;
       }
       case 'newWindow':
@@ -1543,6 +1647,8 @@ export class RepoCoordinator implements vscode.Disposable {
     });
     if (this.lastSnapshot !== null) {
       this.broadcast({ type: 'repoSnapshot', payload: this.lastSnapshot });
+    } else if (this.lastError !== null) {
+      this.broadcast({ type: 'repoError', payload: this.lastError });
     }
   }
 
@@ -1557,6 +1663,14 @@ export class RepoCoordinator implements vscode.Disposable {
       return;
     }
     if (snapshot === null) {
+      if (this.lastError !== null) {
+        surface.post({ type: 'initState', payload: this.getInitState() });
+        surface.post({
+          type: 'workspaceRepos',
+          payload: { repos: this.discoveredRepos, activeRepoRoot: null },
+        });
+        surface.post({ type: 'repoError', payload: this.lastError });
+      }
       void this.loadRepository();
       return;
     }
@@ -1600,10 +1714,23 @@ export class RepoCoordinator implements vscode.Disposable {
     }
   }
 
+  private handleWorkspaceFoldersChanged(event: vscode.WorkspaceFoldersChangeEvent): void {
+    if (!vscode.workspace.isTrusted) {
+      this.reportUntrustedWorkspace();
+      return;
+    }
+    const addedRoots = event.added.map((folder) => folder.uri.fsPath);
+    void this.loadRepository({
+      preferredWorkspaceFolders: addedRoots,
+      additionalWorkspaceFolders: addedRoots,
+    });
+  }
+
   /** No view is showing the repository any more: stop watching it and forget the transient state. */
   private release(): void {
     this.loadSequence++;
     this.lastSnapshot = null;
+    this.lastError = null;
     this.discoveredRepos = [];
     this.selectedRepoRoot = null;
     this.githubRemoteByRepo.clear();
@@ -1648,6 +1775,23 @@ export class RepoCoordinator implements vscode.Disposable {
     this.broadcast({ type: 'clearRefComparison' });
     this.selectedRepoRoot = repository.repoRoot;
     void this.loadRepository();
+  }
+
+  private handleRemoveRepoFromWorkspace(requestedRoot: string | undefined): void {
+    if (requestedRoot === undefined) {
+      return;
+    }
+    const requested = canonicalizeRepoPath(requestedRoot);
+    const folderIndex = (vscode.workspace.workspaceFolders ?? []).findIndex(
+      (folder) => canonicalizeRepoPath(folder.uri.fsPath) === requested,
+    );
+    if (folderIndex < 0) {
+      return;
+    }
+    const removed = vscode.workspace.updateWorkspaceFolders(folderIndex, 1);
+    if (!removed) {
+      void vscode.window.showWarningMessage('VS Code could not remove that folder from the workspace.');
+    }
   }
 
   private async runGitOperation(
@@ -1768,6 +1912,9 @@ export class RepoCoordinator implements vscode.Disposable {
         break;
       case 'publishRepository':
         await this.handlePublishRepository();
+        break;
+      case 'removeRepoFromWorkspace':
+        this.handleRemoveRepoFromWorkspace(target);
         break;
       case 'merge':
         await this.handleMerge(target);
@@ -4310,7 +4457,7 @@ export class RepoCoordinator implements vscode.Disposable {
     vscode.window.setStatusBarMessage(`Copied commit ${hash.slice(0, 8)} to the clipboard.`, 3000);
   }
 
-  private async loadRepository(): Promise<void> {
+  private async loadRepository(options: RepositoryLoadOptions = {}): Promise<void> {
     if (this.disposed) {
       return;
     }
@@ -4322,12 +4469,29 @@ export class RepoCoordinator implements vscode.Disposable {
       return;
     }
 
-    const workspaceFolderPaths = vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? [];
-    const configuredWorkspaceRoot = vscode.workspace
-      .getConfiguration('gitRepoAndBranchExplorer')
-      .get<string>('workspaceRoot', '')
-      .trim();
-    this.discoveredRepos = await discoverWorkspaceRepositories(workspaceFolderPaths, configuredWorkspaceRoot);
+    try {
+      this.discoveredRepos = await this.discoverRepositories(options.additionalWorkspaceFolders);
+    } catch (err) {
+      if (sequence !== this.loadSequence || this.disposed) {
+        return;
+      }
+      this.lastSnapshot = null;
+      this.lastError = {
+        message: `Could not discover Git repositories: ${describeError(err)}`,
+      };
+      this.selectedRepoRoot = null;
+      this.discoveredRepos = [];
+      this.gitDiffProvider?.clearAllowedRepoRoots();
+      this.updateGitWatcher(null);
+      this.host.onCurrentBranchChange(null);
+      this.broadcast({ type: 'workspaceRepos', payload: { repos: [], activeRepoRoot: null } });
+      this.broadcast({
+        type: 'repoError',
+        payload: this.lastError,
+      });
+      this.notifyRepositoryChange(null);
+      return;
+    }
     if (sequence !== this.loadSequence || this.disposed) {
       return;
     }
@@ -4336,17 +4500,30 @@ export class RepoCoordinator implements vscode.Disposable {
       : this.discoveredRepos.find(
           (repo) => canonicalizeRepoPath(repo.repoRoot) === canonicalizeRepoPath(this.selectedRepoRoot!),
         );
-    const activeRepoRoot = selected?.repoRoot ?? this.discoveredRepos[0]?.repoRoot ?? initState.workspacePath;
-    if (activeRepoRoot === null) {
+    const preferred = options.preferredWorkspaceFolders?.flatMap((folderRoot) => {
+      const canonicalFolder = canonicalizeRepoPath(folderRoot);
+      return this.discoveredRepos.filter((repo) =>
+        canonicalizeRepoPath(repo.repoRoot) === canonicalFolder ||
+        this.isPathInsideRepo(canonicalFolder, canonicalizeRepoPath(repo.repoRoot)),
+      );
+    }).find(Boolean);
+    const activeRepoRoot = selected?.repoRoot ?? preferred?.repoRoot ?? this.discoveredRepos[0]?.repoRoot;
+    if (activeRepoRoot === undefined) {
       this.lastSnapshot = null;
+      this.lastError = {
+        code: 'NO_WORKSPACE',
+        message: 'Open a folder that contains a Git repository.',
+      };
       this.selectedRepoRoot = null;
-      this.gitDiffProvider?.clearAllowedRepoRoots();
+      this.gitDiffProvider?.setAllowedRepoRoots(
+        new Set(this.discoveredRepos.map((repo) => repo.repoRoot)),
+      );
       this.updateGitWatcher(null);
       this.host.onCurrentBranchChange(null);
       this.broadcast({ type: 'workspaceRepos', payload: { repos: this.discoveredRepos, activeRepoRoot: null } });
       this.broadcast({
         type: 'repoError',
-        payload: { code: 'NO_WORKSPACE', message: 'Open a folder that contains a Git repository.' },
+        payload: this.lastError,
       });
       this.notifyRepositoryChange(null);
       return;
@@ -4368,6 +4545,7 @@ export class RepoCoordinator implements vscode.Disposable {
         repoRoot: snapshotRepo?.repoRoot ?? canonicalizeRepoPath(rawSnapshot.repoRoot),
       };
       this.lastSnapshot = snapshot;
+      this.lastError = null;
       this.selectedRepoRoot = snapshot.repoRoot;
       this.gitDiffProvider?.setAllowedRepoRoots(new Set([
         ...this.discoveredRepos.map((repo) => repo.repoRoot),
@@ -4396,14 +4574,43 @@ export class RepoCoordinator implements vscode.Disposable {
         return;
       }
       this.lastSnapshot = null;
+      this.lastError = toRepoErrorPayload(err);
       this.selectedRepoRoot = null;
-      this.gitDiffProvider?.clearAllowedRepoRoots();
+      this.gitDiffProvider?.setAllowedRepoRoots(
+        new Set(this.discoveredRepos.map((repo) => repo.repoRoot)),
+      );
       this.updateGitWatcher(null);
       this.host.onCurrentBranchChange(null);
       this.broadcast({ type: 'workspaceRepos', payload: { repos: this.discoveredRepos, activeRepoRoot: null } });
-      this.broadcast({ type: 'repoError', payload: toRepoErrorPayload(err) });
+      this.broadcast({ type: 'repoError', payload: this.lastError });
       this.notifyRepositoryChange(null);
     }
+  }
+
+  private async discoverRepositories(
+    additionalWorkspaceFolders: readonly string[] = [],
+  ): Promise<WorkspaceRepoInfo[]> {
+    const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
+    const workspaceFolderPaths = workspaceFolders.map((folder) => folder.uri.fsPath);
+    const configuredWorkspaceRoot = vscode.workspace
+      .getConfiguration('gitRepoAndBranchExplorer')
+      .get<string>('workspaceRoot', '')
+      .trim();
+    const discoveryPaths = [
+      ...workspaceFolderPaths,
+      ...additionalWorkspaceFolders.filter(
+        (candidate) => !workspaceFolderPaths.some(
+          (existing) => canonicalizeRepoPath(existing) === canonicalizeRepoPath(candidate),
+        ),
+      ),
+    ];
+    const workspaceFolderKeys = new Set(discoveryPaths.map((folderPath) =>
+      canonicalizeRepoPath(folderPath),
+    ));
+    return (await discoverWorkspaceRepositories(discoveryPaths, configuredWorkspaceRoot)).map((repo) => ({
+      ...repo,
+      isWorkspaceFolder: workspaceFolderKeys.has(canonicalizeRepoPath(repo.repoRoot)),
+    }));
   }
 
   /** (Re)creates the `.git` watcher only when the repository root actually changes. */
@@ -4460,6 +4667,10 @@ export class RepoCoordinator implements vscode.Disposable {
   private reportUntrustedWorkspace(): void {
     this.loadSequence++;
     this.lastSnapshot = null;
+    this.lastError = {
+      code: 'UNTRUSTED_WORKSPACE',
+      message: WORKSPACE_TRUST_ERROR_MESSAGE,
+    };
     this.discoveredRepos = [];
     this.selectedRepoRoot = null;
     this.githubRemoteByRepo.clear();
@@ -4470,7 +4681,7 @@ export class RepoCoordinator implements vscode.Disposable {
     this.broadcast({ type: 'workspaceRepos', payload: { repos: [], activeRepoRoot: null } });
     this.broadcast({
       type: 'repoError',
-      payload: { code: 'UNTRUSTED_WORKSPACE', message: WORKSPACE_TRUST_ERROR_MESSAGE },
+      payload: this.lastError,
     });
     this.notifyRepositoryChange(null);
   }

@@ -1,9 +1,10 @@
 import type { ExtensionToWebviewMessage, GitAction } from '../../types/messages';
+import type { WorkspaceRepoInfo } from '../../types/git';
 import { isExtensionToWebviewMessage } from '../../types/messages';
 import { BranchTree } from './BranchTree';
 import { ContextMenu } from './ContextMenu';
 import type { MenuActionId } from './contextMenuModel';
-import { buildRefMenu, buildRepoMenu, buildSettingsMenu, buildStashMenu, buildWorktreeMenu } from './contextMenuModel';
+import { buildInactiveRepoMenu, buildRefMenu, buildRepoMenu, buildSettingsMenu, buildStashMenu, buildWorktreeMenu } from './contextMenuModel';
 import { el } from './dom';
 import type { ExplorerUiState, RefTarget } from './state';
 import {
@@ -152,8 +153,11 @@ function runRefMenuAction(id: MenuActionId, target: RefTarget): void {
   }
 }
 
-function runRepoMenuAction(id: MenuActionId): void {
+function runRepoMenuAction(id: MenuActionId, repoRoot: string): void {
   switch (id) {
+    case 'selectRepository':
+      vscode.postMessage({ type: 'selectRepository', payload: { repoRoot } });
+      break;
     case 'fetchTracked':
     case 'pull':
     case 'push':
@@ -163,6 +167,9 @@ function runRepoMenuAction(id: MenuActionId): void {
     case 'publishRepository':
     case 'applyPatch':
       postGitAction(id);
+      break;
+    case 'removeRepoFromWorkspace':
+      postGitAction(id, repoRoot);
       break;
     case 'newBranch':
       vscode.postMessage({ type: 'openCreateBranchDialog', payload: { sourceKind: 'head' } });
@@ -207,8 +214,11 @@ function runSettingsMenuAction(id: MenuActionId): void {
   }
 }
 
-function showRepoContextMenu(x: number, y: number): void {
-  if (state.snapshot) {
+function showRepoContextMenu(repo: WorkspaceRepoInfo, x: number, y: number): void {
+  const isActive =
+    state.snapshot !== null &&
+    normalizeRepoKey(state.snapshot.repoRoot) === normalizeRepoKey(repo.repoRoot);
+  if (isActive && state.snapshot) {
     contextMenu.show(
       x,
       y,
@@ -217,9 +227,16 @@ function showRepoContextMenu(x: number, y: number): void {
         state,
         (state.snapshot.remotes?.length ?? 0) > 0 || state.snapshot.remoteGroups.length > 0,
       ),
-      runRepoMenuAction,
+      (id) => runRepoMenuAction(id, repo.repoRoot),
     );
+    return;
   }
+  contextMenu.show(
+    x,
+    y,
+    buildInactiveRepoMenu(repo),
+    (id) => runRepoMenuAction(id, repo.repoRoot),
+  );
 }
 
 function showSettingsMenu(x: number, y: number): void {

@@ -28,7 +28,8 @@ describe('tracking indicator order', () => {
       expect(getRepoNodeKeyboardAction('ContextMenu', true)).toBe('menu');
       expect(getRepoNodeKeyboardAction('F10', true, true)).toBe('menu');
       expect(getRepoNodeKeyboardAction('F10', true, false)).toBeNull();
-      expect(getRepoNodeKeyboardAction('ContextMenu', false)).toBeNull();
+      expect(getRepoNodeKeyboardAction('ContextMenu', false)).toBe('menu');
+      expect(getRepoNodeKeyboardAction('F10', false, true)).toBe('menu');
     });
 
     it('expands a newly active repository unless it was explicitly collapsed', () => {

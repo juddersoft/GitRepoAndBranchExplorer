@@ -1,10 +1,10 @@
-import type { CommitNode, FileHistoryCommit, RepoSnapshot, StashInfo, WorktreeInfo } from '../../types/git';
+import type { CommitNode, FileHistoryCommit, RepoSnapshot, StashInfo, WorktreeInfo, WorkspaceRepoInfo } from '../../types/git';
 import type { BranchInfo } from '../../types/git';
 import type { GitAction, TrackingIndicatorOrder } from '../../types/messages';
 import { planTrackedFetch } from '../../git/trackedFetch';
 import { parseUpstreamRef } from '../../git/remoteUrlBuilder';
 import type { ExplorerUiState, RefTarget } from './state';
-import { getHeadHash, isAncestorOfHead, orderComparisonPair } from './state';
+import { getHeadHash, isAncestorOfHead, normalizeRepoKey, orderComparisonPair } from './state';
 
 export type MenuActionId =
   | 'checkout'
@@ -29,6 +29,8 @@ export type MenuActionId =
   | 'renameBranch'
   | 'untrackBranch'
   | 'publishRepository'
+  | 'selectRepository'
+  | 'removeRepoFromWorkspace'
   | 'isolate'
   | 'deleteBranch'
   | 'createWorktree'
@@ -384,6 +386,39 @@ export function buildRepoMenu(
     gitActionItem('applyPatch', 'Apply Patch\u2026', 'applyPatch', firstReason(busy)),
     SEPARATOR,
     item('refresh', 'Refresh'),
+    ...(isWorkspaceFolderRepo(snapshot.repoRoot, state.workspaceRepos)
+      ? [
+          SEPARATOR,
+          gitActionItem(
+            'removeRepoFromWorkspace',
+            'Remove Folder from Workspace',
+            'removeRepoFromWorkspace',
+          ),
+        ]
+      : []),
+  ];
+}
+
+function isWorkspaceFolderRepo(repoRoot: string, repos: readonly WorkspaceRepoInfo[]): boolean {
+  return repos.some(
+    (repo) => normalizeRepoKey(repo.repoRoot) === normalizeRepoKey(repoRoot) && repo.isWorkspaceFolder === true,
+  );
+}
+
+/** Lightweight actions for a discovered repository that is not currently loaded. */
+export function buildInactiveRepoMenu(repo: WorkspaceRepoInfo): MenuEntry[] {
+  return [
+    item('selectRepository', 'Switch to Repository'),
+    ...(repo.isWorkspaceFolder === true
+      ? [
+          SEPARATOR,
+          gitActionItem(
+            'removeRepoFromWorkspace',
+            'Remove Folder from Workspace',
+            'removeRepoFromWorkspace',
+          ),
+        ]
+      : []),
   ];
 }
 

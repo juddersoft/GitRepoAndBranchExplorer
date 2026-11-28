@@ -41,10 +41,25 @@ export interface SymbolBlameInsight {
 export function flattenInsightSymbols(
   symbols: readonly SimpleDocumentSymbol[],
 ): SimpleDocumentSymbol[] {
+  const supportedKinds = new Set<InsightSymbolKind>([
+    'class',
+    'interface',
+    'function',
+    'method',
+    'constructor',
+    'struct',
+    'enum',
+    'module',
+    'namespace',
+  ]);
   const flattened: SimpleDocumentSymbol[] = [];
 
   const visit = (symbol: SimpleDocumentSymbol): void => {
-    if (symbol.startLine >= 1 && symbol.endLine >= symbol.startLine) {
+    if (
+      supportedKinds.has(symbol.kind) &&
+      symbol.startLine >= 1 &&
+      symbol.endLine >= symbol.startLine
+    ) {
       flattened.push(symbol);
     }
     for (const child of symbol.children ?? []) {
@@ -56,7 +71,22 @@ export function flattenInsightSymbols(
     visit(symbol);
   }
 
-  return flattened.sort((left, right) =>
+  const bySelectionLine = new Map<number, SimpleDocumentSymbol>();
+  for (const symbol of flattened) {
+    const existing = bySelectionLine.get(symbol.selectionLine);
+    if (
+      existing === undefined ||
+      symbol.startLine < existing.startLine ||
+      (
+        symbol.startLine === existing.startLine &&
+        symbol.endLine - symbol.startLine < existing.endLine - existing.startLine
+      )
+    ) {
+      bySelectionLine.set(symbol.selectionLine, symbol);
+    }
+  }
+
+  return [...bySelectionLine.values()].sort((left, right) =>
     left.startLine - right.startLine ||
     (left.endLine - left.startLine) - (right.endLine - right.startLine));
 }

@@ -155,6 +155,8 @@ export interface WorkspaceRepoInfo {
   commonDir: string;
   currentBranch?: string;
   isDetachedHead?: boolean;
+  /** True only when repoRoot exactly matches a folder currently open in the VS Code workspace. */
+  isWorkspaceFolder?: boolean;
 }
 
 export interface RepoSnapshot {

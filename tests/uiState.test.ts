@@ -459,6 +459,16 @@ describe('filterVisibleBadges', () => {
 });
 
 describe('reconcileStateWithSnapshot', () => {
+  it('clears a previous repository error whenever a valid snapshot arrives', () => {
+    const reconciled = reconcileStateWithSnapshot(
+      stateWith({ snapshot: null, errorMessage: 'Open a folder that contains a Git repository.' }),
+      snapshot,
+      new Set(),
+    );
+    expect(reconciled.errorMessage).toBeNull();
+    expect(reconciled.isLoading).toBe(false);
+  });
+
   it('normalizes mixed Windows roots while expanding and toggling the active repository', () => {
     const workspaceRoot = 'F:\\Syncthing\\Projects\\Repo\\';
     const snapshotRoot = 'f:/Syncthing/Projects/Repo';

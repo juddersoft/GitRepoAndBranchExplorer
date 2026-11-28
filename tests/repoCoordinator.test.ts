@@ -4,6 +4,35 @@ import { GitExecutionError } from '../src/git/gitExecutor';
 import type { BranchInfo, RepoSnapshot } from '../src/types/git';
 import type { ExtensionToWebviewMessage, SyncStatePayload } from '../src/types/messages';
 
+interface TestQuickPickItem {
+  label: string;
+  description?: string;
+  alwaysShow?: boolean;
+  value: string;
+  cloneSource?: string;
+}
+
+interface TestQuickPick {
+  title: string;
+  placeholder: string;
+  ignoreFocusOut: boolean;
+  items: readonly TestQuickPickItem[];
+  activeItems: readonly TestQuickPickItem[];
+  onDidChangeValue(listener: (value: string) => void): { dispose(): void };
+  onDidAccept(listener: () => void): { dispose(): void };
+  onDidHide(listener: () => void): { dispose(): void };
+  show(): void;
+  hide(): void;
+  dispose: ReturnType<typeof vi.fn>;
+  changeValue(value: string): void;
+  accept(): void;
+}
+
+type CloneSourceSelection =
+  | { kind: 'item'; item: TestQuickPickItem }
+  | { kind: 'input'; value: string }
+  | { kind: 'hide' };
+
 const mocks = vi.hoisted(() => ({
   getRepoSnapshot: vi.fn(),
   getCommitPage: vi.fn(),
@@ -16,6 +45,9 @@ const mocks = vi.hoisted(() => ({
   showErrorMessage: vi.fn(),
   showInformationMessage: vi.fn(),
   showQuickPick: vi.fn(),
+  createQuickPick: vi.fn(),
+  cloneSourceSelections: [] as CloneSourceSelection[],
+  quickPickInstances: [] as TestQuickPick[],
   showInputBox: vi.fn(),
   showOpenDialog: vi.fn(),
   showSaveDialog: vi.fn(),
@@ -76,6 +108,11 @@ const mocks = vi.hoisted(() => ({
   openGitHubCommit: vi.fn(),
   isTrusted: true,
   trustGrantedListeners: [] as Array<() => void>,
+  workspaceFolderListeners: [] as Array<(event: {
+    added: Array<{ name: string; uri: { fsPath: string } }>;
+    removed: Array<{ name: string; uri: { fsPath: string } }>;
+  }) => void>,
+  workspaceFolders: [{ name: 'repo', uri: { fsPath: '/repo' } }],
   getCommands: vi.fn(),
   executeCommand: vi.fn(),
   discoverWorkspaceRepositories: vi.fn(),
@@ -90,6 +127,7 @@ const mocks = vi.hoisted(() => ({
   fsStatSync: vi.fn(),
   writeFile: vi.fn(),
   getConfiguration: vi.fn(),
+  updateWorkspaceFolders: vi.fn(),
   cancellationListener: undefined as (() => void) | undefined,
   activeTextEditor: undefined as
     | {
@@ -113,11 +151,19 @@ vi.mock('vscode', () => {
       }
     },
     workspace: {
-      workspaceFolders: [{ name: 'repo', uri: { fsPath: '/repo' } }],
+      get workspaceFolders() {
+        return mocks.workspaceFolders;
+      },
       get isTrusted(): boolean {
         return mocks.isTrusted;
       },
-      onDidChangeWorkspaceFolders: () => disposable,
+      onDidChangeWorkspaceFolders: (listener: (event: {
+        added: Array<{ name: string; uri: { fsPath: string } }>;
+        removed: Array<{ name: string; uri: { fsPath: string } }>;
+      }) => void) => {
+        mocks.workspaceFolderListeners.push(listener);
+        return disposable;
+      },
       onDidGrantWorkspaceTrust: (listener: () => void) => {
         mocks.trustGrantedListeners.push(listener);
         return disposable;
@@ -125,7 +171,7 @@ vi.mock('vscode', () => {
       onDidChangeConfiguration: () => disposable,
       getConfiguration: mocks.getConfiguration,
       createFileSystemWatcher: mocks.createFileSystemWatcher,
-      updateWorkspaceFolders: vi.fn(),
+      updateWorkspaceFolders: mocks.updateWorkspaceFolders,
     },
     extensions: { onDidChange: () => disposable },
     window: {
@@ -133,6 +179,7 @@ vi.mock('vscode', () => {
       showErrorMessage: mocks.showErrorMessage,
       showInformationMessage: mocks.showInformationMessage,
       showQuickPick: mocks.showQuickPick,
+      createQuickPick: mocks.createQuickPick,
       showInputBox: mocks.showInputBox,
       showOpenDialog: mocks.showOpenDialog,
       showSaveDialog: mocks.showSaveDialog,
@@ -334,6 +381,10 @@ function fakeSurface(id: SurfaceId): FakeSurface {
   };
 }
 
+function chooseCloneSource(item: TestQuickPickItem): void {
+  mocks.cloneSourceSelections.push({ kind: 'item', item });
+}
+
 const selection = (fullName: string | null, ref: string | null, pinned: string[] = []): SyncStatePayload => ({
   selectedBranchFullName: fullName,
   selectedBranchRef: ref,
@@ -357,8 +408,65 @@ describe('RepoCoordinator', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.cloneSourceSelections.length = 0;
+    mocks.quickPickInstances.length = 0;
+    mocks.createQuickPick.mockImplementation(() => {
+      const changeListeners: Array<(value: string) => void> = [];
+      const acceptListeners: Array<() => void> = [];
+      const hideListeners: Array<() => void> = [];
+      const picker: TestQuickPick = {
+        title: '',
+        placeholder: '',
+        ignoreFocusOut: false,
+        items: [],
+        activeItems: [],
+        onDidChangeValue: (listener) => {
+          changeListeners.push(listener);
+          return { dispose: (): void => undefined };
+        },
+        onDidAccept: (listener) => {
+          acceptListeners.push(listener);
+          return { dispose: (): void => undefined };
+        },
+        onDidHide: (listener) => {
+          hideListeners.push(listener);
+          return { dispose: (): void => undefined };
+        },
+        show: () => {
+          const selection = mocks.cloneSourceSelections.shift();
+          if (!selection) {
+            return;
+          }
+          queueMicrotask(() => {
+            if (selection.kind === 'hide') {
+              hideListeners.forEach((listener) => listener());
+              return;
+            }
+            if (selection.kind === 'input') {
+              changeListeners.forEach((listener) => listener(selection.value));
+              picker.activeItems = picker.items.slice(0, 1);
+            } else {
+              picker.activeItems = [selection.item];
+            }
+            acceptListeners.forEach((listener) => listener());
+          });
+        },
+        hide: () => hideListeners.forEach((listener) => listener()),
+        dispose: vi.fn(),
+        changeValue: (value) => changeListeners.forEach((listener) => listener(value)),
+        accept: () => {
+          picker.activeItems = picker.items.slice(0, 1);
+          acceptListeners.forEach((listener) => listener());
+        },
+      };
+      mocks.quickPickInstances.push(picker);
+      return picker;
+    });
     mocks.isTrusted = true;
     mocks.trustGrantedListeners.length = 0;
+    mocks.workspaceFolderListeners.length = 0;
+    mocks.workspaceFolders = [{ name: 'repo', uri: { fsPath: '/repo' } }];
+    mocks.updateWorkspaceFolders.mockReturnValue(true);
     mocks.cancellationListener = undefined;
     mocks.activeTextEditor = undefined;
     mocks.getConfiguration.mockImplementation((section: string) => ({
@@ -1691,6 +1799,206 @@ describe('RepoCoordinator', () => {
       '/repo',
       '/other',
     ]);
+  });
+
+  it('recovers from an empty workspace when a Git folder is added', async () => {
+    const diffProvider = {
+      setAllowedRepoRoots: vi.fn(),
+      clearAllowedRepoRoots: vi.fn(),
+    };
+    mocks.workspaceFolders = [];
+    mocks.getConfiguration.mockImplementation(() => ({
+      get: (_key: string, fallback: unknown) => fallback,
+    }));
+    mocks.discoverWorkspaceRepositories.mockResolvedValueOnce([]);
+    coordinator = new RepoCoordinator(host, diffProvider as never);
+    coordinator.attach(sidebar);
+    coordinator.handleMessage('sidebar', { type: 'webviewReady' });
+    await vi.waitFor(() => expect(sidebar.ofType('repoError')).toHaveLength(1));
+
+    mocks.workspaceFolders = [{ name: 'added', uri: { fsPath: '/added' } }];
+    mocks.discoverWorkspaceRepositories.mockResolvedValueOnce([{
+      repoRoot: '/added',
+      repoName: 'added',
+      commonDir: '/added/.git',
+      currentBranch: 'main',
+    }]);
+    mocks.getRepoSnapshot.mockResolvedValueOnce({ ...MAIN_AND_FEATURE(), repoRoot: '/added', repoName: 'added' });
+    mocks.workspaceFolderListeners.at(-1)?.({
+      added: [{ name: 'added', uri: { fsPath: '/added' } }],
+      removed: [],
+    });
+
+    await vi.waitFor(() => expect(sidebar.ofType('repoSnapshot')).toHaveLength(1));
+    expect(coordinator.getActiveRepoRoot()).toBe('/added');
+    expect([...diffProvider.setAllowedRepoRoots.mock.calls.at(-1)?.[0] as Iterable<string>]).toEqual(['/added']);
+    expect(sidebar.ofType('workspaceRepos').at(-1)).toEqual({
+      type: 'workspaceRepos',
+      payload: {
+        activeRepoRoot: '/added',
+        repos: [{
+          repoRoot: '/added',
+          repoName: 'added',
+          commonDir: '/added/.git',
+          currentBranch: 'main',
+          isWorkspaceFolder: true,
+        }],
+      },
+    });
+  });
+
+  it('discovers an Untitled multi-root workspace and recovers an editor-only surface', async () => {
+    const diffProvider = {
+      setAllowedRepoRoots: vi.fn(),
+      clearAllowedRepoRoots: vi.fn(),
+    };
+    const demo = 'F:\\Syncthing\\TestRepos\\demo-app';
+    const origin = 'F:\\Syncthing\\TestRepos\\origin-clone';
+    mocks.workspaceFolders = [];
+    mocks.getConfiguration.mockImplementation(() => ({
+      get: (_key: string, fallback: unknown) => fallback,
+    }));
+    mocks.discoverWorkspaceRepositories
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{
+        repoRoot: demo,
+        repoName: 'demo-app',
+        commonDir: `${demo}\\.git`,
+      }])
+      .mockResolvedValueOnce([
+        { repoRoot: demo, repoName: 'demo-app', commonDir: `${demo}\\.git` },
+        { repoRoot: origin, repoName: 'origin-clone', commonDir: `${origin}\\.git` },
+      ]);
+    mocks.getRepoSnapshot.mockImplementation(async (repoRoot: string) => ({
+      ...MAIN_AND_FEATURE(),
+      repoRoot,
+      repoName: path.win32.basename(repoRoot),
+    }));
+
+    coordinator = new RepoCoordinator(host, diffProvider as never);
+    coordinator.attach(editor);
+    coordinator.handleMessage('editor', { type: 'webviewReady' });
+    await vi.waitFor(() => expect(editor.ofType('repoError')).toHaveLength(1));
+    coordinator.detach(editor);
+
+    mocks.workspaceFolders = [{ name: 'demo-app', uri: { fsPath: demo } }];
+    mocks.workspaceFolderListeners.at(-1)?.({
+      added: [{ name: 'demo-app', uri: { fsPath: demo } }],
+      removed: [],
+    });
+    await vi.waitFor(() => expect(coordinator.getActiveRepoRoot()).toBe(demo));
+
+    mocks.workspaceFolders = [
+      { name: 'demo-app', uri: { fsPath: demo } },
+      { name: 'origin-clone', uri: { fsPath: origin } },
+    ];
+    mocks.workspaceFolderListeners.at(-1)?.({
+      added: [{ name: 'origin-clone', uri: { fsPath: origin } }],
+      removed: [],
+    });
+    await vi.waitFor(() => expect(
+      [...diffProvider.setAllowedRepoRoots.mock.calls.at(-1)?.[0] as Iterable<string>],
+    ).toEqual([demo, origin]));
+
+    editor = fakeSurface('editor');
+    coordinator.attach(editor);
+    coordinator.handleMessage('editor', { type: 'webviewReady' });
+
+    expect(mocks.discoverWorkspaceRepositories).toHaveBeenNthCalledWith(1, [], '');
+    expect(mocks.discoverWorkspaceRepositories).toHaveBeenNthCalledWith(2, [demo], '');
+    expect(mocks.discoverWorkspaceRepositories).toHaveBeenNthCalledWith(3, [demo, origin], '');
+    expect(coordinator.getActiveRepoRoot()).toBe(demo);
+    expect([...diffProvider.setAllowedRepoRoots.mock.calls.at(-1)?.[0] as Iterable<string>]).toEqual([
+      demo,
+      origin,
+    ]);
+    expect(editor.ofType('workspaceRepos').at(-1)).toEqual({
+      type: 'workspaceRepos',
+      payload: {
+        activeRepoRoot: demo,
+        repos: [
+          {
+            repoRoot: demo,
+            repoName: 'demo-app',
+            commonDir: `${demo}\\.git`,
+            isWorkspaceFolder: true,
+          },
+          {
+            repoRoot: origin,
+            repoName: 'origin-clone',
+            commonDir: `${origin}\\.git`,
+            isWorkspaceFolder: true,
+          },
+        ],
+      },
+    });
+    expect(editor.ofType('repoSnapshot').at(-1)).toMatchObject({ payload: { repoRoot: demo } });
+    expect(editor.ofType('repoError')).toHaveLength(0);
+  });
+
+  it('falls back to a remaining repository after the active workspace folder is removed', async () => {
+    mocks.workspaceFolders = [
+      { name: 'repo', uri: { fsPath: '/repo' } },
+      { name: 'other', uri: { fsPath: '/other' } },
+    ];
+    mocks.discoverWorkspaceRepositories.mockResolvedValueOnce([
+      { repoRoot: '/repo', repoName: 'repo', commonDir: '/repo/.git' },
+      { repoRoot: '/other', repoName: 'other', commonDir: '/other/.git' },
+    ]);
+    mocks.getRepoSnapshot.mockImplementation(async (root: string) => ({
+      ...MAIN_AND_FEATURE(),
+      repoRoot: root,
+      repoName: path.basename(root),
+    }));
+    await openBoth();
+
+    mocks.workspaceFolders = [{ name: 'other', uri: { fsPath: '/other' } }];
+    mocks.discoverWorkspaceRepositories.mockResolvedValueOnce([{
+      repoRoot: '/other',
+      repoName: 'other',
+      commonDir: '/other/.git',
+    }]);
+    mocks.workspaceFolderListeners.at(-1)?.({
+      added: [],
+      removed: [{ name: 'repo', uri: { fsPath: '/repo' } }],
+    });
+
+    await vi.waitFor(() => expect(coordinator.getActiveRepoRoot()).toBe('/other'));
+    expect(sidebar.ofType('repoSnapshot').at(-1)).toMatchObject({
+      payload: { repoRoot: '/other' },
+    });
+  });
+
+  it('does not mark repositories discovered beneath a configured root as workspace folders', async () => {
+    mocks.discoverWorkspaceRepositories.mockResolvedValue([{
+      repoRoot: '/repo/nested',
+      repoName: 'nested',
+      commonDir: '/repo/nested/.git',
+    }]);
+    mocks.getRepoSnapshot.mockResolvedValue({ ...MAIN_AND_FEATURE(), repoRoot: '/repo/nested' });
+    await openBoth();
+
+    expect(sidebar.ofType('workspaceRepos').at(-1)).toMatchObject({
+      payload: {
+        repos: [{ repoRoot: '/repo/nested', isWorkspaceFolder: false }],
+      },
+    });
+  });
+
+  it('emits the empty-workspace error after removing the final repository folder', async () => {
+    await openBoth();
+    mocks.workspaceFolders = [];
+    mocks.discoverWorkspaceRepositories.mockResolvedValueOnce([]);
+    mocks.workspaceFolderListeners.at(-1)?.({
+      added: [],
+      removed: [{ name: 'repo', uri: { fsPath: '/repo' } }],
+    });
+
+    await vi.waitFor(() => expect(coordinator.getActiveRepoRoot()).toBeNull());
+    expect(sidebar.ofType('repoError').at(-1)).toEqual({
+      type: 'repoError',
+      payload: { code: 'NO_WORKSPACE', message: 'Open a folder that contains a Git repository.' },
+    });
   });
 
   it('blocks every refresh, mutation, detail and diff request while untrusted and clears diff authorization', async () => {
@@ -3427,8 +3735,8 @@ describe('RepoCoordinator', () => {
   it('blocks a second clone while clone operation is in progress', async () => {
     let resolveClone!: (path: string) => void;
     mocks.cloneRepository.mockImplementation(() => new Promise<string>((resolve) => { resolveClone = resolve; }));
+    chooseCloneSource({ label: 'Clone from URL or Local Folder...', value: 'url' });
     mocks.showQuickPick
-      .mockResolvedValueOnce({ label: 'Clone from URL…', value: 'url' })
       .mockResolvedValueOnce({ label: 'Clone into Workspace Root', detail: '/repo', useWorkspaceRoot: true })
       .mockResolvedValueOnce({ label: 'Open in Git Repo & Branch Explorer (Stay in Window)', action: 'stay', detail: '/repo/slow' });
     mocks.showInputBox
@@ -3444,8 +3752,8 @@ describe('RepoCoordinator', () => {
 
   it('clones a pasted URL into the workspace root and opens it in place', async () => {
     mocks.cloneRepository.mockResolvedValue('/repo/project');
+    chooseCloneSource({ label: 'Clone from URL or Local Folder...', value: 'url' });
     mocks.showQuickPick
-      .mockResolvedValueOnce({ label: 'Clone from URL…', value: 'url' })
       .mockResolvedValueOnce({ label: 'Clone into Workspace Root', detail: '/repo', useWorkspaceRoot: true })
       .mockResolvedValueOnce({ label: 'Open in Git Repo & Branch Explorer (Stay in Window)', action: 'stay', detail: '/repo/project' });
     mocks.showInputBox
@@ -3463,12 +3771,164 @@ describe('RepoCoordinator', () => {
     expect(mocks.showInformationMessage).toHaveBeenCalledWith('Opened project in Git Repo & Branch Explorer.');
   });
 
+  it('uses explicit source and destination clone prompts and accepts local paths with spaces', async () => {
+    chooseCloneSource({ label: 'Clone from URL or Local Folder...', value: 'url' });
+    mocks.showQuickPick
+      .mockResolvedValueOnce({ label: 'Choose another folder…', useWorkspaceRoot: false })
+      .mockResolvedValueOnce(undefined);
+    mocks.showInputBox
+      .mockResolvedValueOnce('F:\\Syncthing\\TestRepos\\origin.git')
+      .mockResolvedValueOnce('origin');
+    mocks.showOpenDialog.mockResolvedValueOnce([{ fsPath: 'F:\\Syncthing\\Clones' }]);
+    mocks.cloneRepository.mockResolvedValueOnce('F:\\Syncthing\\Clones\\origin');
+
+    await coordinator.cloneRepository();
+
+    expect(mocks.quickPickInstances[0]?.items).toContainEqual(
+      expect.objectContaining({ label: 'Clone from URL or Local Folder...' }),
+    );
+    expect(mocks.showInputBox.mock.calls[0][0]).toEqual(expect.objectContaining({
+      prompt: expect.stringMatching(/source.*URL.*local folder path.*clone FROM/i),
+      placeHolder: expect.stringContaining('F:\\Syncthing\\TestRepos\\origin.git'),
+    }));
+    expect(mocks.showOpenDialog).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'Select Destination Folder to Clone "origin" Into',
+      openLabel: 'Select Destination Folder',
+      defaultUri: expect.objectContaining({ fsPath: '/repo' }),
+    }));
+    expect(mocks.cloneRepository).toHaveBeenCalledWith(
+      'F:\\Syncthing\\TestRepos\\origin.git',
+      'F:\\Syncthing\\Clones',
+      'origin',
+      expect.anything(),
+    );
+  });
+
+  it.each([
+    ['F:\\Syncthing\\TestRepos\\origin.git', 'origin'],
+    ['https://github.com/org/repo.git', 'repo'],
+  ])('clones %s directly from the interactive QuickPick', async (source, folderName) => {
+    mocks.cloneSourceSelections.push({ kind: 'input', value: source });
+    mocks.showQuickPick
+      .mockResolvedValueOnce({ label: 'Clone into Workspace Root', detail: '/repo', useWorkspaceRoot: true })
+      .mockResolvedValueOnce(undefined);
+    mocks.showInputBox.mockResolvedValueOnce(folderName);
+
+    await coordinator.cloneRepository();
+
+    const picker = mocks.quickPickInstances[0];
+    expect(picker?.title).toBe('Clone Repository');
+    expect(picker?.placeholder).toBe(
+      'Paste a repository URL or local folder path, or choose a provider below',
+    );
+    expect(picker?.items[0]).toMatchObject({
+      label: `Clone from "${source}"`,
+      description: 'URL or Local Folder',
+      alwaysShow: true,
+    });
+    expect(mocks.showInputBox).toHaveBeenCalledTimes(1);
+    expect(mocks.showInputBox).toHaveBeenCalledWith(expect.objectContaining({
+      prompt: 'Folder name',
+      value: folderName,
+    }));
+    expect(mocks.cloneRepository).toHaveBeenCalledWith(
+      source,
+      '/repo',
+      folderName,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(picker?.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['-unsafe', 'ext::sh -c id', 'https://example.com/repo.git\u0000bad'])(
+    'rejects unsafe direct clone input %j and allows correction',
+    async (source) => {
+      mocks.cloneSourceSelections.push({ kind: 'input', value: source });
+      mocks.showInputBox.mockResolvedValueOnce(undefined);
+
+      await coordinator.cloneRepository();
+
+      expect(mocks.showWarningMessage).toHaveBeenCalledWith(expect.stringMatching(/must not|unsafe|control/i));
+      expect(mocks.showInputBox).toHaveBeenCalledWith(expect.objectContaining({ value: source }));
+      expect(mocks.showOpenDialog).not.toHaveBeenCalled();
+      expect(mocks.cloneRepository).not.toHaveBeenCalled();
+      expect(mocks.quickPickInstances[0]?.dispose).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('disposes the clone source QuickPick when it is hidden', async () => {
+    mocks.cloneSourceSelections.push({ kind: 'hide' });
+
+    await coordinator.cloneRepository();
+
+    expect(mocks.cloneRepository).not.toHaveBeenCalled();
+    expect(mocks.quickPickInstances[0]?.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('discovers and activates a cloned repository immediately after adding it to the workspace', async () => {
+    chooseCloneSource({ label: 'Clone from URL or Local Folder...', value: 'url' });
+    mocks.showQuickPick
+      .mockResolvedValueOnce({ label: 'Clone into Workspace Root', useWorkspaceRoot: true })
+      .mockResolvedValueOnce({ label: 'Add to Workspace', action: 'add' });
+    mocks.showInputBox
+      .mockResolvedValueOnce('https://github.com/owner/cloned.git')
+      .mockResolvedValueOnce('cloned');
+    mocks.cloneRepository.mockResolvedValueOnce('/repo/cloned');
+    mocks.discoverWorkspaceRepositories.mockResolvedValueOnce([{
+      repoRoot: '/repo/cloned',
+      repoName: 'cloned',
+      commonDir: '/repo/cloned/.git',
+      currentBranch: 'main',
+    }]);
+    mocks.getRepoSnapshot.mockResolvedValueOnce({
+      ...MAIN_AND_FEATURE(),
+      repoRoot: '/repo/cloned',
+      repoName: 'cloned',
+    });
+
+    await coordinator.cloneRepository();
+
+    expect(mocks.updateWorkspaceFolders).toHaveBeenCalledWith(
+      1,
+      0,
+      expect.objectContaining({ uri: expect.objectContaining({ fsPath: '/repo/cloned' }) }),
+    );
+    expect(mocks.discoverWorkspaceRepositories).toHaveBeenCalledWith(
+      ['/repo', '/repo/cloned'],
+      '/repo',
+    );
+    expect(coordinator.getActiveRepoRoot()).toBe('/repo/cloned');
+  });
+
+  it('removes only an exact normalized workspace-folder match', async () => {
+    mocks.workspaceFolders = [
+      { name: 'Repo', uri: { fsPath: 'C:\\Repos\\Repo' } },
+      { name: 'Other', uri: { fsPath: 'C:\\Repos\\Other' } },
+    ];
+
+    coordinator.handleMessage('sidebar', {
+      type: 'gitAction',
+      payload: { action: 'removeRepoFromWorkspace', target: 'C:\\Repos\\Repo\\spoof' },
+    });
+    coordinator.handleMessage('sidebar', {
+      type: 'gitAction',
+      payload: { action: 'removeRepoFromWorkspace', target: 'C:\\Repos\\Repo2' },
+    });
+    expect(mocks.updateWorkspaceFolders).not.toHaveBeenCalled();
+
+    coordinator.handleMessage('sidebar', {
+      type: 'gitAction',
+      payload: { action: 'removeRepoFromWorkspace', target: 'c:/repos/repo/' },
+    });
+    await vi.waitFor(() => expect(mocks.updateWorkspaceFolders).toHaveBeenCalledWith(0, 1));
+  });
+
   it('browses GitHub repositories', async () => {
     mocks.listGitHubRepos.mockResolvedValue([
       { provider: 'github', fullName: 'owner/project', cloneUrl: 'https://github.com/owner/project.git' },
     ]);
+    chooseCloneSource({ label: 'Browse GitHub (github.com)', value: 'github' });
     mocks.showQuickPick
-      .mockResolvedValueOnce({ label: 'Browse GitHub (github.com)', value: 'github' })
       .mockResolvedValueOnce({
         label: 'owner/project',
         repo: { provider: 'github', fullName: 'owner/project', cloneUrl: 'https://github.com/owner/project.git' },
@@ -3489,8 +3949,8 @@ describe('RepoCoordinator', () => {
     mocks.listGitHubEnterpriseRepos.mockResolvedValue([
       { provider: 'githubEnterprise', fullName: 'acme/project', cloneUrl: 'https://git.corp.example.com/acme/project.git' },
     ]);
+    chooseCloneSource({ label: 'Browse GitHub Enterprise (*.ghe.com / Server)', value: 'githubEnterprise' });
     mocks.showQuickPick
-      .mockResolvedValueOnce({ label: 'Browse GitHub Enterprise (*.ghe.com / Server)', value: 'githubEnterprise' })
       .mockResolvedValueOnce({
         label: 'acme/project',
         repo: { provider: 'githubEnterprise', fullName: 'acme/project', cloneUrl: 'https://git.corp.example.com/acme/project.git' },
@@ -3509,8 +3969,8 @@ describe('RepoCoordinator', () => {
     mocks.listAzureDevOpsRepos.mockResolvedValue([
       { provider: 'azureDevOps', fullName: 'Project/repo', cloneUrl: 'https://dev.azure.com/acme/Project/_git/repo' },
     ]);
+    chooseCloneSource({ label: 'Browse Azure DevOps', value: 'azureDevOps' });
     mocks.showQuickPick
-      .mockResolvedValueOnce({ label: 'Browse Azure DevOps', value: 'azureDevOps' })
       .mockResolvedValueOnce({
         label: 'Project/repo',
         detail: 'https://dev.azure.com/acme/Project/_git/repo',
@@ -3535,8 +3995,8 @@ describe('RepoCoordinator', () => {
       null,
       '',
     ));
+    chooseCloneSource({ label: 'Clone from URL or Local Folder...', value: 'url' });
     mocks.showQuickPick
-      .mockResolvedValueOnce({ label: 'Clone from URL…', value: 'url' })
       .mockResolvedValueOnce({ label: 'Clone into Workspace Root', detail: '/repo', useWorkspaceRoot: true });
     mocks.showInputBox
       .mockResolvedValueOnce('https://github.com/owner/repo.git')
@@ -3546,7 +4006,7 @@ describe('RepoCoordinator', () => {
     expect(mocks.showErrorMessage).not.toHaveBeenCalled();
 
     mocks.showQuickPick.mockReset();
-    mocks.showQuickPick.mockResolvedValueOnce({ label: 'Clone from URL…', value: 'url' });
+    chooseCloneSource({ label: 'Clone from URL or Local Folder...', value: 'url' });
     mocks.showInputBox.mockReset();
     mocks.showInputBox.mockResolvedValueOnce(undefined);
     await coordinator.cloneRepository();

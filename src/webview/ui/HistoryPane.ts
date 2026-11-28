@@ -562,8 +562,8 @@ export class HistoryPane {
     }
     this.search.sync(state.historyFilterText);
 
-    this.banner.hidden = state.errorMessage === null;
-    this.banner.textContent = state.errorMessage ?? '';
+    this.banner.hidden = state.snapshot !== null || state.errorMessage === null;
+    this.banner.textContent = state.snapshot === null ? state.errorMessage ?? '' : '';
 
     this.renderBreadcrumb(state);
     this.renderFileHistoryBanner(state);

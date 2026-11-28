@@ -10,8 +10,17 @@ A Visual Studio-unified **Git Repository** window, natively for VS Code, Cursor,
 
 - Native Activity Bar sidebar plus a far-left, synchronized editor timeline.
 - Multi-repository workspace discovery with a **REPOS:** switcher and repository-aware blame and remote resolution.
+- **Find & Clone Repository** for GitHub, GitHub Enterprise, Azure DevOps, and direct repository URLs.
 - Git Worktree management in the sidebar, including **WORKTREE** badges and a live-destination **Create Worktree** modal.
+- **Cherry-Pick into Worktree** for eligible commits, including backports, with dirty-worktree protection and Open in New Window actions.
 - Stash browsing and management, with repository and branch-aware stash creation plus selective tracked/untracked stashing.
+- **Stash File…** from the Explorer or editor context menu, including tracked, untracked (`-u`), and renamed files.
+- Tag creation, remote push, and local delete workflows for annotated and lightweight tags.
+- Structured **author:**, **hash:**, and debounced **file:** history filters.
+- File and line history, revision stepping, and Ctrl/Cmd+click OLDER/NEWER two-revision compare.
+- **Compare References** for branches and commits, with Swap, ahead/behind summary, and Changed Files / Commits tabs.
+- Inline commit and file diff stats, Amend, pre-checked Patch, and remote file/line URL actions.
+- Non-intrusive, cache-only **Symbol Insights** with five independently configurable blame settings.
 - Hierarchical local and remote branch folders with optional, persisted folder branch counts.
 - Multi-lane SVG commit graph with draggable, persisted column widths and virtualized 500-commit background pagination.
 - Responsive **CHECKED OUT** pill that never obscures branch names.
@@ -72,6 +81,8 @@ Commit Details and the Changed Files drawer support one-click **Open File** acce
 
 Subtle active-line inline Git blame and a Status Bar summary can be toggled with **Toggle Inline Git Blame** and configured in Settings. The blame hover card provides **Reveal in Commit Timeline**, **Open File Diff**, **Copy Commit Hash**, and **Open on GitHub** (when a GitHub remote is available). Enable an on-demand **Toggle File Blame Gutter (Annotate)** from the Command Palette or editor right-click menu. This stays free of per-function CodeLens bloat, uses a bounded per-file LRU cache, and is gated by Workspace Trust.
 
+**Symbol Insights** are optional and non-intrusive: the master switch defaults on, hover insights default on, while declaration inline text, the status-bar tooltip, and cache-only CodeLens default off. The existing blame cache is reused, so enabled modes add zero extra `git blame` processes.
+
 ### Repository menu options
 
 ![Repository menu customization](https://raw.githubusercontent.com/juddersoft/GitRepoAndBranchExplorer/main/media/screenshots/repo-menu-options.png)
@@ -117,12 +128,23 @@ Extension Git actions run only in trusted workspaces, with `protocol.ext.allow=n
 - The **Stashes** sidebar section lists stashes for the selected repository. Use the repository context menu or the stash action on the checked-out branch to run **Stash Changes…**.
 - Stash creation supports tracked changes, untracked files with `-u`, and selective multi-file stashing. Apply, Pop, Inspect, and Drop actions are available; Drop confirms through a quiet action rather than a disruptive modal.
 - **Inspect Stash** in Commit Details shows the stash contents and changed files, making it possible to review, apply, pop, or drop the stash without leaving the timeline.
+- **Git Repo & Branch Explorer: Stash File…** is available in the Explorer and editor context menus for tracked, untracked, and renamed files.
+
+### Find and clone repositories
+- Run **Git Repo & Branch Explorer: Clone Repository…** from the Command Palette or use the Clone Repository action.
+- Browse GitHub (github.com), GitHub Enterprise (`*.ghe.com` / Server), or Azure DevOps organizations and repositories, or enter a repository URL directly. The destination folder is validated before cloning.
+
+### Tags and cherry-picks
+- Right-click a commit to **Create Tag…**, choosing an optional message for an annotated tag or leaving it blank for a lightweight tag.
+- Right-click a tag for **Push Tag to Remote…** or **Delete Tag…**. Push uses an explicit `refs/tags/` destination; local delete uses a quiet confirmation and does not delete the remote tag.
+- Right-click a non-merge commit to **Cherry-Pick into Worktree…**. It is available for commits already in the current branch history for backporting, guarded against dirty destinations, and offers **Open Worktree in New Window**.
 
 ### Multi-lane SVG commit graph
 - The history table has **Branch / Tag**, **Graph**, **Message**, **Author**, **Date** and **ID** columns. Drag any column divider to resize it (double-click a divider to reset that column); widths are remembered.
 - Branches, merges and octopus merges are drawn as coloured lanes that stay readable on light and dark themes.
 - Lanes are recycled after merges, and lanes that lead to commits outside the visible list end cleanly.
 - Filter the history by message, author, hash or ref name.
+- Filter History also supports structured `author:`, `hash:`, and debounced `file:` tokens, including quoted phrases in file filters.
 - History is loaded in append-only 500-commit chunks and virtualized at a fixed `26px` row height, so repositories are no longer limited to the first 500 commits and scrolling keeps the SVG graph responsive.
 - The **Local Branches**, **Remote Branches** and **Tags** toggles control which ref labels appear in the Branch / Tag column. Active toggles are filled with the button colour and show how many refs of that kind exist; a status line explains what is hidden or missing ("Hiding tags (3)", "No tags in this repository"). Toggles hide labels only, never commits.
 
@@ -142,6 +164,15 @@ Extension Git actions run only in trusted workspaces, with `protocol.ext.allow=n
 ### Commit details and file diffs
 - Select a commit to see its full message and the list of changed files with **A** (added), **M** (modified), **D** (deleted) and **R** (renamed) badges.
 - Click a file row to open VS Code's native read-only diff of the parent revision against the commit, or use the inline **Open File** button directly beside the name to open the working-tree file. Deleted or missing files open from the appropriate read-only commit revision.
+- Commit Details includes inline `+N` / `-N` and Binary diff stats with per-commit totals. Right-click commit rows for **Amend Last Commit…**, **Create Patch…**, and **Apply Patch…**.
+- **Apply Patch…** pre-validates patches with `git apply --check` before applying them.
+- **Git Repo & Branch Explorer: Copy Remote File/Line URL** is available from editor and Explorer context menus. It supports GitHub, GitHub Enterprise Cloud (`*.ghe.com`), Azure DevOps, GitLab, and Bitbucket.
+
+### File, line, and reference comparison
+- Use **Git Repo & Branch Explorer: View File History** and **Git Repo & Branch Explorer: View Line History** from file/editor context menus. File history follows renames with `git log --follow --name-status`; line history inspects a selection with `git log -L`.
+- Use **Git Repo & Branch Explorer: Compare File with Previous Revision** from the editor title or file context menus, and **Git Repo & Branch Explorer: Open Previous File Revision** from the editor title/context menus.
+- In File History, Ctrl/Cmd+click exactly two revisions to compare them. The selected rows display unmistakable **OLDER** / **NEWER** badges, and diff tab titles and pane headers identify the two revisions.
+- Use **Compare with Another Reference…** from commit or branch context menus, or **Compare with <current branch>**. Reference comparison provides **Swap**, ahead/behind counts, Changed Files and Commits tabs, and `BASE <-> TARGET` diff headers.
 
 ### Git Graph and hosted-remote integration
 - **Open in Git Graph** appears when the [Git Graph](https://marketplace.visualstudio.com/items?itemName=mhutchie.git-graph) extension is installed.
@@ -169,6 +200,29 @@ Extension Git actions run only in trusted workspaces, with `protocol.ext.allow=n
 |---|---|---|
 | Git Repo & Branch Explorer: Open Repository Window | `gitRepoAndBranchExplorer.openRepository` | Opens (or focuses) the Git Repository tab. |
 | Git Repo & Branch Explorer: Refresh | `gitRepoAndBranchExplorer.refresh` | Reloads branches, tags and history. |
+| Git Repo & Branch Explorer: Clone Repository… | `gitRepoAndBranchExplorer.cloneRepository` | Finds and clones repositories from URLs or supported hosted providers. |
+| Git Repo & Branch Explorer: Stash File… | `gitRepoAndBranchExplorer.stashFile` | Stashes the selected file from Explorer or the editor context menu. |
+| Git Repo & Branch Explorer: View File History | `gitRepoAndBranchExplorer.viewFileHistory` | Opens follow-aware file history. |
+| Git Repo & Branch Explorer: View Line History | `gitRepoAndBranchExplorer.viewLineHistory` | Opens line history for the selected editor lines. |
+| Git Repo & Branch Explorer: Compare File with Previous Revision | `gitRepoAndBranchExplorer.compareWithPreviousRevision` | Compares the file with its previous revision. |
+| Git Repo & Branch Explorer: Open Previous File Revision | `gitRepoAndBranchExplorer.openPreviousRevision` | Opens the previous file revision in the editor. |
+| Git Repo & Branch Explorer: Toggle Inline Git Blame | `gitRepoAndBranchExplorer.toggleInlineBlame` | Enables or disables active-line inline blame. |
+| Git Repo & Branch Explorer: Toggle File Blame Gutter (Annotate) | `gitRepoAndBranchExplorer.toggleFileAnnotate` | Toggles the on-demand Visual Studio-style blame gutter. |
+| Git Repo & Branch Explorer: Apply Patch… | `gitRepoAndBranchExplorer.applyPatch` | Selects and pre-validates a patch before applying it. |
+| Git Repo & Branch Explorer: Copy Remote File/Line URL | `gitRepoAndBranchExplorer.copyRemoteFileUrl` | Copies the hosted remote URL for the file or selected line. |
+
+## Configuration
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `gitRepoAndBranchExplorer.blame.enabled` | `true` | Show subtle inline Git blame on the active editor line. |
+| `gitRepoAndBranchExplorer.blame.ignoreWhitespace` | `false` | Ignore whitespace changes when running git blame (`-w`). |
+| `gitRepoAndBranchExplorer.blame.showStatusBar` | `true` | Show the active-line Git blame summary in the status bar. |
+| `gitRepoAndBranchExplorer.blame.symbolInsights.enabled` | `true` | Master switch for Git Symbol Insights: author count, commit count, and last-modified information computed from cached blame with zero extra Git processes. |
+| `gitRepoAndBranchExplorer.blame.symbolInsights.hover` | `true` | Include the enclosing symbol summary in the active-line Git blame hover. |
+| `gitRepoAndBranchExplorer.blame.symbolInsights.declarationInline` | `false` | Show subtle inline ghost text at symbol declaration lines. |
+| `gitRepoAndBranchExplorer.blame.symbolInsights.statusBarTooltip` | `false` | Include the enclosing symbol summary in the Git blame status-bar tooltip. |
+| `gitRepoAndBranchExplorer.blame.symbolInsights.codeLens` | `false` | Show cache-only, opt-in CodeLens above symbol declarations with click-to-reveal authorship. |
 
 ## Requirements
 

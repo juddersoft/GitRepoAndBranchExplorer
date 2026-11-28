@@ -657,6 +657,20 @@ describe('buildRepoMenu', () => {
     expect(item(menu, 'stashChanges').label).toBe('Stash Changes...');
   });
 
+  it('offers workspace removal only for an exact workspace-folder repository', () => {
+    const workspaceRepo = {
+      repoRoot: snapshot.repoRoot,
+      repoName: snapshot.repoName,
+      commonDir: `${snapshot.repoRoot}/.git`,
+      isWorkspaceFolder: true,
+    };
+    expect(ids(menuFor(snapshot, { workspaceRepos: [workspaceRepo] }))).toContain('removeRepoFromWorkspace');
+    expect(ids(menuFor(snapshot, { workspaceRepos: [{ ...workspaceRepo, isWorkspaceFolder: false }] })))
+      .not.toContain('removeRepoFromWorkspace');
+    expect(ids(menuFor(snapshot, { workspaceRepos: [{ ...workspaceRepo, repoRoot: '/repo/nested' }] })))
+      .not.toContain('removeRepoFromWorkspace');
+  });
+
   it('disables Stash Changes while another operation is running', () => {
     expect(item(menuFor(snapshot, { isBusy: true }), 'stashChanges').reason).toMatch(/running/i);
   });

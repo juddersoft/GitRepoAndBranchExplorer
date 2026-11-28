@@ -1,4 +1,4 @@
-import type { BranchInfo, RemoteGroup, RepoSnapshot, StashInfo, TagInfo, WorktreeInfo } from '../../types/git';
+import type { BranchInfo, RemoteGroup, RepoSnapshot, StashInfo, TagInfo, WorktreeInfo, WorkspaceRepoInfo } from '../../types/git';
 import type { TrackingIndicatorOrder } from '../../types/messages';
 import { buildBranchFolderTree, type BranchTreeNode } from './branchFolderTree';
 import { button, createSearchBox, el, icon, type IconName, rebuildPreservingFocus } from './dom';
@@ -31,7 +31,7 @@ export interface BranchTreeCallbacks {
   onInspectStash(stash: StashInfo): void;
   onStashContextMenu(stash: StashInfo, x: number, y: number): void;
   /** Right-click / Shift+F10 / Menu key on the repository row. */
-  onRepoContextMenu(x: number, y: number): void;
+  onRepoContextMenu(repo: WorkspaceRepoInfo, x: number, y: number): void;
   onSelectRepository(repoRoot: string): void;
   onSettingsMenu(x: number, y: number): void;
   onCloneRepository(): void;
@@ -55,7 +55,7 @@ export function getRepoNodeKeyboardAction(
   if (key === 'Enter' || key === ' ') {
     return active ? 'toggle' : 'select';
   }
-  if (active && (key === 'ContextMenu' || (key === 'F10' && shiftKey))) {
+  if (key === 'ContextMenu' || (key === 'F10' && shiftKey)) {
     return 'menu';
   }
   return null;
@@ -275,9 +275,7 @@ export class BranchTree {
         });
         row.addEventListener('contextmenu', (event) => {
           event.preventDefault();
-          if (active) {
-            this.callbacks.onRepoContextMenu(event.clientX, event.clientY);
-          }
+          this.callbacks.onRepoContextMenu(repo, event.clientX, event.clientY);
         });
         const item = el(
           'li',
@@ -289,7 +287,7 @@ export class BranchTree {
               'aria-level': '1',
               'aria-current': String(active),
               'aria-label': `Repository ${label}`,
-              'aria-haspopup': active ? 'menu' : 'false',
+              'aria-haspopup': 'menu',
               tabindex: '-1',
               'data-focus-key': repoKey,
               'data-node-key': repoKey,
@@ -881,7 +879,14 @@ export class BranchTree {
           this.callbacks.onToggleNode(nodeKey);
         } else if (action === 'menu') {
           const rect = target.getBoundingClientRect();
-          this.callbacks.onRepoContextMenu(rect.left + 24, rect.bottom);
+          const repo = this.lastState?.workspaceRepos.find(
+            (candidate) => normalizeRepoKey(candidate.repoRoot) === normalizeRepoKey(
+              repoRoot ?? nodeKey.slice('repo:'.length),
+            ),
+          );
+          if (repo) {
+            this.callbacks.onRepoContextMenu(repo, rect.left + 24, rect.bottom);
+          }
         }
         event.preventDefault();
         return;

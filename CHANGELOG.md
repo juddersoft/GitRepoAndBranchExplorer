@@ -3,6 +3,34 @@
 All notable changes to **Git Repo & Branch Explorer** are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [1.9.0] - 2026-11-28
+
+### Added
+- **Find & Clone Repository:** Added **Git Repo & Branch Explorer: Clone Repository…** (`gitRepoAndBranchExplorer.cloneRepository`) for cloning from a URL or browsing GitHub, GitHub Enterprise (`*.ghe.com` / Server), and Azure DevOps. Clone selection includes organization/repository discovery, destination-folder validation, cancellable progress, and automatic opening of the cloned repository.
+- **File-Level Stashing:** Added **Git Repo & Branch Explorer: Stash File…** (`gitRepoAndBranchExplorer.stashFile`) in the Explorer and editor context menus. It supports tracked files, untracked files with `-u`, renamed files, optional commit selection, and staged/unstaged file choices.
+- **Tag Management:** Added Create, Push, and Delete actions for tags. Commit context menus create lightweight or annotated tags; pushing uses `refs/tags/<tag>` so remote tag refs are explicit, and deleting a local tag uses a silent QuickPick confirmation that does not affect remote tags.
+- **Structured Commit Search:** Filter History now supports `author:` and `hash:` tokens plus debounced `file:` tokens with quoted-phrase support, so commit history can be narrowed by author, commit identifier, or changed file path.
+- **Cherry-Pick into Worktree:** Added **Cherry-Pick into Worktree…** for eligible non-merge commits, including commits that are already ancestors of the current branch for backporting. The destination guard refuses dirty worktrees and offers **Open Worktree in New Window** after success or failure.
+- **File History & Line History:** Added **Git Repo & Branch Explorer: View File History** and **Git Repo & Branch Explorer: View Line History**. File history uses `git log --follow --name-status`; line history uses `git log -L` for selected lines.
+- **Revision Stepping & Multi-Revision Compare:** Added **Compare File with Previous Revision** (`gitRepoAndBranchExplorer.compareWithPreviousRevision`) and **Open Previous File Revision** (`gitRepoAndBranchExplorer.openPreviousRevision`) to editor title and context menus. File history supports Ctrl/Cmd+Click multi-select with unmistakable **OLDER** / **NEWER** badges, descriptive diff tab titles, and pane headers.
+- **Compare References:** Added reference comparison with **Compare with Another Reference…**, **Swap**, an ahead/behind summary, Changed Files and Commits tabs, and `BASE <-> TARGET` diff headers for branch/commit comparisons.
+- **Commit & File Convenience Actions:** Commit Details now shows inline `+N` / `-N` diff stats, binary diff counts, and totals. Added **Amend Last Commit** with a pushed-HEAD warning, **Create Patch…**, and **Apply Patch…** with `git apply --check` pre-validation.
+- **Copy Remote File/Line URL:** Added **Git Repo & Branch Explorer: Copy Remote File/Line URL** (`gitRepoAndBranchExplorer.copyRemoteFileUrl`) to the editor and Explorer context menus for GitHub, GitHub Enterprise Cloud (`*.ghe.com`), Azure DevOps, GitLab, and Bitbucket.
+- **Symbol Insights:** Added non-intrusive blame.symbolInsights modes for active-file authorship, with a master enabled toggle and four independently configurable displays: hover, declaration inline ghost text, status bar tooltip, and cache-only CodeLens.
+
+### Improved
+- Commit Details and file-diff views are clearer with inline per-file and per-commit diff totals, revision-aware file history, and multi-select comparison affordances.
+- Remote file URLs and hosted-browser actions preserve repository/provider context across SSH and HTTPS remotes.
+- Cherry-pick and worktree workflows provide direct, post-operation new-window actions without forcing worktree changes.
+
+### Security & Reliability
+- Boundary IPC validation now covers the additional clone, stash, tag, history, comparison, patch, amend, worktree, and remote-URL message paths.
+- Git ref and option handling reject option-like refs and unsafe revision/file arguments; amend messages reject carriage-return and control-character input.
+- Remote file URL generation is HTTPS-only, with defense-in-depth provider and remote normalization for GitHub, GitHub Enterprise Cloud, Azure DevOps, GitLab, and Bitbucket.
+- Patch application uses a preflight `git apply --check` before writing or applying changes.
+- Symbol Insights use the existing blame cache and produce zero extra `git blame` processes.
+- Verified **1,163 passing unit/security tests across 23 suites**, plus the extension-host integration suite.
+
 ## [1.8.0] - 2026-11-26
 
 ### Added
