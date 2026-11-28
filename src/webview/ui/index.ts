@@ -7,10 +7,10 @@ import { CreateWorktreeModal } from './CreateWorktreeModal';
 import type { StoredColumnWidths } from './columnResize';
 import { sanitizeStoredColumnWidths } from './columnResize';
 import type { MenuActionId } from './contextMenuModel';
-import { buildCommitMenu } from './contextMenuModel';
+import { buildCommitMenu, buildFileHistoryCommitMenu } from './contextMenuModel';
 import { el } from './dom';
 import { HistoryPane } from './HistoryPane';
-import { computeVisibleCommits, parseHistoryFilterQuery } from './state';
+import { computeVisibleCommits, orderComparisonPair, parseHistoryFilterQuery, toggleComparisonSelection } from './state';
 import type { BadgeKindToggle, ExplorerUiState } from './state';
 import {
   cacheCommitDetails,
@@ -127,6 +127,47 @@ function runCommitMenuAction(id: MenuActionId, commit: CommitNode): void {
     case 'openCommitInBrowser':
       postGitAction('openCommitInBrowser', commit.hash);
       break;
+    case 'compareSelectedRevisions': {
+      const pair = state.fileHistory
+        ? orderComparisonPair(state.fileHistory.commits, state.selectedComparisonHashes)
+        : null;
+      if (pair !== null) {
+        vscode.postMessage({
+          type: 'compareFileRevisions',
+          payload: {
+            olderHash: pair.older.hash,
+            olderPath: pair.older.filePathAtCommit,
+            newerHash: pair.newer.hash,
+            newerPath: pair.newer.filePathAtCommit,
+          },
+        });
+      }
+      break;
+    }
+    case 'compareWithWorkingTree': {
+      const revision = state.fileHistory?.commits.find((candidate) => candidate.hash === commit.hash);
+      if (revision && state.fileHistory) {
+        vscode.postMessage({
+          type: 'compareRevisionWithWorkingTree',
+          payload: {
+            hash: revision.hash,
+            filePathAtCommit: revision.filePathAtCommit,
+            currentFilePath: state.fileHistory.filePath,
+          },
+        });
+      }
+      break;
+    }
+    case 'openFileAtRevision': {
+      const revision = state.fileHistory?.commits.find((candidate) => candidate.hash === commit.hash);
+      if (revision) {
+        vscode.postMessage({
+          type: 'openFileAtRevision',
+          payload: { hash: revision.hash, filePathAtCommit: revision.filePathAtCommit },
+        });
+      }
+      break;
+    }
     default:
       break;
   }
@@ -161,7 +202,15 @@ function updateHistoryFilter(text: string): void {
 }
 
 function showCommitContextMenu(commit: CommitNode, x: number, y: number): void {
-  if (state.snapshot) {
+  const fileCommit = state.fileHistory?.commits.find((candidate) => candidate.hash === commit.hash);
+  if (state.fileHistory && fileCommit) {
+    contextMenu.show(
+      x,
+      y,
+      buildFileHistoryCommitMenu(state, fileCommit),
+      (id) => runCommitMenuAction(id, fileCommit),
+    );
+  } else if (state.snapshot) {
     contextMenu.show(x, y, buildCommitMenu(state.snapshot, state, commit), (id) => runCommitMenuAction(id, commit));
   }
 }
@@ -208,6 +257,35 @@ const historyPane = new HistoryPane({
     setState({ isLoadingMore: true });
     vscode.postMessage({ type: 'loadMoreCommits' });
   },
+  onToggleComparisonSelection: (hash) => {
+    const selectedComparisonHashes = toggleComparisonSelection(state.selectedComparisonHashes, hash);
+    setState({ selectedComparisonHashes, selectedCommitHash: hash });
+    requestCommitDetailsIfNeeded(hash);
+  },
+  onCompareSelectedRevisions: () => {
+    const pair = state.fileHistory
+      ? orderComparisonPair(state.fileHistory.commits, state.selectedComparisonHashes)
+      : null;
+    if (pair !== null) {
+      vscode.postMessage({
+        type: 'compareFileRevisions',
+        payload: {
+          olderHash: pair.older.hash,
+          olderPath: pair.older.filePathAtCommit,
+          newerHash: pair.newer.hash,
+          newerPath: pair.newer.filePathAtCommit,
+        },
+      });
+    }
+  },
+  onCloseFileHistory: () => {
+    setState({ fileHistory: null, selectedComparisonHashes: [] });
+    vscode.postMessage({ type: 'closeFileHistory' });
+  },
+  onLoadMoreFileHistory: () => {
+    setState({ isLoadingMore: true });
+    vscode.postMessage({ type: 'loadMoreFileHistory' });
+  },
   onColumnWidthsChange: (widths) => {
     columnWidths = widths;
     persist();
@@ -225,7 +303,10 @@ function requestCommitDetailsIfNeeded(hash: string | null): void {
 }
 
 function selectCommit(hash: string | null): void {
-  setState({ selectedCommitHash: hash });
+  setState({
+    selectedCommitHash: hash,
+    ...(state.fileHistory ? { selectedComparisonHashes: hash === null ? [] : [hash] } : {}),
+  });
   requestCommitDetailsIfNeeded(hash);
 }
 
@@ -330,6 +411,40 @@ function handleMessage(message: ExtensionToWebviewMessage): void {
       }
       break;
     }
+    case 'fileHistoryLoaded':
+      setState({
+        fileHistory: message.payload,
+        selectedComparisonHashes: [],
+        selectedCommitHash: null,
+        isLoading: false,
+        isLoadingMore: false,
+      });
+      break;
+    case 'fileHistoryAppended': {
+      if (state.fileHistory === null || state.fileHistory.filePath !== message.payload.filePath) {
+        break;
+      }
+      const known = new Set(state.fileHistory.commits.map((commit) => commit.hash));
+      const appended = message.payload.commits.filter((commit) => {
+        if (known.has(commit.hash)) {
+          return false;
+        }
+        known.add(commit.hash);
+        return true;
+      });
+      setState({
+        fileHistory: {
+          ...state.fileHistory,
+          commits: [...state.fileHistory.commits, ...appended],
+          hasMore: message.payload.hasMore,
+        },
+        isLoadingMore: false,
+      });
+      break;
+    }
+    case 'clearFileHistory':
+      setState({ fileHistory: null, selectedComparisonHashes: [], isLoadingMore: false });
+      break;
     case 'repoError':
       setState({ snapshot: null, errorMessage: message.payload.message, isLoading: false, selectedCommitHash: null });
       break;

@@ -31,6 +31,8 @@ const mocks = vi.hoisted(() => ({
   searchCommitsByFile: vi.fn(),
   hasWorkingTreeChanges: vi.fn(),
   getWorkingTreeFiles: vi.fn(),
+  getFileHistory: vi.fn(),
+  getLineHistory: vi.fn(),
   resolveCommitHash: vi.fn(),
   stashChanges: vi.fn(),
   stashPush: vi.fn(),
@@ -57,6 +59,10 @@ const mocks = vi.hoisted(() => ({
   resetCurrentBranch: vi.fn(),
   revertMergeCommit: vi.fn(),
   openCommitFileDiff: vi.fn(),
+  openTwoRevisionFileDiff: vi.fn(),
+  openRevisionVsWorkingTreeDiff: vi.fn(),
+  openSingleRevisionFile: vi.fn(),
+  setAllowedRepoRoots: vi.fn(),
   buildShowUri: vi.fn(),
   stat: vi.fn(),
   readdir: vi.fn(),
@@ -166,6 +172,8 @@ vi.mock('../src/git/gitService', () => ({
     createBranch = mocks.createBranch;
     hasWorkingTreeChanges = mocks.hasWorkingTreeChanges;
     getWorkingTreeFiles = mocks.getWorkingTreeFiles;
+    getFileHistory = mocks.getFileHistory;
+    getLineHistory = mocks.getLineHistory;
     resolveCommitHash = mocks.resolveCommitHash;
     stashChanges = mocks.stashChanges;
     stashPush = mocks.stashPush;
@@ -221,6 +229,12 @@ vi.mock('../src/git/gitDiffProvider', () => ({
   openCommitFileDiff: mocks.openCommitFileDiff,
   buildShowUri: mocks.buildShowUri,
   normalizeRepoRootPath: (root: string) => root.replace(/[\\/]+$/, '').toLowerCase(),
+  GitShowContentProvider: class {
+    openTwoRevisionFileDiff = mocks.openTwoRevisionFileDiff;
+    openRevisionVsWorkingTreeDiff = mocks.openRevisionVsWorkingTreeDiff;
+    openSingleRevisionFile = mocks.openSingleRevisionFile;
+    setAllowedRepoRoots = mocks.setAllowedRepoRoots;
+  },
 }));
 vi.mock('../src/git/repoDiscovery', () => ({
   canonicalizeRepoPath: (root: string) => {
@@ -365,6 +379,11 @@ describe('RepoCoordinator', () => {
     mocks.checkoutBranch.mockResolvedValue(undefined);
     mocks.hasWorkingTreeChanges.mockResolvedValue(false);
     mocks.getWorkingTreeFiles.mockResolvedValue([]);
+    mocks.getFileHistory.mockResolvedValue({ commits: [], hasMore: false });
+    mocks.getLineHistory.mockResolvedValue({ commits: [], hasMore: false });
+    mocks.openTwoRevisionFileDiff.mockResolvedValue(undefined);
+    mocks.openRevisionVsWorkingTreeDiff.mockResolvedValue(undefined);
+    mocks.openSingleRevisionFile.mockResolvedValue(undefined);
     mocks.resolveCommitHash.mockResolvedValue(sha('a'));
     mocks.createBranch.mockResolvedValue(undefined);
     mocks.createTag.mockResolvedValue(undefined);
@@ -3292,5 +3311,153 @@ describe('RepoCoordinator', () => {
       'Branch "feature" is already checked out in another worktree: /repos/feature',
       'Branch "feature" is already checked out in another worktree: /repos/feature',
     ]);
+  });
+
+  describe('file and line history', () => {
+    const historyCommit = (
+      char: string,
+      timestamp: number,
+      filePathAtCommit = 'src/file.ts',
+    ) => ({
+      hash: sha(char),
+      shortHash: sha(char).slice(0, 8),
+      parents: [],
+      subject: char,
+      authorName: 'Ada',
+      authorEmail: 'ada@example.com',
+      authorDateIso: '2026-11-10T12:00:00Z',
+      authorTimestamp: timestamp,
+      refs: [],
+      filePathAtCommit,
+      fileStatus: 'M',
+    });
+
+    it('rejects all file and line history actions in an untrusted workspace', async () => {
+      mocks.isTrusted = false;
+      await coordinator.viewFileHistoryByUri({ scheme: 'file', fsPath: '/repo/src/file.ts' } as never);
+      await coordinator.viewLineHistoryForActiveEditor();
+      await coordinator.compareWithPreviousRevisionByUri({ scheme: 'file', fsPath: '/repo/src/file.ts' } as never);
+      await coordinator.openPreviousRevisionByUri({ scheme: 'file', fsPath: '/repo/src/file.ts' } as never);
+      expect(mocks.getFileHistory).not.toHaveBeenCalled();
+      expect(mocks.getLineHistory).not.toHaveBeenCalled();
+    });
+
+    it('loads file history, opens the panel and broadcasts fileHistoryLoaded', async () => {
+      const commit = historyCommit('a', 100);
+      mocks.getFileHistory.mockResolvedValue({ commits: [commit], hasMore: true });
+      await openBoth();
+      await coordinator.viewFileHistoryByUri({ scheme: 'file', fsPath: '/repo/src/file.ts' } as never);
+      expect(mocks.getFileHistory).toHaveBeenCalledWith('/repo', 'src/file.ts');
+      expect(host.openPanel).toHaveBeenCalled();
+      expect(editor.ofType('fileHistoryLoaded')).toHaveLength(1);
+    });
+
+    it('clears active file history when switching repositories', async () => {
+      mocks.discoverWorkspaceRepositories.mockResolvedValue([
+        { repoRoot: '/repo', repoName: 'repo', commonDir: '/repo/.git', currentBranch: 'main', isDetachedHead: false },
+        { repoRoot: '/other', repoName: 'other', commonDir: '/other/.git', currentBranch: 'main', isDetachedHead: false },
+      ]);
+      await openBoth();
+      mocks.getFileHistory.mockResolvedValue({
+        commits: [historyCommit('a', 100)],
+        hasMore: false,
+      });
+      await coordinator.viewFileHistoryByUri({ scheme: 'file', fsPath: '/repo/src/file.ts' } as never);
+      coordinator.handleMessage('sidebar', {
+        type: 'selectRepository',
+        payload: { repoRoot: '/other' },
+      });
+      expect(editor.ofType('clearFileHistory')).toHaveLength(1);
+    });
+
+    it('adjusts 1-based inclusive line ranges and trims a trailing selection line', async () => {
+      await openBoth();
+      mocks.activeTextEditor = {
+        document: { uri: { scheme: 'file', fsPath: '/repo/src/file.ts' } },
+        selection: {
+          start: { line: 2, character: 4 },
+          end: { line: 5, character: 0 },
+        },
+      } as never;
+      await coordinator.viewLineHistoryForActiveEditor();
+      expect(mocks.getLineHistory).toHaveBeenCalledWith('/repo', 'src/file.ts', 3, 5);
+    });
+
+    it('compares the latest commit with working tree or two revisions, and reports none', async () => {
+      const diffProvider = {
+        openRevisionVsWorkingTreeDiff: vi.fn(),
+        openTwoRevisionFileDiff: vi.fn(),
+        openSingleRevisionFile: vi.fn(),
+        setAllowedRepoRoots: vi.fn(),
+      };
+      coordinator = new RepoCoordinator(host, diffProvider as never);
+      await openBoth();
+
+      mocks.getFileHistory.mockResolvedValue({
+        commits: [historyCommit('a', 100)],
+        hasMore: false,
+      });
+      mocks.getWorkingTreeFiles.mockResolvedValue([{ path: 'src/file.ts', indexStatus: 'M', worktreeStatus: 'M', untracked: false }]);
+      await coordinator.compareWithPreviousRevisionByUri({ scheme: 'file', fsPath: '/repo/src/file.ts' } as never);
+      expect(diffProvider.openRevisionVsWorkingTreeDiff).toHaveBeenCalled();
+
+      mocks.getWorkingTreeFiles.mockResolvedValue([]);
+      mocks.getFileHistory.mockResolvedValue({
+        commits: [historyCommit('a', 200), historyCommit('b', 100)],
+        hasMore: false,
+      });
+      await coordinator.compareWithPreviousRevisionByUri({ scheme: 'file', fsPath: '/repo/src/file.ts' } as never);
+      expect(diffProvider.openTwoRevisionFileDiff).toHaveBeenCalled();
+
+      mocks.getFileHistory.mockResolvedValue({ commits: [], hasMore: false });
+      await coordinator.compareWithPreviousRevisionByUri({ scheme: 'file', fsPath: '/repo/src/file.ts' } as never);
+      expect(mocks.showInformationMessage).toHaveBeenCalledWith('No previous revision found for this file.');
+    });
+
+    it('sorts active-history revisions chronologically and ignores forged hashes', async () => {
+      const diffProvider = {
+        openTwoRevisionFileDiff: vi.fn(),
+        openRevisionVsWorkingTreeDiff: vi.fn(),
+        openSingleRevisionFile: vi.fn(),
+        setAllowedRepoRoots: vi.fn(),
+      };
+      coordinator = new RepoCoordinator(host, diffProvider as never);
+      await openBoth();
+      mocks.getFileHistory.mockResolvedValue({
+        commits: [historyCommit('a', 200), historyCommit('b', 100)],
+        hasMore: false,
+      });
+      await coordinator.viewFileHistoryByUri({ scheme: 'file', fsPath: '/repo/src/file.ts' } as never);
+      coordinator.handleMessage('editor', {
+        type: 'compareFileRevisions',
+        payload: { olderHash: sha('a'), olderPath: 'src/file.ts', newerHash: sha('b'), newerPath: 'src/file.ts' },
+      });
+      await vi.waitFor(() => expect(diffProvider.openTwoRevisionFileDiff).toHaveBeenCalled());
+      expect(diffProvider.openTwoRevisionFileDiff.mock.calls[0][1].shortHash).toBe(sha('b').slice(0, 8));
+      expect(diffProvider.openTwoRevisionFileDiff.mock.calls[0][2].shortHash).toBe(sha('a').slice(0, 8));
+
+      coordinator.handleMessage('editor', {
+        type: 'compareFileRevisions',
+        payload: { olderHash: sha('f'), olderPath: 'src/file.ts', newerHash: sha('b'), newerPath: 'src/file.ts' },
+      });
+      expect(diffProvider.openTwoRevisionFileDiff).toHaveBeenCalledTimes(1);
+    });
+
+    it('appends deduplicated history and closes history state with broadcasts', async () => {
+      await openBoth();
+      const first = historyCommit('a', 200);
+      const second = historyCommit('b', 100);
+      mocks.getFileHistory
+        .mockResolvedValueOnce({ commits: [first], hasMore: true })
+        .mockResolvedValueOnce({ commits: [first, second], hasMore: false });
+      await coordinator.viewFileHistoryByUri({ scheme: 'file', fsPath: '/repo/src/file.ts' } as never);
+      coordinator.handleMessage('editor', { type: 'loadMoreFileHistory' });
+      await vi.waitFor(() => expect(editor.ofType('fileHistoryAppended')).toHaveLength(1));
+      expect(editor.ofType('fileHistoryAppended')[0]).toMatchObject({
+        payload: { commits: [second], hasMore: false },
+      });
+      coordinator.handleMessage('editor', { type: 'closeFileHistory' });
+      expect(editor.ofType('clearFileHistory')).toHaveLength(1);
+    });
   });
 });

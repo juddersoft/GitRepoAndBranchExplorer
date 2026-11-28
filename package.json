@@ -2,7 +2,7 @@
   "name": "git-repo-and-branch-explorer",
   "displayName": "Git Repo & Branch Explorer",
   "description": "Visual Studio-style Git Repository explorer: branch/remote/tag tree in the Activity Bar, multi-lane SVG commit graph and history timeline in the editor, file diff inspection, and GitHub/Git Graph integration.",
-  "version": "1.8.1",
+  "version": "1.9.0",
   "publisher": "juddersoft",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -80,6 +80,24 @@
         "title": "Git Repo & Branch Explorer: Stash File…"
       },
       {
+        "command": "gitRepoAndBranchExplorer.viewFileHistory",
+        "title": "Git Repo & Branch Explorer: View File History",
+        "icon": "$(history)"
+      },
+      {
+        "command": "gitRepoAndBranchExplorer.viewLineHistory",
+        "title": "Git Repo & Branch Explorer: View Line History"
+      },
+      {
+        "command": "gitRepoAndBranchExplorer.compareWithPreviousRevision",
+        "title": "Git Repo & Branch Explorer: Compare File with Previous Revision",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "gitRepoAndBranchExplorer.openPreviousRevision",
+        "title": "Git Repo & Branch Explorer: Open Previous File Revision"
+      },
+      {
         "command": "gitRepoAndBranchExplorer.toggleInlineBlame",
         "title": "Git Repo & Branch Explorer: Toggle Inline Git Blame",
         "icon": "$(git-commit)"
@@ -101,6 +119,21 @@
           "command": "gitRepoAndBranchExplorer.stashFile",
           "when": "resourceScheme == file",
           "group": "gitRepoAndBranchExplorer@2"
+        },
+        {
+          "command": "gitRepoAndBranchExplorer.viewFileHistory",
+          "when": "resourceScheme == file",
+          "group": "gitRepoAndBranchExplorer@3"
+        },
+        {
+          "command": "gitRepoAndBranchExplorer.viewLineHistory",
+          "when": "resourceScheme == file && editorHasSelection",
+          "group": "gitRepoAndBranchExplorer@4"
+        },
+        {
+          "command": "gitRepoAndBranchExplorer.compareWithPreviousRevision",
+          "when": "resourceScheme == file",
+          "group": "gitRepoAndBranchExplorer@5"
         }
       ],
       "explorer/context": [
@@ -108,6 +141,28 @@
           "command": "gitRepoAndBranchExplorer.stashFile",
           "when": "resourceScheme == file && !explorerResourceIsFolder",
           "group": "gitRepoAndBranchExplorer@1"
+        },
+        {
+          "command": "gitRepoAndBranchExplorer.viewFileHistory",
+          "when": "resourceScheme == file && !explorerResourceIsFolder",
+          "group": "gitRepoAndBranchExplorer@2"
+        },
+        {
+          "command": "gitRepoAndBranchExplorer.compareWithPreviousRevision",
+          "when": "resourceScheme == file && !explorerResourceIsFolder",
+          "group": "gitRepoAndBranchExplorer@3"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "gitRepoAndBranchExplorer.viewFileHistory",
+          "when": "resourceScheme == file",
+          "group": "navigation@90"
+        },
+        {
+          "command": "gitRepoAndBranchExplorer.compareWithPreviousRevision",
+          "when": "resourceScheme == file",
+          "group": "navigation@91"
         }
       ]
     },

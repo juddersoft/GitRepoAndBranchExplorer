@@ -6,6 +6,14 @@ import { parseRemoteHostInfo, validateCloneUrl } from '../src/git/remoteUrlBuild
 import { buildGitHubCommitUrl, buildRefMap, GitService, isValidCommitHash, parseForEachRefOutput, parseGitLogOutput } from '../src/git/gitService';
 import { isExtensionToWebviewMessage, isValidWebviewMessage, isWebviewToExtensionMessage } from '../src/types/messages';
 import { buildCspHeader, getNonce } from '../src/webview/security';
+import { GitShowContentProvider } from '../src/git/gitDiffProvider';
+
+vi.mock('vscode', () => ({
+  workspace: { isTrusted: true },
+  Uri: { from: (value: unknown) => value, file: (fsPath: string) => ({ scheme: 'file', fsPath }) },
+  commands: { executeCommand: vi.fn(async () => undefined) },
+  window: { showTextDocument: vi.fn(async () => undefined) },
+}));
 
 const FS = '\x1f';
 const RS = '\x1e';
@@ -58,6 +66,33 @@ describe('validateGitRef rejects hostile refs', () => {
   it('passes shell metacharacters through verbatim because git is spawned without a shell', () => {
     // `$(whoami)` is a legal ref name; execGit uses spawn() with an argv array, so it is never interpreted.
     expect(validateGitRef('$(whoami)')).toBe('$(whoami)');
+  });
+});
+
+describe('Phase 20 file history and revision security', () => {
+  it('rejects adversarial paths and colon injection before Git or diff execution', async () => {
+    const runGit = vi.fn(async () => '');
+    const service = new GitService(runGit);
+    for (const bad of ['../secret', '/etc/passwd', 'C:\\secret', 'a:b', '-option', 'bad\u0000path', 'a/../../b']) {
+      await expect(service.getFileHistory('/repo', bad)).rejects.toThrow();
+      await expect(service.getLineHistory('/repo', bad, 1, 2)).rejects.toThrow();
+    }
+    expect(runGit).not.toHaveBeenCalled();
+
+    const provider = new GitShowContentProvider(service);
+    await expect(provider.openRevisionVsWorkingTreeDiff(
+      '/repo',
+      { hash: SHA_A, shortHash: 'aaaaaaa', pathAtCommit: 'src/file.ts' },
+      '../outside.ts',
+    )).rejects.toThrow(/inside the repository/);
+  });
+
+  it('keeps HistoryPane banner and OLER/NEWER badges out of dangerous DOM sinks', () => {
+    const file = path.resolve('src/webview/ui/HistoryPane.ts');
+    const source = fs.readFileSync(file, 'utf8');
+    expect(source).not.toMatch(/\.(innerHTML|outerHTML)\b|insertAdjacentHTML|document\.write|eval\s*\(/);
+    expect(source).toContain('file-history-banner');
+    expect(source).toMatch(/OLDER|NEWER/);
   });
 });
 

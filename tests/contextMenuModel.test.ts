@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { BranchInfo, CommitNode, RepoSnapshot } from '../src/types/git';
-import { buildCommitMenu, buildRefMenu, buildRepoMenu, buildSettingsMenu, buildStashMenu, buildWorktreeMenu, clampMenuPosition, pullPushDisabledReason } from '../src/webview/ui/contextMenuModel';
+import type { BranchInfo, CommitNode, FileHistoryCommit, RepoSnapshot } from '../src/types/git';
+import { buildCommitMenu, buildFileHistoryCommitMenu, buildRefMenu, buildRepoMenu, buildSettingsMenu, buildStashMenu, buildWorktreeMenu, clampMenuPosition, pullPushDisabledReason } from '../src/webview/ui/contextMenuModel';
 import type { MenuActionId, MenuEntry } from '../src/webview/ui/contextMenuModel';
 import type { ExplorerUiState } from '../src/webview/ui/state';
 import { branchRefTarget, createInitialState, tagRefTarget } from '../src/webview/ui/state';
@@ -89,6 +89,57 @@ function item(entries: MenuEntry[], id: MenuActionId): Extract<MenuEntry, { kind
 
 const ids = (entries: MenuEntry[]): string[] => entries.flatMap((e) => (e.kind === 'item' ? [e.id] : []));
 const enabled = (entries: MenuEntry[]): string[] => entries.flatMap((e) => (e.kind === 'item' && e.enabled ? [e.id] : []));
+
+describe('buildFileHistoryCommitMenu', () => {
+  const fileCommit = (char: string, timestamp: number): FileHistoryCommit => ({
+    hash: sha(char),
+    shortHash: sha(char).slice(0, 8),
+    parents: [],
+    subject: char,
+    authorName: 'Ada',
+    authorEmail: 'ada@example.com',
+    authorDateIso: '2026-11-10T12:00:00Z',
+    authorTimestamp: timestamp,
+    refs: [],
+    filePathAtCommit: 'src/file.ts',
+  });
+
+  it('places compare-selected first only for a selected right-clicked commit pair', () => {
+    const older = fileCommit('a', 100);
+    const newer = fileCommit('b', 200);
+    const historyState = state({
+      fileHistory: { kind: 'file', repoRoot: '/repo', filePath: 'src/file.ts', commits: [newer, older], hasMore: false },
+      selectedComparisonHashes: [older.hash, newer.hash],
+    });
+    expect(ids(buildFileHistoryCommitMenu(historyState, newer))[0]).toBe('compareSelectedRevisions');
+    expect(ids(buildFileHistoryCommitMenu(historyState, fileCommit('c', 300))))
+      .not.toContain('compareSelectedRevisions');
+  });
+
+  it('includes standard actions and conditionally includes open-in-browser', () => {
+    const commit = fileCommit('a', 100);
+    const noRemote = state({ fileHistory: { kind: 'file', repoRoot: '/repo', filePath: 'src/file.ts', commits: [commit], hasMore: false } });
+    expect(ids(buildFileHistoryCommitMenu(noRemote, commit))).toEqual([
+      'compareWithWorkingTree',
+      'openFileAtRevision',
+      'copyHash',
+    ]);
+    const withRemote = state({
+      integrations: { ...noRemote.integrations, remoteWebUrl: 'https://github.com/acme/repo' },
+      fileHistory: noRemote.fileHistory,
+    });
+    expect(ids(buildFileHistoryCommitMenu(withRemote, commit))).toContain('openCommitInBrowser');
+  });
+
+  it('does not show compare-selected for invalid or one-sided selections', () => {
+    const commit = fileCommit('a', 100);
+    const onlyOne = state({
+      fileHistory: { kind: 'file', repoRoot: '/repo', filePath: 'src/file.ts', commits: [commit], hasMore: false },
+      selectedComparisonHashes: [commit.hash],
+    });
+    expect(ids(buildFileHistoryCommitMenu(onlyOne, commit))).not.toContain('compareSelectedRevisions');
+  });
+});
 
 describe('buildRefMenu: local branches', () => {
   it('disables Create PR for a local branch tracking the remote default branch', () => {

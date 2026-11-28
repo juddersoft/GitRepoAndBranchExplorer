@@ -17,6 +17,7 @@ import {
   filterVisibleBadges,
   hasHistoryFocus,
   summarizeRefToggles,
+  orderComparisonPair,
 } from './state';
 import {
   computeRevealScrollTop,
@@ -41,6 +42,10 @@ export interface HistoryPaneCallbacks {
   onOpenCommitInBrowser(hash: string): void;
   onSignInGitHub(): void;
   onLoadMoreCommits(): void;
+  onToggleComparisonSelection(hash: string): void;
+  onCompareSelectedRevisions(): void;
+  onCloseFileHistory(): void;
+  onLoadMoreFileHistory(): void;
   /** The user resized (or reset) a column; `widths` holds only the columns that differ from their defaults. */
   onColumnWidthsChange(widths: StoredColumnWidths): void;
 }
@@ -237,6 +242,9 @@ export class HistoryPane {
   private readonly detailsBody: HTMLElement;
   private readonly loadMoreFooter: HTMLElement;
   private readonly loadMoreButton: HTMLButtonElement;
+  private readonly fileHistoryBanner: HTMLElement;
+  private readonly fileHistoryScope: HTMLElement;
+  private readonly compareSelectedButton: HTMLButtonElement;
 
   private visibleCommits: CommitNode[] = [];
   private graphLayout: GraphRowLayout[] = [];
@@ -337,7 +345,11 @@ export class HistoryPane {
     this.tbody.addEventListener('click', (event) => {
       const row = event.target instanceof Element ? event.target.closest<HTMLElement>('tr[data-hash]') : null;
       if (row?.dataset.hash) {
-        callbacks.onSelectCommit(row.dataset.hash);
+        if (this.lastState?.fileHistory && (event.ctrlKey || event.metaKey)) {
+          callbacks.onToggleComparisonSelection(row.dataset.hash);
+        } else {
+          callbacks.onSelectCommit(row.dataset.hash);
+        }
       }
     });
     this.tbody.addEventListener('contextmenu', (event) => {
@@ -345,7 +357,14 @@ export class HistoryPane {
       const commit = row?.dataset.hash ? this.visibleCommits.find((c) => c.hash === row.dataset.hash) : undefined;
       if (commit) {
         event.preventDefault();
-        callbacks.onSelectCommit(commit.hash);
+        const fileHistorySelectionPreserved =
+          this.lastState?.fileHistory !== null &&
+          this.lastState?.fileHistory !== undefined &&
+          this.lastState.selectedComparisonHashes.length === 2 &&
+          this.lastState.selectedComparisonHashes.includes(commit.hash);
+        if (!fileHistorySelectionPreserved) {
+          callbacks.onSelectCommit(commit.hash);
+        }
         callbacks.onCommitContextMenu(commit, event.clientX, event.clientY);
       }
     });
@@ -382,9 +401,16 @@ export class HistoryPane {
       this.scrollFrame = requestAnimationFrame(() => {
         this.scrollFrame = null;
         this.renderVirtualRows();
+        const lastState = this.lastState;
+        if (lastState === null) {
+          return;
+        }
+        const hasMoreInCurrentMode = lastState.fileHistory
+          ? lastState.fileHistory.kind === 'file' && lastState.fileHistory.hasMore
+          : lastState.snapshot?.hasMoreCommits === true;
         if (
-          this.lastState?.snapshot?.hasMoreCommits &&
-          !this.lastState.isLoadingMore &&
+          hasMoreInCurrentMode &&
+          !lastState.isLoadingMore &&
           shouldPrefetchMoreCommits(
             this.tableScroll.scrollTop,
             this.tableScroll.clientHeight,
@@ -414,7 +440,36 @@ export class HistoryPane {
     ]);
     this.details.hidden = true;
 
-    this.element = el('section', { className: 'pane pane-right' }, [toolbar, this.banner, breadcrumb, this.tableScroll, this.details]);
+    this.fileHistoryScope = el('span', { className: 'file-history-scope' });
+    this.compareSelectedButton = button({
+      className: 'toolbar-button',
+      label: 'Compare Selected (OLDER \u2194 NEWER)',
+      showLabel: true,
+    });
+    this.compareSelectedButton.addEventListener('click', () => callbacks.onCompareSelectedRevisions());
+    const closeFileHistory = button({
+      className: 'toolbar-button',
+      label: 'Back to Repo History',
+      showLabel: true,
+    });
+    closeFileHistory.addEventListener('click', () => callbacks.onCloseFileHistory());
+    this.fileHistoryBanner = el('div', { className: 'file-history-banner' }, [
+      this.fileHistoryScope,
+      el('span', { className: 'file-history-hint', text: 'Ctrl+Click 2 rows to compare' }),
+      el('span', { className: 'toolbar-spacer' }),
+      this.compareSelectedButton,
+      closeFileHistory,
+    ]);
+    this.fileHistoryBanner.hidden = true;
+
+    this.element = el('section', { className: 'pane pane-right' }, [
+      toolbar,
+      this.banner,
+      this.fileHistoryBanner,
+      breadcrumb,
+      this.tableScroll,
+      this.details,
+    ]);
   }
 
   public update(state: ExplorerUiState): void {
@@ -471,6 +526,7 @@ export class HistoryPane {
     this.banner.textContent = state.errorMessage ?? '';
 
     this.renderBreadcrumb(state);
+    this.renderFileHistoryBanner(state);
     this.renderRows(state);
     this.renderLoadMoreFooter(state);
     this.renderDetails(state);
@@ -522,6 +578,18 @@ export class HistoryPane {
     this.refFilterStatus.textContent = refStatus ?? '';
   }
 
+  private renderFileHistoryBanner(state: ExplorerUiState): void {
+    const history = state.fileHistory;
+    this.fileHistoryBanner.hidden = history === null;
+    if (history === null) {
+      return;
+    }
+    this.fileHistoryScope.textContent = history.kind === 'line'
+      ? `Line History: ${history.filePath} (L${history.startLine}\u2013L${history.endLine})`
+      : `File History: ${history.filePath}`;
+    this.compareSelectedButton.disabled = state.selectedComparisonHashes.length !== 2;
+  }
+
   private renderRows(state: ExplorerUiState): void {
     const { snapshot } = state;
     if (!snapshot) {
@@ -532,7 +600,9 @@ export class HistoryPane {
       this.tbody.replaceChildren(this.placeholderRow(state.errorMessage ? 'No history available.' : 'Loading\u2026'));
       return;
     }
-    const nextVisibleCommits = computeVisibleCommits(snapshot, state);
+    const nextVisibleCommits = state.fileHistory
+      ? [...state.fileHistory.commits]
+      : computeVisibleCommits(snapshot, state);
     const nextKey = nextVisibleCommits.map((commit) => commit.hash).join(',');
     if (nextKey !== this.visibleCommitKey) {
       this.visibleCommits = nextVisibleCommits;
@@ -543,11 +613,15 @@ export class HistoryPane {
     } else {
       this.visibleCommits = nextVisibleCommits;
     }
-    const countText = describeCommitCount(snapshot, this.visibleCommits.length);
+    const countText = state.fileHistory
+      ? `${this.visibleCommits.length} revision${this.visibleCommits.length === 1 ? '' : 's'}`
+      : describeCommitCount(snapshot, this.visibleCommits.length);
     this.commitCountStatus.hidden = countText === null;
     this.commitCountStatus.textContent = countText ?? '';
     if (this.visibleCommits.length === 0) {
-      this.tbody.replaceChildren(this.placeholderRow(describeEmptyHistory(snapshot, state)));
+      this.tbody.replaceChildren(this.placeholderRow(
+        state.fileHistory ? 'No revisions found for this file.' : describeEmptyHistory(snapshot, state),
+      ));
       return;
     }
     this.renderVirtualRows();
@@ -585,7 +659,10 @@ export class HistoryPane {
   }
 
   private renderLoadMoreFooter(state: ExplorerUiState): void {
-    const visible = state.snapshot?.hasMoreCommits === true || state.isLoadingMore;
+    const hasMore = state.fileHistory
+      ? state.fileHistory.kind === 'file' && state.fileHistory.hasMore
+      : state.snapshot?.hasMoreCommits === true;
+    const visible = hasMore || state.isLoadingMore;
     this.loadMoreFooter.hidden = !visible;
     this.loadMoreButton.hidden = state.isLoadingMore;
     this.loadMoreButton.disabled = state.isLoadingMore;
@@ -593,9 +670,20 @@ export class HistoryPane {
     if (!state.isLoadingMore && visible) {
       this.loadMoreFooter.replaceChildren(this.loadMoreButton);
     }
+    const label = this.loadMoreButton.querySelector('.button-label');
+    if (label) {
+      label.textContent = state.fileHistory ? 'Load 200 more revisions' : 'Load 500 more commits';
+    }
   }
 
   private requestMoreCommits(): void {
+    if (this.lastState?.fileHistory?.kind === 'file') {
+      if (!this.loadRequested && !this.lastState.isLoadingMore && this.lastState.fileHistory.hasMore) {
+        this.loadRequested = true;
+        this.callbacks.onLoadMoreFileHistory();
+      }
+      return;
+    }
     if (
       this.loadRequested ||
       this.lastState?.isLoadingMore ||
@@ -692,11 +780,26 @@ export class HistoryPane {
 
   private renderRow(commit: CommitNode, graph: GraphRowLayout, snapshot: RepoSnapshot, state: ExplorerUiState): HTMLTableRowElement {
     const selected = commit.hash === state.selectedCommitHash || commit.hash === this.pendingRevealHash;
+    const compareSelected = state.fileHistory !== null &&
+      state.selectedComparisonHashes.includes(commit.hash);
+    const pair = state.fileHistory === null
+      ? null
+      : orderComparisonPair(state.fileHistory.commits, state.selectedComparisonHashes);
+    const role = pair === null
+      ? null
+      : pair.older.hash === commit.hash
+        ? 'older'
+        : pair.newer.hash === commit.hash
+          ? 'newer'
+          : null;
+    const rowClass = ['commit-row', selected ? 'selected' : '', compareSelected ? 'commit-row-compare' : '']
+      .filter(Boolean)
+      .join(' ');
 
     return el(
       'tr',
       {
-        className: selected ? 'commit-row selected' : 'commit-row',
+        className: rowClass,
         attrs: { 'data-hash': commit.hash, 'aria-selected': String(selected) },
       },
       [
@@ -704,7 +807,15 @@ export class HistoryPane {
           el('div', { className: 'ref-pills' }, renderPills(filterVisibleBadges(commit.refs, state), snapshot)),
         ]),
         el('td', { className: 'col-graph' }, [buildGraphCellSvg(graph, ROW_HEIGHT)]),
-        el('td', { className: 'col-message', text: commit.subject, title: commit.subject }),
+        el('td', { className: 'col-message', title: commit.subject }, [
+          ...(role === null
+            ? []
+            : [el('span', {
+                className: `compare-role-badge compare-role-${role}`,
+                text: role.toUpperCase(),
+              })]),
+          el('span', { className: 'commit-subject', text: commit.subject }),
+        ]),
         el('td', { className: 'col-author', title: `${commit.authorName} <${commit.authorEmail}>` }, [
           el('span', { className: `avatar avatar-${avatarColorIndex(commit.authorName)}`, text: authorInitial(commit.authorName) }),
           el('span', { className: 'author-name', text: commit.authorName }),

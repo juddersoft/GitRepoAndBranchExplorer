@@ -1098,6 +1098,30 @@ button {
 
 /* ---------- Commit history table ---------- */
 
+.file-history-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 6px 10px;
+  color: var(--vscode-editor-foreground);
+  background: var(--vscode-editorWidget-background);
+  border-top: 1px solid var(--vscode-focusBorder);
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+.file-history-scope {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-history-hint {
+  color: var(--vscode-descriptionForeground);
+  white-space: nowrap;
+}
+
 .table-scroll {
   flex: 1;
   min-height: 0;
@@ -1255,6 +1279,33 @@ col.col-id {
 .commit-row.selected {
   color: var(--vscode-list-activeSelectionForeground);
   background-color: var(--vscode-list-activeSelectionBackground);
+}
+
+.commit-row-compare {
+  box-shadow: inset 3px 0 0 var(--vscode-focusBorder);
+  background-color: var(--vscode-list-hoverBackground);
+}
+
+.compare-role-badge {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 1px 4px;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 14px;
+  letter-spacing: 0.4px;
+  border: 1px solid currentColor;
+  border-radius: 8px;
+}
+
+.compare-role-older {
+  color: var(--vscode-gitDecoration-deletedResourceForeground);
+  background: color-mix(in srgb, currentColor 12%, var(--vscode-editor-background));
+}
+
+.compare-role-newer {
+  color: var(--vscode-gitDecoration-addedResourceForeground);
+  background: color-mix(in srgb, currentColor 12%, var(--vscode-editor-background));
 }
 
 .table-scroll:not(:focus-within) .commit-row.selected {

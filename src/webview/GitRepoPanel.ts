@@ -10,6 +10,10 @@ export const OPEN_REPOSITORY_COMMAND = 'gitRepoAndBranchExplorer.openRepository'
 export const REFRESH_COMMAND = 'gitRepoAndBranchExplorer.refresh';
 export const CLONE_REPOSITORY_COMMAND = 'gitRepoAndBranchExplorer.cloneRepository';
 export const STASH_FILE_COMMAND = 'gitRepoAndBranchExplorer.stashFile';
+export const VIEW_FILE_HISTORY_COMMAND = 'gitRepoAndBranchExplorer.viewFileHistory';
+export const VIEW_LINE_HISTORY_COMMAND = 'gitRepoAndBranchExplorer.viewLineHistory';
+export const COMPARE_WITH_PREVIOUS_REVISION_COMMAND = 'gitRepoAndBranchExplorer.compareWithPreviousRevision';
+export const OPEN_PREVIOUS_REVISION_COMMAND = 'gitRepoAndBranchExplorer.openPreviousRevision';
 /** Built-in command that selects (and, if needed, shows) this extension's Activity Bar container. */
 export const SHOW_CONTAINER_COMMAND = 'workbench.view.extension.gitRepoAndBranchExplorer-container';
 const TAB_PINNED_KEY = 'gitRepoAndBranchExplorer.tabPinned';
@@ -181,6 +185,22 @@ export class GitRepoPanel {
 
   public static async stashFile(uri?: vscode.Uri): Promise<void> {
     await GitRepoPanel.coordinator?.stashFileByUri(uri);
+  }
+
+  public static async viewFileHistory(uri?: vscode.Uri): Promise<void> {
+    await GitRepoPanel.coordinator?.viewFileHistoryByUri(uri);
+  }
+
+  public static async viewLineHistory(): Promise<void> {
+    await GitRepoPanel.coordinator?.viewLineHistoryForActiveEditor();
+  }
+
+  public static async compareWithPreviousRevision(uri?: vscode.Uri): Promise<void> {
+    await GitRepoPanel.coordinator?.compareWithPreviousRevisionByUri(uri);
+  }
+
+  public static async openPreviousRevision(uri?: vscode.Uri): Promise<void> {
+    await GitRepoPanel.coordinator?.openPreviousRevisionByUri(uri);
   }
 
   public static disposeCurrent(): void {

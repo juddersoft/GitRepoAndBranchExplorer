@@ -89,6 +89,21 @@ export interface CommitNode {
   refs: RefBadge[];
 }
 
+export interface FileHistoryCommit extends CommitNode {
+  filePathAtCommit: string;
+  fileStatus?: string;
+}
+
+export interface FileHistoryResult {
+  kind: 'file' | 'line';
+  repoRoot: string;
+  filePath: string;
+  startLine?: number;
+  endLine?: number;
+  commits: FileHistoryCommit[];
+  hasMore: boolean;
+}
+
 export type ChangedFileStatus = 'A' | 'M' | 'D' | 'R' | 'C' | 'T' | 'U';
 
 export interface ChangedFileEntry {

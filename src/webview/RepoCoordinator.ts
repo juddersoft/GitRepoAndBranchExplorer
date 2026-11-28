@@ -29,7 +29,7 @@ import type { ParsedRemoteHost } from '../git/remoteUrlBuilder';
 import type { TrackedFetchResult } from '../git/trackedFetch';
 import { describeTrackedFetch, NOTHING_TO_FETCH_MESSAGE, planTrackedFetch } from '../git/trackedFetch';
 import { GitHubService } from '../github/githubService';
-import type { BranchInfo, ExternalIntegrationsInfo, RepoSnapshot, WorkingTreeFile, WorkspaceRepoInfo } from '../types/git';
+import type { BranchInfo, ExternalIntegrationsInfo, FileHistoryResult, RepoSnapshot, WorkingTreeFile, WorkspaceRepoInfo } from '../types/git';
 import type {
   ActionStatusPayload,
   ExtensionToWebviewMessage,
@@ -212,6 +212,8 @@ export class RepoCoordinator implements vscode.Disposable {
   private pendingRevealCommitHash: string | null = null;
   private pendingCreateBranchDialog: CreateBranchDialogRequest | null = null;
   private pendingCreateWorktreeDialog: CreateWorktreeDialogPayload | null = null;
+  private activeFileHistory: FileHistoryResult | null = null;
+  private pendingFileHistory: FileHistoryResult | null = null;
   private isLoadingMoreCommits = false;
   private loadingMoreCommits: Promise<boolean> | null = null;
   private isSearchingForRevealCommit = false;
@@ -347,9 +349,13 @@ export class RepoCoordinator implements vscode.Disposable {
         this.readySurfaces.add(source);
         this.sendInitialState(source);
         if (source === 'editor') {
+          if (this.activeFileHistory !== null && this.pendingFileHistory === null) {
+            this.pendingFileHistory = this.activeFileHistory;
+          }
           this.flushPendingRevealCommit();
           this.flushPendingCreateBranchDialog();
           this.flushPendingCreateWorktreeDialog();
+          this.flushPendingFileHistory();
         }
         break;
       case 'requestRefresh':
@@ -452,6 +458,23 @@ export class RepoCoordinator implements vscode.Disposable {
       case 'openCommitOnGitHub':
         void this.openCommitOnGitHub(message.payload.hash);
         break;
+      case 'closeFileHistory':
+        this.activeFileHistory = null;
+        this.pendingFileHistory = null;
+        this.broadcast({ type: 'clearFileHistory' });
+        break;
+      case 'loadMoreFileHistory':
+        void this.loadMoreFileHistory();
+        break;
+      case 'compareFileRevisions':
+        void this.compareFileRevisions(message.payload);
+        break;
+      case 'compareRevisionWithWorkingTree':
+        void this.compareRevisionWithWorkingTree(message.payload);
+        break;
+      case 'openFileAtRevision':
+        void this.openFileAtRevision(message.payload);
+        break;
       case 'signInGitHub':
         void this.signInGitHub();
         break;
@@ -553,6 +576,404 @@ export class RepoCoordinator implements vscode.Disposable {
     }
     await this.offerPostCloneActions(clonedPath);
   }
+
+    public async viewFileHistoryByUri(uri?: vscode.Uri): Promise<void> {
+      if (!this.ensureTrustedWorkspace()) {
+        return;
+      }
+      const target = await this.resolveHistoryFileTarget(uri);
+      if (target === null) {
+        return;
+      }
+      try {
+        const page = await this.gitService.getFileHistory(target.repoRoot, target.relativePath);
+        await this.prepareFileHistoryRepo(target.repoRoot);
+        const result: FileHistoryResult = {
+          kind: 'file',
+          repoRoot: target.repoRoot,
+          filePath: target.relativePath,
+          commits: page.commits,
+          hasMore: page.hasMore,
+        };
+        this.showFileHistory(result);
+      } catch (err) {
+        void vscode.window.showWarningMessage(`Could not load file history: ${describeError(err)}`);
+      }
+    }
+
+    public async viewLineHistoryForActiveEditor(): Promise<void> {
+      if (!this.ensureTrustedWorkspace()) {
+        return;
+      }
+      const editor = vscode.window.activeTextEditor;
+      if (!editor || editor.document.uri.scheme !== 'file') {
+        void vscode.window.showInformationMessage('Select lines in a file on disk to view line history.');
+        return;
+      }
+      const target = await this.resolveHistoryFileTarget(editor.document.uri);
+      if (target === null) {
+        return;
+      }
+      const startLine = editor.selection.start.line + 1;
+      let endLine = editor.selection.end.line + 1;
+      if (editor.selection.end.character === 0 && editor.selection.end.line > editor.selection.start.line) {
+        endLine--;
+      }
+      try {
+        const page = await this.gitService.getLineHistory(
+          target.repoRoot,
+          target.relativePath,
+          startLine,
+          endLine,
+        );
+        await this.prepareFileHistoryRepo(target.repoRoot);
+        this.showFileHistory({
+          kind: 'line',
+          repoRoot: target.repoRoot,
+          filePath: target.relativePath,
+          startLine,
+          endLine,
+          commits: page.commits,
+          hasMore: page.hasMore,
+        });
+      } catch (err) {
+        void vscode.window.showWarningMessage(`Could not load line history: ${describeError(err)}`);
+      }
+    }
+
+    public async compareWithPreviousRevisionByUri(uri?: vscode.Uri): Promise<void> {
+      if (!this.ensureTrustedWorkspace() || !this.gitDiffProvider) {
+        return;
+      }
+      const target = await this.resolveHistoryFileTarget(uri);
+      if (target === null) {
+        return;
+      }
+      try {
+        const [page, changes] = await Promise.all([
+          this.gitService.getFileHistory(target.repoRoot, target.relativePath, 2),
+          this.gitService.getWorkingTreeFiles(target.repoRoot),
+        ]);
+        this.allowDiffForRepo(target.repoRoot);
+        const dirty = changes.some(
+          (file) =>
+            this.sameRepoPath(file.path, target.relativePath) ||
+            (file.originalPath !== undefined && this.sameRepoPath(file.originalPath, target.relativePath)),
+        );
+        if (dirty && page.commits[0]) {
+          await this.gitDiffProvider.openRevisionVsWorkingTreeDiff(
+            target.repoRoot,
+            this.revisionAtCommit(page.commits[0]),
+            target.relativePath,
+          );
+        } else if (page.commits.length >= 2) {
+          await this.gitDiffProvider.openTwoRevisionFileDiff(
+            target.repoRoot,
+            this.versionedRevision(page.commits[1]),
+            this.versionedRevision(page.commits[0]),
+          );
+        } else {
+          void vscode.window.showInformationMessage('No previous revision found for this file.');
+        }
+      } catch (err) {
+        void vscode.window.showWarningMessage(`Could not compare previous revisions: ${describeError(err)}`);
+      }
+    }
+
+    public async openPreviousRevisionByUri(uri?: vscode.Uri): Promise<void> {
+      if (!this.ensureTrustedWorkspace() || !this.gitDiffProvider) {
+        return;
+      }
+      const target = await this.resolveHistoryFileTarget(uri);
+      if (target === null) {
+        return;
+      }
+      try {
+        const [page, changes] = await Promise.all([
+          this.gitService.getFileHistory(target.repoRoot, target.relativePath, 2),
+          this.gitService.getWorkingTreeFiles(target.repoRoot),
+        ]);
+        const dirty = changes.some(
+          (file) =>
+            this.sameRepoPath(file.path, target.relativePath) ||
+            (file.originalPath !== undefined && this.sameRepoPath(file.originalPath, target.relativePath)),
+        );
+        const revision = dirty ? page.commits[0] : page.commits[1];
+        if (!revision) {
+          void vscode.window.showInformationMessage('No previous revision found for this file.');
+          return;
+        }
+        this.allowDiffForRepo(target.repoRoot);
+        await this.gitDiffProvider.openSingleRevisionFile(
+          target.repoRoot,
+          this.revisionAtCommit(revision),
+        );
+      } catch (err) {
+        void vscode.window.showWarningMessage(`Could not open the previous revision: ${describeError(err)}`);
+      }
+    }
+
+    private async resolveHistoryFileTarget(
+      uri?: vscode.Uri,
+    ): Promise<{ repoRoot: string; relativePath: string } | null> {
+      const targetUri = uri ?? vscode.window.activeTextEditor?.document.uri;
+      if (!targetUri || targetUri.scheme !== 'file') {
+        void vscode.window.showInformationMessage('Select a file on disk.');
+        return null;
+      }
+      if (this.discoveredRepos.length === 0) {
+        const workspaceFolderPaths = vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? [];
+        const configuredWorkspaceRoot = vscode.workspace
+          .getConfiguration('gitRepoAndBranchExplorer')
+          .get<string>('workspaceRoot', '')
+          .trim();
+        try {
+          this.discoveredRepos = await discoverWorkspaceRepositories(
+            workspaceFolderPaths,
+            configuredWorkspaceRoot,
+          );
+        } catch (err) {
+          void vscode.window.showErrorMessage(
+            `Could not discover Git repositories: ${describeError(err)}`,
+          );
+          return null;
+        }
+      }
+      const candidateRoots = [
+        ...this.discoveredRepos.map((repo) => repo.repoRoot),
+        ...(this.lastSnapshot?.worktrees?.map((worktree) => worktree.path) ?? []),
+        ...(this.lastSnapshot?.repoRoot === undefined ? [] : [this.lastSnapshot.repoRoot]),
+      ];
+      const candidatePath = canonicalizeRepoPath(targetUri.fsPath);
+      const targetRepoRoot = Array.from(
+        new Map(candidateRoots.map((root) => [normalizeRepoRootPath(root), root])).entries(),
+      )
+        .filter(([root]) => this.isPathInsideRepo(root, candidatePath))
+        .sort(([left], [right]) => right.length - left.length)[0]?.[1];
+      if (targetRepoRoot === undefined) {
+        void vscode.window.showInformationMessage('This file is not inside a Git repository.');
+        return null;
+      }
+      const relativePath = path.relative(targetRepoRoot, targetUri.fsPath).replace(/\\/g, '/');
+      if (!isSafeRepoRelativePath(relativePath)) {
+        void vscode.window.showInformationMessage('Select a file inside a Git repository.');
+        return null;
+      }
+      return { repoRoot: targetRepoRoot, relativePath };
+    }
+
+    private async prepareFileHistoryRepo(repoRoot: string): Promise<void> {
+      if (
+        this.lastSnapshot === null ||
+        canonicalizeRepoPath(this.lastSnapshot.repoRoot) !== canonicalizeRepoPath(repoRoot)
+      ) {
+        this.selectedRepoRoot = repoRoot;
+        await this.loadRepository();
+      }
+      this.allowDiffForRepo(repoRoot);
+    }
+
+    private showFileHistory(result: FileHistoryResult): void {
+      this.activeFileHistory = result;
+      this.pendingFileHistory = result;
+      this.host.openPanel();
+      this.flushPendingFileHistory();
+    }
+
+    private flushPendingFileHistory(): void {
+      const result = this.pendingFileHistory;
+      const editor = this.surfaces.get('editor');
+      if (result === null || !editor || !this.readySurfaces.has('editor')) {
+        return;
+      }
+      editor.post({ type: 'fileHistoryLoaded', payload: result });
+      if (this.pendingFileHistory === result) {
+        this.pendingFileHistory = null;
+      }
+    }
+
+    private sameRepoPath(left: string, right: string): boolean {
+      const normalized = (value: string): string =>
+        process.platform === 'win32' ? value.replace(/\\/g, '/').toLowerCase() : value.replace(/\\/g, '/');
+      return normalized(left) === normalized(right);
+    }
+
+    private allowDiffForRepo(repoRoot: string): void {
+      this.gitDiffProvider?.setAllowedRepoRoots(new Set([
+        ...this.discoveredRepos.map((repo) => repo.repoRoot),
+        ...(this.lastSnapshot?.worktrees?.map((worktree) => worktree.path) ?? []),
+        ...(this.lastSnapshot?.repoRoot === undefined ? [] : [this.lastSnapshot.repoRoot]),
+        repoRoot,
+      ]));
+    }
+
+    private versionedRevision(commit: FileHistoryResult['commits'][number]): {
+      hash: string;
+      shortHash: string;
+      path: string;
+      isoDate?: string;
+    } {
+      return {
+        hash: commit.hash,
+        shortHash: commit.shortHash,
+        path: commit.filePathAtCommit,
+        isoDate: commit.authorDateIso,
+      };
+    }
+
+    private revisionAtCommit(commit: FileHistoryResult['commits'][number]): {
+      hash: string;
+      shortHash: string;
+      pathAtCommit: string;
+      isoDate?: string;
+    } {
+      return {
+        hash: commit.hash,
+        shortHash: commit.shortHash,
+        pathAtCommit: commit.filePathAtCommit,
+        isoDate: commit.authorDateIso,
+      };
+    }
+
+    private async loadMoreFileHistory(): Promise<void> {
+      const history = this.activeFileHistory;
+      if (history === null || history.kind !== 'file' || !history.hasMore) {
+        return;
+      }
+      if (!this.ensureTrustedWorkspace()) {
+        return;
+      }
+      try {
+        const page = await this.gitService.getFileHistory(
+          history.repoRoot,
+          history.filePath,
+          200,
+          history.commits.length,
+        );
+        if (this.activeFileHistory !== history) {
+          return;
+        }
+        const knownHashes = new Set(history.commits.map((commit) => commit.hash));
+        const appended = page.commits.filter((commit) => {
+          if (knownHashes.has(commit.hash)) {
+            return false;
+          }
+          knownHashes.add(commit.hash);
+          return true;
+        });
+        history.commits = [...history.commits, ...appended];
+        history.hasMore = page.hasMore;
+        this.broadcast({
+          type: 'fileHistoryAppended',
+          payload: { filePath: history.filePath, commits: appended, hasMore: history.hasMore },
+        });
+      } catch (err) {
+        void vscode.window.showWarningMessage(`Could not load older file history: ${describeError(err)}`);
+        this.broadcast({
+          type: 'fileHistoryAppended',
+          payload: { filePath: history.filePath, commits: [], hasMore: history.hasMore },
+        });
+      }
+    }
+
+    private async compareFileRevisions(payload: {
+      olderHash: string;
+      olderPath: string;
+      newerHash: string;
+      newerPath: string;
+    }): Promise<void> {
+      const history = this.activeFileHistory;
+      if (history === null || !this.ensureTrustedWorkspace() || !this.gitDiffProvider) {
+        return;
+      }
+      const older = history.commits.findIndex(
+        (commit) =>
+          commit.hash === payload.olderHash.toLowerCase() &&
+          this.sameRepoPath(commit.filePathAtCommit, payload.olderPath),
+      );
+      const newer = history.commits.findIndex(
+        (commit) =>
+          commit.hash === payload.newerHash.toLowerCase() &&
+          this.sameRepoPath(commit.filePathAtCommit, payload.newerPath),
+      );
+      if (older < 0 || newer < 0 || older === newer) {
+        void vscode.window.showWarningMessage('The selected revisions are no longer available.');
+        return;
+      }
+      const first = history.commits[older];
+      const second = history.commits[newer];
+      const firstIsOlder =
+        first.authorTimestamp < second.authorTimestamp ||
+        (first.authorTimestamp === second.authorTimestamp && older > newer);
+      const orderedOlder = firstIsOlder ? first : second;
+      const orderedNewer = firstIsOlder ? second : first;
+      this.allowDiffForRepo(history.repoRoot);
+      try {
+        await this.gitDiffProvider.openTwoRevisionFileDiff(
+          history.repoRoot,
+          this.versionedRevision(orderedOlder),
+          this.versionedRevision(orderedNewer),
+        );
+      } catch (err) {
+        void vscode.window.showWarningMessage(`Could not compare the selected revisions: ${describeError(err)}`);
+      }
+    }
+
+    private async compareRevisionWithWorkingTree(payload: {
+      hash: string;
+      filePathAtCommit: string;
+      currentFilePath: string;
+    }): Promise<void> {
+      const history = this.activeFileHistory;
+      if (history === null || !this.ensureTrustedWorkspace() || !this.gitDiffProvider) {
+        return;
+      }
+      const revision = history.commits.find(
+        (commit) =>
+          commit.hash === payload.hash.toLowerCase() &&
+          this.sameRepoPath(commit.filePathAtCommit, payload.filePathAtCommit),
+      );
+      if (!revision || !this.sameRepoPath(history.filePath, payload.currentFilePath)) {
+        return;
+      }
+      this.allowDiffForRepo(history.repoRoot);
+      try {
+        await this.gitDiffProvider.openRevisionVsWorkingTreeDiff(
+          history.repoRoot,
+          this.revisionAtCommit(revision),
+          payload.currentFilePath,
+        );
+      } catch (err) {
+        void vscode.window.showWarningMessage(`Could not compare with the working tree: ${describeError(err)}`);
+      }
+    }
+
+    private async openFileAtRevision(payload: {
+      hash: string;
+      filePathAtCommit: string;
+    }): Promise<void> {
+      const history = this.activeFileHistory;
+      if (history === null || !this.ensureTrustedWorkspace() || !this.gitDiffProvider) {
+        return;
+      }
+      const revision = history.commits.find(
+        (commit) =>
+          commit.hash === payload.hash.toLowerCase() &&
+          this.sameRepoPath(commit.filePathAtCommit, payload.filePathAtCommit),
+      );
+      if (!revision) {
+        return;
+      }
+      this.allowDiffForRepo(history.repoRoot);
+      try {
+        await this.gitDiffProvider.openSingleRevisionFile(
+          history.repoRoot,
+          this.revisionAtCommit(revision),
+        );
+      } catch (err) {
+        void vscode.window.showWarningMessage(`Could not open the file revision: ${describeError(err)}`);
+      }
+    }
 
   public async stashFileByUri(uri?: vscode.Uri): Promise<void> {
     if (!vscode.workspace.isTrusted) {
@@ -1096,6 +1517,8 @@ export class RepoCoordinator implements vscode.Disposable {
     this.selection = EMPTY_SELECTION;
     this.pendingCreateBranchDialog = null;
     this.pendingCreateWorktreeDialog = null;
+    this.activeFileHistory = null;
+    this.pendingFileHistory = null;
     this.gitDiffProvider?.clearAllowedRepoRoots();
     this.disposeGitWatcher();
     this.broadcast({ type: 'workspaceRepos', payload: { repos: [], activeRepoRoot: null } });
@@ -1122,6 +1545,9 @@ export class RepoCoordinator implements vscode.Disposable {
     }
     this.selection = EMPTY_SELECTION;
     this.broadcast({ type: 'syncState', payload: this.selection });
+    this.activeFileHistory = null;
+    this.pendingFileHistory = null;
+    this.broadcast({ type: 'clearFileHistory' });
     this.selectedRepoRoot = repository.repoRoot;
     void this.loadRepository();
   }

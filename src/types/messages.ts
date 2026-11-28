@@ -3,6 +3,8 @@ import type {
   CommitDetails,
   CommitNode,
   ExternalIntegrationsInfo,
+  FileHistoryCommit,
+  FileHistoryResult,
   RepoSnapshot,
   StashInfo,
   WorkspaceRepoInfo,
@@ -174,6 +176,17 @@ export type WebviewToExtensionMessage =
   | { type: 'openFileDiff'; payload: OpenFileDiffPayload }
   | { type: 'openInGitGraph' }
   | { type: 'openCommitOnGitHub'; payload: { hash: string } }
+  | { type: 'closeFileHistory' }
+  | { type: 'loadMoreFileHistory' }
+  | {
+      type: 'compareFileRevisions';
+      payload: { olderHash: string; olderPath: string; newerHash: string; newerPath: string };
+    }
+  | {
+      type: 'compareRevisionWithWorkingTree';
+      payload: { hash: string; filePathAtCommit: string; currentFilePath: string };
+    }
+  | { type: 'openFileAtRevision'; payload: { hash: string; filePathAtCommit: string } }
   | { type: 'signInGitHub' };
 
 export interface OpenFileDiffPayload {
@@ -234,6 +247,12 @@ export type ExtensionToWebviewMessage =
   | { type: 'commitsAppended'; payload: { commits: CommitNode[]; hasMoreCommits: boolean } }
   | { type: 'repoError'; payload: RepoErrorPayload }
   | { type: 'commitDetails'; payload: CommitDetails }
+  | { type: 'fileHistoryLoaded'; payload: FileHistoryResult }
+  | {
+      type: 'fileHistoryAppended';
+      payload: { filePath: string; commits: FileHistoryCommit[]; hasMore: boolean };
+    }
+  | { type: 'clearFileHistory' }
   | { type: 'fileSearchResults'; payload: { query: string; requestId: number; matchingHashes: string[] } }
   | { type: 'integrationsInfo'; payload: ExternalIntegrationsInfo }
   | { type: 'actionStatus'; payload: ActionStatusPayload }
@@ -430,7 +449,42 @@ export function isWebviewToExtensionMessage(value: unknown): value is WebviewToE
     case 'loadMoreCommits':
     case 'stashChanges':
     case 'cloneRepository':
+    case 'closeFileHistory':
+    case 'loadMoreFileHistory':
       return hasOnlyFields(value, ['type']);
+    case 'compareFileRevisions':
+      return (
+        hasOnlyFields(value, ['type', 'payload']) &&
+        Object.keys(value).length === 2 &&
+        payload !== null &&
+        hasOnlyFields(payload, ['olderHash', 'olderPath', 'newerHash', 'newerPath']) &&
+        Object.keys(payload).length === 4 &&
+        isCommitHash(ownField(payload, 'olderHash')) &&
+        isSafeRepoRelativePath(ownField(payload, 'olderPath')) &&
+        isCommitHash(ownField(payload, 'newerHash')) &&
+        isSafeRepoRelativePath(ownField(payload, 'newerPath'))
+      );
+    case 'compareRevisionWithWorkingTree':
+      return (
+        hasOnlyFields(value, ['type', 'payload']) &&
+        Object.keys(value).length === 2 &&
+        payload !== null &&
+        hasOnlyFields(payload, ['hash', 'filePathAtCommit', 'currentFilePath']) &&
+        Object.keys(payload).length === 3 &&
+        isCommitHash(ownField(payload, 'hash')) &&
+        isSafeRepoRelativePath(ownField(payload, 'filePathAtCommit')) &&
+        isSafeRepoRelativePath(ownField(payload, 'currentFilePath'))
+      );
+    case 'openFileAtRevision':
+      return (
+        hasOnlyFields(value, ['type', 'payload']) &&
+        Object.keys(value).length === 2 &&
+        payload !== null &&
+        hasOnlyFields(payload, ['hash', 'filePathAtCommit']) &&
+        Object.keys(payload).length === 2 &&
+        isCommitHash(ownField(payload, 'hash')) &&
+        isSafeRepoRelativePath(ownField(payload, 'filePathAtCommit'))
+      );
     case 'inspectStash':
       return (
         hasOnlyFields(value, ['type', 'ref', 'hash']) &&
@@ -659,6 +713,13 @@ function isWorktreeInfoShape(value: unknown): boolean {
 }
 
 export function isExtensionToWebviewMessage(value: unknown): value is ExtensionToWebviewMessage {
+  if (
+    isSafeRecord(value) &&
+    hasOnlyFields(value, ['type']) &&
+    ownField(value, 'type') === 'clearFileHistory'
+  ) {
+    return true;
+  }
   if (!isRecord(value) || !isRecord(value.payload)) {
     return false;
   }
@@ -686,6 +747,26 @@ export function isExtensionToWebviewMessage(value: unknown): value is ExtensionT
         Array.isArray(payload.commits) &&
         payload.commits.every((commit: unknown) => isCommitNodeShape(commit)) &&
         typeof payload.hasMoreCommits === 'boolean'
+      );
+    case 'fileHistoryLoaded':
+      return (
+        (payload.kind === 'file' || payload.kind === 'line') &&
+        typeof payload.repoRoot === 'string' &&
+        isSafeRepoRelativePath(payload.filePath) &&
+        (payload.startLine === undefined ||
+          (Number.isSafeInteger(payload.startLine) && (payload.startLine as number) > 0)) &&
+        (payload.endLine === undefined ||
+          (Number.isSafeInteger(payload.endLine) && (payload.endLine as number) > 0)) &&
+        Array.isArray(payload.commits) &&
+        payload.commits.every(isFileHistoryCommitShape) &&
+        typeof payload.hasMore === 'boolean'
+      );
+    case 'fileHistoryAppended':
+      return (
+        isSafeRepoRelativePath(payload.filePath) &&
+        Array.isArray(payload.commits) &&
+        payload.commits.every(isFileHistoryCommitShape) &&
+        typeof payload.hasMore === 'boolean'
       );
     case 'repoError':
       return typeof payload.message === 'string' && (payload.code === undefined || typeof payload.code === 'string');
@@ -814,6 +895,18 @@ export function isExtensionToWebviewMessage(value: unknown): value is ExtensionT
     default:
       return false;
   }
+}
+
+function isFileHistoryCommitShape(value: unknown): value is FileHistoryCommit {
+  if (!isSafeRecord(value)) {
+    return false;
+  }
+  return (
+    isCommitNodeShape(value) &&
+    isSafeRepoRelativePath(ownField(value, 'filePathAtCommit')) &&
+    (ownField(value, 'fileStatus') === undefined ||
+      typeof ownField(value, 'fileStatus') === 'string')
+  );
 }
 
 function isWorkspaceRepoInfoShape(value: unknown): value is WorkspaceRepoInfo {

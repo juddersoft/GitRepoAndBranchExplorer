@@ -1,5 +1,5 @@
 import type { SyncStatePayload, TrackingIndicatorOrder } from '../../types/messages';
-import type { BranchInfo, CommitDetails, CommitNode, ExternalIntegrationsInfo, RefBadge, RepoSnapshot, TagInfo, WorkspaceRepoInfo } from '../../types/git';
+import type { BranchInfo, CommitDetails, CommitNode, ExternalIntegrationsInfo, FileHistoryCommit, FileHistoryResult, RefBadge, RepoSnapshot, TagInfo, WorkspaceRepoInfo } from '../../types/git';
 import { collectAncestorFolderIds } from './branchFolderTree';
 
 export const NODE_BRANCHES = 'branches';
@@ -227,6 +227,8 @@ export interface ExplorerUiState {
   /** True while the extension runs a mutating Git operation (fetch/pull/push/checkout/branch). */
   isBusy: boolean;
   busyMessage: string | null;
+  fileHistory: FileHistoryResult | null;
+  selectedComparisonHashes: string[];
 }
 
 export function createInitialState(): ExplorerUiState {
@@ -265,7 +267,41 @@ export function createInitialState(): ExplorerUiState {
     },
     isBusy: false,
     busyMessage: null,
+    fileHistory: null,
+    selectedComparisonHashes: [],
   };
+}
+
+export function toggleComparisonSelection(current: readonly string[], hash: string): string[] {
+  const existing = current.indexOf(hash);
+  if (existing >= 0) {
+    return current.filter((candidate) => candidate !== hash);
+  }
+  return current.length < 2 ? [...current, hash] : [current[1], hash];
+}
+
+export function orderComparisonPair(
+  commits: readonly FileHistoryCommit[],
+  hashes: readonly string[],
+): { older: FileHistoryCommit; newer: FileHistoryCommit } | null {
+  if (hashes.length !== 2 || hashes[0] === hashes[1]) {
+    return null;
+  }
+  const selected = hashes.map((hash) => {
+    const index = commits.findIndex((commit) => commit.hash === hash);
+    return index < 0 ? null : { commit: commits[index], index };
+  });
+  const first = selected[0];
+  const second = selected[1];
+  if (first === null || second === null) {
+    return null;
+  }
+  const comparison =
+    first.commit.authorTimestamp - second.commit.authorTimestamp ||
+    second.index - first.index;
+  return comparison < 0
+    ? { older: first.commit, newer: second.commit }
+    : { older: second.commit, newer: first.commit };
 }
 
 function normalizeQuery(query: string): string {
@@ -636,5 +672,8 @@ export function reconcileStateWithSnapshot(
     selectedCommitHash: selectedExists ? state.selectedCommitHash : null,
     expandedNodes,
     collapsedRepoNodes,
+    ...(state.snapshot !== null && normalizeRepoKey(state.snapshot.repoRoot) !== normalizeRepoKey(snapshot.repoRoot)
+      ? { fileHistory: null, selectedComparisonHashes: [] }
+      : {}),
   };
 }

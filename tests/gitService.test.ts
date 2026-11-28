@@ -15,6 +15,7 @@ import {
   NETWORK_GIT_TIMEOUT_MS,
   normalizeGitHubRemoteUrl,
   parseDiffTreeOutput,
+  parseFileHistoryOutput,
   parseForEachRefOutput,
   parseGitLogOutput,
   parsePorcelainStatusZ,
@@ -872,6 +873,102 @@ describe('GitHub remote URL normalization', () => {
     );
     for (const length of [39, 41, 63, 65]) {
       expect(buildGitHubCommitUrl('https://github.com/o/r', 'a'.repeat(length))).toBeNull();
+    }
+  });
+});
+
+describe('file and line history', () => {
+  const record = (
+    hash: string,
+    subject: string,
+    statusLines = '',
+  ): string => [
+    RS,
+    hash, FS, hash.slice(0, 8), FS, '', FS, subject, FS,
+    'Ada Lovelace', FS, 'ada@example.com', FS, '2026-11-10T12:00:00+00:00', FS, '1794300000', FS,
+    statusLines,
+  ].join('');
+
+  it('parses M, A and D status lines and sets the commit-relative path', () => {
+    for (const status of ['M', 'A', 'D']) {
+      const parsed = parseFileHistoryOutput(record(sha(status === 'M' ? '1' : status === 'A' ? '2' : '3'), 'subject', `\n${status}\tsrc/file.ts\n`), 'fallback.ts');
+      expect(parsed).toHaveLength(1);
+      expect(parsed[0].fileStatus).toBe(status);
+      expect(parsed[0].filePathAtCommit).toBe('src/file.ts');
+    }
+  });
+
+  it('uses rename/copy destinations and falls back when -L emits no status line', () => {
+    const rename = parseFileHistoryOutput(record(sha('4'), 'rename', '\nR100\told.ts\tnew.ts\n'), 'old.ts');
+    expect(rename[0]).toMatchObject({ fileStatus: 'R', filePathAtCommit: 'new.ts' });
+    const copy = parseFileHistoryOutput(record(sha('5'), 'copy', '\nC095\tsrc.ts\tdst.ts\n'), 'src.ts');
+    expect(copy[0]).toMatchObject({ fileStatus: 'C', filePathAtCommit: 'dst.ts' });
+    const fallback = parseFileHistoryOutput(record(sha('6'), 'line range'), 'src/fallback.ts');
+    expect(fallback[0].filePathAtCommit).toBe('src/fallback.ts');
+  });
+
+  it('handles separator characters in subjects and skips malformed or invalid-SHA records', () => {
+    const raw = record(sha('7'), `subject${FS}with${FS}separators`, '\nM\tsrc/file.ts\n') +
+      record('not-a-sha', 'invalid') +
+      RS + 'abc' + FS + 'bad';
+    const parsed = parseFileHistoryOutput(raw, 'src/file.ts');
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0].subject).toBe(`subject${FS}with${FS}separators`);
+  });
+
+  it('rejects unsafe file paths and invalid pagination or line ranges before Git runs', async () => {
+    const runGit = vi.fn(async () => '');
+    const service = new GitService(runGit);
+    for (const bad of ['', 'x'.repeat(4097), 'bad\u0000path', '/absolute', '-option', 'C:\\secret', 'a/../b', 'a//b']) {
+      await expect(service.getFileHistory('/repo', bad)).rejects.toThrow(/Invalid repository-relative file path/);
+    }
+    for (const bad of ['', 'x'.repeat(4097), 'bad\u0000path', '/absolute', '-option', 'C:secret', 'a/../b', 'a:b']) {
+      await expect(service.getLineHistory('/repo', bad, 1, 2)).rejects.toThrow(/Invalid repository-relative file path/);
+    }
+    await expect(service.getFileHistory('/repo', 'src/file.ts', 0)).rejects.toThrow(/pagination/);
+    await expect(service.getFileHistory('/repo', 'src/file.ts', 200, -1)).rejects.toThrow(/pagination/);
+    for (const range of [[0, 1], [3, 2], [1.5, 2], [1, 1000001]]) {
+      await expect(service.getLineHistory('/repo', 'src/file.ts', range[0], range[1])).rejects.toThrow(/range|limit/);
+    }
+    await expect(service.getLineHistory('/repo', 'src/file.ts', 1, 1, 0)).rejects.toThrow(/range|limit/);
+    expect(runGit).not.toHaveBeenCalled();
+  });
+
+  it('follows renames and filters line history in a real temp repository', async () => {
+    execFileSync('git', ['--version'], { stdio: 'ignore', windowsHide: true });
+    const repo = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'grbe-file-history-')));
+    try {
+      execFileSync('git', ['init', '--quiet', repo], { windowsHide: true });
+      const git = (...args: string[]): string => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', windowsHide: true }).trim();
+      git('-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'config', 'user.name', 'Test');
+      git('-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'config', 'user.email', 'test@example.com');
+
+      fs.writeFileSync(path.join(repo, 'sample.ts'), 'line one\nline two\nline three\n');
+      git('add', 'sample.ts');
+      git('commit', '-m', 'add sample');
+      fs.appendFileSync(path.join(repo, 'sample.ts'), 'line four\n');
+      git('add', 'sample.ts');
+      git('commit', '-m', 'modify sample');
+      git('mv', 'sample.ts', 'renamed.ts');
+      git('commit', '-m', 'rename sample');
+      fs.appendFileSync(path.join(repo, 'renamed.ts'), 'line five\n');
+      git('add', 'renamed.ts');
+      git('commit', '-m', 'modify renamed');
+
+      const service = new GitService();
+      const page = await service.getFileHistory(repo, 'renamed.ts', 2, 0);
+      expect(page.commits.length).toBeGreaterThanOrEqual(1);
+      expect(page.commits[0].filePathAtCommit).toBe('renamed.ts');
+      expect(page.hasMore).toBe(true);
+      const pageTwo = await service.getFileHistory(repo, 'renamed.ts', 1, 1);
+      expect(pageTwo.commits.length).toBe(1);
+      expect(pageTwo.commits[0].filePathAtCommit).toMatch(/^(sample|renamed)\.ts$/);
+
+      const linePage = await service.getLineHistory(repo, 'renamed.ts', 4, 5, 20);
+      expect(linePage.commits.length).toBeGreaterThan(0);
+      expect(linePage.commits.every((commit) => commit.filePathAtCommit === 'renamed.ts')).toBe(true);
+    } finally {
+      fs.rmSync(repo, { recursive: true, force: true });
     }
   });
 });

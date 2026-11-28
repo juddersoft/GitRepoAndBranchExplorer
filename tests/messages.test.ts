@@ -14,6 +14,55 @@ const SHA256 = 'B'.repeat(64);
 
 const gitAction = (payload: unknown): unknown => ({ type: 'gitAction', payload });
 
+describe('Phase 20 file and line history messages', () => {
+  it('accepts valid close, pagination, compare and open-revision messages', () => {
+    expect(isWebviewToExtensionMessage({ type: 'closeFileHistory' })).toBe(true);
+    expect(isWebviewToExtensionMessage({ type: 'loadMoreFileHistory' })).toBe(true);
+    expect(isWebviewToExtensionMessage({
+      type: 'compareFileRevisions',
+      payload: { olderHash: HASH, olderPath: 'src/old.ts', newerHash: SHA256, newerPath: 'src/new.ts' },
+    })).toBe(true);
+    expect(isWebviewToExtensionMessage({
+      type: 'compareRevisionWithWorkingTree',
+      payload: { hash: HASH, filePathAtCommit: 'src/file.ts', currentFilePath: 'src/file.ts' },
+    })).toBe(true);
+    expect(isWebviewToExtensionMessage({
+      type: 'openFileAtRevision',
+      payload: { hash: HASH, filePathAtCommit: 'src/file.ts' },
+    })).toBe(true);
+  });
+
+  it('rejects invalid fields, traversal paths, absolute/drive paths, controls and extra keys', () => {
+    for (const badHash of ['HEAD', 'a'.repeat(39), 'g'.repeat(40), '../' + HASH]) {
+      expect(isWebviewToExtensionMessage({
+        type: 'openFileAtRevision',
+        payload: { hash: badHash, filePathAtCommit: 'src/file.ts' },
+      })).toBe(false);
+    }
+    for (const badPath of ['../secret', '/absolute', 'C:\\secret', 'C:secret', 'src/\u0000bad', 'src/\nbad']) {
+      expect(isWebviewToExtensionMessage({
+        type: 'openFileAtRevision',
+        payload: { hash: HASH, filePathAtCommit: badPath },
+      })).toBe(false);
+    }
+    expect(isWebviewToExtensionMessage({ type: 'closeFileHistory', extra: true })).toBe(false);
+    expect(isWebviewToExtensionMessage({ type: 'loadMoreFileHistory', payload: null })).toBe(false);
+    expect(isWebviewToExtensionMessage({ type: 'compareFileRevisions', payload: { olderHash: HASH } })).toBe(false);
+    expect(isWebviewToExtensionMessage({
+      type: 'compareRevisionWithWorkingTree',
+      payload: { hash: HASH, filePathAtCommit: 'src/file.ts', currentFilePath: 'src/file.ts', extra: true },
+    })).toBe(false);
+  });
+
+  it('rejects prototype-pollution payloads and prototype-only keys', () => {
+    const polluted = JSON.parse(
+      `{"type":"openFileAtRevision","payload":{"hash":"${HASH}","filePathAtCommit":"src/file.ts","constructor":{"prototype":{"polluted":true}}},"__proto__":{"polluted":true}}`,
+    );
+    expect(isWebviewToExtensionMessage(polluted)).toBe(false);
+    expect(isWebviewToExtensionMessage({ type: '__proto__' })).toBe(false);
+  });
+});
+
 describe('cloneRepository message validation', () => {
   it('accepts the exact clone message and rejects extra or polluted keys', () => {
     expect(isWebviewToExtensionMessage({ type: 'cloneRepository' })).toBe(true);

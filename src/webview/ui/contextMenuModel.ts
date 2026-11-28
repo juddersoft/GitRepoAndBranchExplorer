@@ -1,10 +1,10 @@
-import type { CommitNode, RepoSnapshot, StashInfo, WorktreeInfo } from '../../types/git';
+import type { CommitNode, FileHistoryCommit, RepoSnapshot, StashInfo, WorktreeInfo } from '../../types/git';
 import type { BranchInfo } from '../../types/git';
 import type { GitAction, TrackingIndicatorOrder } from '../../types/messages';
 import { planTrackedFetch } from '../../git/trackedFetch';
 import { parseUpstreamRef } from '../../git/remoteUrlBuilder';
 import type { ExplorerUiState, RefTarget } from './state';
-import { getHeadHash, isAncestorOfHead } from './state';
+import { getHeadHash, isAncestorOfHead, orderComparisonPair } from './state';
 
 export type MenuActionId =
   | 'checkout'
@@ -51,6 +51,9 @@ export type MenuActionId =
   | 'openRepoInBrowser'
   | 'openBranchInBrowser'
   | 'openCommitInBrowser'
+  | 'compareSelectedRevisions'
+  | 'compareWithWorkingTree'
+  | 'openFileAtRevision'
   | 'openGitHub';
 
 export type MenuEntry =
@@ -465,6 +468,29 @@ export function buildCommitMenu(snapshot: RepoSnapshot, state: ExplorerUiState, 
         : 'This repository has no supported remote web URL.',
     ),
   ];
+}
+
+export function buildFileHistoryCommitMenu(
+  state: ExplorerUiState,
+  commit: FileHistoryCommit,
+): MenuEntry[] {
+  const entries: MenuEntry[] = [];
+  const pair = state.fileHistory
+    ? orderComparisonPair(state.fileHistory.commits, state.selectedComparisonHashes)
+    : null;
+  if (pair !== null && state.selectedComparisonHashes.includes(commit.hash)) {
+    entries.push(item('compareSelectedRevisions', 'Compare Selected Revisions (OLDER \u2194 NEWER)'), SEPARATOR);
+  }
+  entries.push(
+    item('compareWithWorkingTree', 'Compare with Working Tree'),
+    item('openFileAtRevision', 'Open This Revision'),
+    SEPARATOR,
+    item('copyHash', 'Copy Commit Hash'),
+  );
+  if (state.integrations.remoteWebUrl || state.integrations.githubRemoteUrl) {
+    entries.push(item('openCommitInBrowser', 'Open Commit in Browser'));
+  }
+  return entries;
 }
 
 /** Keeps a menu of `width` x `height` inside an 8px viewport gutter, preferring the pointer position. */

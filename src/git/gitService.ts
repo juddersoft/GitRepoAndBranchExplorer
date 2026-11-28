@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import type { BranchInfo, ChangedFileEntry, CommitDetails, CommitNode, RefBadge, RemoteGroup, RepoSnapshot, StashInfo, TagInfo, WorkingTreeFile, WorktreeInfo } from '../types/git';
-import { isChangedFileStatus, isSafeRepoRelativePath } from '../types/messages';
+import type { BranchInfo, ChangedFileEntry, CommitDetails, CommitNode, FileHistoryCommit, RefBadge, RemoteGroup, RepoSnapshot, StashInfo, TagInfo, WorkingTreeFile, WorktreeInfo } from '../types/git';
+import { isChangedFileStatus, isSafeRepoRelativePath, MAX_FILE_PATH_LENGTH } from '../types/messages';
 import type { ExecGitOptions } from './gitExecutor';
 import { execGit, GitExecutionError, validateGitRef } from './gitExecutor';
 import type { TrackedFetchResult } from './trackedFetch';
@@ -32,6 +32,7 @@ export const FOR_EACH_REF_FORMAT =
   '%(HEAD)%1f%(refname)%1f%(refname:short)%1f%(objectname)%1f%(upstream:short)%1f%(upstream:track)%1f%(*objectname)%1f%(symref)%1e';
 
 export const LOG_FORMAT = '%H%x1f%h%x1f%P%x1f%s%x1f%an%x1f%ae%x1f%aI%x1f%at%x1e';
+export const FILE_HISTORY_FORMAT = '%x1e%H%x1f%h%x1f%P%x1f%s%x1f%an%x1f%ae%x1f%aI%x1f%at%x1f';
 
 export interface ParsedRefs {
   localBranches: BranchInfo[];
@@ -479,6 +480,80 @@ export function parseGitLogOutput(rawOutput: string, refMap: Map<string, RefBadg
   return commits;
 }
 
+export function parseFileHistoryOutput(rawOutput: string, fallbackFilePath: string): FileHistoryCommit[] {
+  const commits: FileHistoryCommit[] = [];
+  for (const record of splitRecords(rawOutput)) {
+    const lineBreak = record.indexOf('\n');
+    const header = (lineBreak < 0 ? record : record.slice(0, lineBreak)).replace(/\r$/, '');
+    const fields = header.split(FIELD_SEP);
+    if (fields[fields.length - 1] === '') {
+      fields.pop();
+    }
+    if (fields.length < 8) {
+      continue;
+    }
+    const [hash, , parentsField] = fields;
+    if (!HASH_PATTERN.test(hash)) {
+      continue;
+    }
+    const subject = fields.slice(3, fields.length - 4).join(FIELD_SEP);
+    const [authorName, authorEmail, authorDateIso, timestampField] = fields.slice(-4);
+    const authorTimestamp = Number.parseInt(timestampField, 10);
+    let fileStatus: string | undefined;
+    let filePathAtCommit = fallbackFilePath;
+    const statusLines = lineBreak < 0 ? [] : record.slice(lineBreak + 1).split(/\r?\n/);
+    for (const rawLine of statusLines) {
+      const line = rawLine.trimEnd();
+      if (line.length === 0) {
+        continue;
+      }
+      const statusFields = line.split('\t');
+      const status = statusFields[0]?.[0];
+      if ((status === 'M' || status === 'A' || status === 'D') && statusFields.length === 2) {
+        fileStatus = status;
+        filePathAtCommit = statusFields[1];
+        break;
+      }
+      if ((status === 'R' || status === 'C') && statusFields.length === 3) {
+        fileStatus = status;
+        filePathAtCommit = statusFields[2];
+        break;
+      }
+    }
+    commits.push({
+      hash,
+      shortHash: hash.slice(0, 8),
+      parents: parentsField.split(' ').filter(Boolean),
+      subject,
+      authorName,
+      authorEmail,
+      authorDateIso,
+      authorTimestamp: Number.isFinite(authorTimestamp) ? authorTimestamp : 0,
+      refs: [],
+      filePathAtCommit,
+      ...(fileStatus === undefined ? {} : { fileStatus }),
+    });
+  }
+  return commits;
+}
+
+function validateFileHistoryPath(relativePath: string, rejectColon = false): string {
+  const cleanPath = relativePath.replace(/\\/g, '/');
+  if (
+    cleanPath.length === 0 ||
+    cleanPath.length > MAX_FILE_PATH_LENGTH ||
+    /[\x00-\x1f\x7f]/.test(cleanPath) ||
+    cleanPath.startsWith('/') ||
+    cleanPath.startsWith('-') ||
+    /^[A-Za-z]:/.test(cleanPath) ||
+    cleanPath.split('/').some((segment) => segment === '' || segment === '.' || segment === '..') ||
+    (rejectColon && cleanPath.includes(':'))
+  ) {
+    throw new Error('Invalid repository-relative file path.');
+  }
+  return cleanPath;
+}
+
 function isExpectedFailure(err: unknown): boolean {
   return err instanceof GitExecutionError && err.code === 'COMMAND_FAILED' && err.exitCode === 1;
 }
@@ -610,6 +685,66 @@ export class GitService {
     return parsePorcelainStatusZ(
       await this.runGit(['status', '--porcelain=v1', '-z'], repoRoot),
     );
+  }
+
+  public async getFileHistory(
+    repoRoot: string,
+    relativePath: string,
+    limit = 200,
+    skip = 0,
+  ): Promise<{ commits: FileHistoryCommit[]; hasMore: boolean }> {
+    const cleanPath = validateFileHistoryPath(relativePath);
+    if (!Number.isSafeInteger(limit) || limit <= 0 || !Number.isSafeInteger(skip) || skip < 0) {
+      throw new Error('Invalid file history pagination arguments.');
+    }
+    const parsed = parseFileHistoryOutput(
+      await this.runGit([
+        'log',
+        '--follow',
+        '--name-status',
+        '--date-order',
+        `--max-count=${limit + 1}`,
+        ...(skip > 0 ? [`--skip=${skip}`] : []),
+        `--format=${FILE_HISTORY_FORMAT}`,
+        '--',
+        cleanPath,
+      ], repoRoot),
+      cleanPath,
+    );
+    return { commits: parsed.slice(0, limit), hasMore: parsed.length > limit };
+  }
+
+  public async getLineHistory(
+    repoRoot: string,
+    relativePath: string,
+    startLine: number,
+    endLine: number,
+    limit = 200,
+  ): Promise<{ commits: FileHistoryCommit[]; hasMore: boolean }> {
+    const cleanPath = validateFileHistoryPath(relativePath, true);
+    if (
+      !Number.isSafeInteger(startLine) ||
+      !Number.isSafeInteger(endLine) ||
+      startLine < 1 ||
+      startLine > endLine ||
+      endLine > 1_000_000 ||
+      !Number.isSafeInteger(limit) ||
+      limit <= 0
+    ) {
+      throw new Error('Invalid line history range or limit.');
+    }
+    const parsed = parseFileHistoryOutput(
+      await this.runGit([
+        'log',
+        '-s',
+        `--max-count=${limit + 1}`,
+        `--format=${FILE_HISTORY_FORMAT}`,
+        '-L',
+        `${startLine},${endLine}:${cleanPath}`,
+      ], repoRoot),
+      cleanPath,
+    );
+    return { commits: parsed.slice(0, limit), hasMore: parsed.length > limit };
   }
 
   public async stashPush(

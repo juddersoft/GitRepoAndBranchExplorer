@@ -11,10 +11,14 @@ import {
 import { isValidCommitHash } from './git/gitService';
 import {
   CLONE_REPOSITORY_COMMAND,
+  COMPARE_WITH_PREVIOUS_REVISION_COMMAND,
   GitRepoPanel,
+  OPEN_PREVIOUS_REVISION_COMMAND,
   OPEN_REPOSITORY_COMMAND,
   REFRESH_COMMAND,
   STASH_FILE_COMMAND,
+  VIEW_FILE_HISTORY_COMMAND,
+  VIEW_LINE_HISTORY_COMMAND,
 } from './webview/GitRepoPanel';
 import { SidebarViewProvider } from './webview/SidebarViewProvider';
 
@@ -44,6 +48,19 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand(
       STASH_FILE_COMMAND,
       (uri?: vscode.Uri) => GitRepoPanel.stashFile(uri),
+    ),
+    vscode.commands.registerCommand(
+      VIEW_FILE_HISTORY_COMMAND,
+      (uri?: vscode.Uri) => GitRepoPanel.viewFileHistory(uri),
+    ),
+    vscode.commands.registerCommand(VIEW_LINE_HISTORY_COMMAND, () => GitRepoPanel.viewLineHistory()),
+    vscode.commands.registerCommand(
+      COMPARE_WITH_PREVIOUS_REVISION_COMMAND,
+      (uri?: vscode.Uri) => GitRepoPanel.compareWithPreviousRevision(uri),
+    ),
+    vscode.commands.registerCommand(
+      OPEN_PREVIOUS_REVISION_COMMAND,
+      (uri?: vscode.Uri) => GitRepoPanel.openPreviousRevision(uri),
     ),
     vscode.commands.registerCommand(
       'gitRepoAndBranchExplorer.toggleInlineBlame',

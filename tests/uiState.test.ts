@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { BranchInfo, CommitNode, RefBadge, RepoSnapshot } from '../src/types/git';
+import type { BranchInfo, CommitNode, FileHistoryCommit, RefBadge, RepoSnapshot } from '../src/types/git';
 import type { ExplorerUiState } from '../src/webview/ui/state';
 import {
   cacheCommitDetails,
@@ -29,10 +29,80 @@ import {
   selectRefPatch,
   summarizeRefToggles,
   toggleNodeExpansion,
+  toggleComparisonSelection,
+  orderComparisonPair,
   trackingSummary,
 } from '../src/webview/ui/state';
 
 const sha = (char: string): string => char.repeat(40);
+
+describe('file history comparison selection', () => {
+  it('adds, removes and slides a two-revision selection', () => {
+    const a = sha('a');
+    const b = sha('b');
+    const c = sha('c');
+    expect(toggleComparisonSelection([], a)).toEqual([a]);
+    expect(toggleComparisonSelection([a], b)).toEqual([a, b]);
+    expect(toggleComparisonSelection([a, b], b)).toEqual([a]);
+    expect(toggleComparisonSelection([a, b], c)).toEqual([b, c]);
+  });
+
+  const historyCommit = (char: string, timestamp: number): FileHistoryCommit => ({
+    hash: sha(char),
+    shortHash: sha(char).slice(0, 8),
+    parents: [],
+    subject: char,
+    authorName: 'Ada',
+    authorEmail: 'ada@example.com',
+    authorDateIso: '2026-11-10T12:00:00Z',
+    authorTimestamp: timestamp,
+    refs: [],
+    filePathAtCommit: 'src/file.ts',
+  });
+
+  it('returns null for fewer than two valid distinct selections', () => {
+    const commits = [historyCommit('a', 100)];
+    expect(orderComparisonPair(commits, [])).toBeNull();
+    expect(orderComparisonPair(commits, [commits[0].hash])).toBeNull();
+    expect(orderComparisonPair(commits, [commits[0].hash, commits[0].hash])).toBeNull();
+  });
+
+  it('orders older timestamps first regardless of selection order', () => {
+    const older = historyCommit('a', 100);
+    const newer = historyCommit('b', 200);
+    expect(orderComparisonPair([older, newer], [newer.hash, older.hash]))
+      .toEqual({ older, newer });
+  });
+
+  it('uses higher array index as tie-breaker for equal timestamps', () => {
+    const first = historyCommit('a', 100);
+    const second = historyCommit('b', 100);
+    expect(orderComparisonPair([first, second], [first.hash, second.hash]))
+      .toEqual({ older: second, newer: first });
+  });
+
+  it('clears file history and comparison selection when a snapshot changes repository', () => {
+    const initial = createInitialState();
+    const first: RepoSnapshot = { ...snapshot, repoRoot: '/repo/a' };
+    const second: RepoSnapshot = { ...snapshot, repoRoot: '/repo/b' };
+    const withHistory: ExplorerUiState = {
+      ...initial,
+      snapshot: first,
+      fileHistory: {
+        kind: 'file',
+        repoRoot: '/repo/a',
+        filePath: 'src/file.ts',
+        commits: [],
+        hasMore: false,
+      },
+      selectedComparisonHashes: [sha('a'), sha('b')],
+    };
+    expect(reconcileStateWithSnapshot(withHistory, second, new Set())).toMatchObject({
+      fileHistory: null,
+      selectedComparisonHashes: [],
+    });
+  });
+});
 
 describe('trackingSummary', () => {
   const local = (patch: Partial<BranchInfo> = {}): BranchInfo => ({ ...branch('main', sha('a')), upstream: 'origin/main', ...patch });

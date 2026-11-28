@@ -58,12 +58,49 @@ export function isAuthorizedRepoRoot(
   return false;
 }
 
-/** Builds a read-only URI whose path ends with the file name so VS Code picks the right language mode. */
-export function buildShowUri(repoRoot: string, revSpec: string, filePath: string): vscode.Uri {
+export function buildVersionedDisplayPath(filePath: string, versionTag: string): string {
+  const normalizedPath = filePath.replace(/\\/g, '/');
+  const slash = normalizedPath.lastIndexOf('/');
+  const directory = slash < 0 ? '' : normalizedPath.slice(0, slash + 1);
+  const name = normalizedPath.slice(slash + 1);
+  const dot = name.lastIndexOf('.');
+  const hasExtension = dot > 0;
+  const stem = hasExtension ? name.slice(0, dot) : name;
+  const extension = hasExtension ? name.slice(dot) : '';
+  return `${directory}${stem} [${versionTag}]${extension}`;
+}
+
+export function formatRevisionTag(
+  role: 'OLDER' | 'NEWER' | 'PREVIOUS' | 'COMMIT',
+  shortHash: string,
+  isoDate?: string,
+): string {
+  const date = revisionDatePart(isoDate);
+  return `${role} ${shortHash}${date === undefined ? '' : ` \u2022 ${date}`}`;
+}
+
+function revisionDatePart(isoDate: string | undefined): string | undefined {
+  if (isoDate === undefined || !/^\d{4}-\d{2}-\d{2}/.test(isoDate)) {
+    return undefined;
+  }
+  const datePart = isoDate.slice(0, 10);
+  const parsed = new Date(`${datePart}T00:00:00.000Z`);
+  return Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== datePart
+    ? undefined
+    : datePart;
+}
+
+/** Builds a read-only URI whose display path preserves the extension and labels its version. */
+export function buildShowUri(
+  repoRoot: string,
+  revSpec: string,
+  filePath: string,
+  displayTag?: string,
+): vscode.Uri {
   validateRevSpec(revSpec);
   return vscode.Uri.from({
     scheme: GIT_SHOW_SCHEME,
-    path: `/${filePath}`,
+    path: `/${displayTag === undefined ? filePath : buildVersionedDisplayPath(filePath, displayTag)}`,
     query: JSON.stringify({ repoRoot, revSpec } satisfies ShowUriQuery),
   });
 }
@@ -91,6 +128,90 @@ export class GitShowContentProvider implements vscode.TextDocumentContentProvide
       throw new Error(REPOSITORY_ROOT_NOT_AUTHORIZED_MESSAGE);
     }
     return this.gitService.getFileContentAtRevision(repoRoot, revSpec);
+  }
+
+  public async openTwoRevisionFileDiff(
+    repoRoot: string,
+    older: { hash: string; shortHash: string; path: string; isoDate?: string },
+    newer: { hash: string; shortHash: string; path: string; isoDate?: string },
+  ): Promise<void> {
+    this.ensureTrustedWorkspace();
+    const leftUri = buildShowUri(
+      repoRoot,
+      `${older.hash}:${older.path}`,
+      older.path,
+      formatRevisionTag('OLDER', older.shortHash, older.isoDate),
+    );
+    const rightUri = buildShowUri(
+      repoRoot,
+      `${newer.hash}:${newer.path}`,
+      newer.path,
+      formatRevisionTag('NEWER', newer.shortHash, newer.isoDate),
+    );
+    const oldName = path.posix.basename(older.path);
+    const newName = path.posix.basename(newer.path);
+    const label = oldName === newName ? newName : `${oldName} \u2192 ${newName}`;
+    const olderDatePart = revisionDatePart(older.isoDate);
+    const newerDatePart = revisionDatePart(newer.isoDate);
+    const olderDate = olderDatePart === undefined ? '' : ` \u2022 ${olderDatePart}`;
+    const newerDate = newerDatePart === undefined ? '' : ` \u2022 ${newerDatePart}`;
+    await vscode.commands.executeCommand(
+      'vscode.diff',
+      leftUri,
+      rightUri,
+      `${label} \u2014 OLDER (${older.shortHash}${olderDate}) \u2194 NEWER (${newer.shortHash}${newerDate})`,
+      { preview: true },
+    );
+  }
+
+  public async openRevisionVsWorkingTreeDiff(
+    repoRoot: string,
+    revision: { hash: string; shortHash: string; pathAtCommit: string; isoDate?: string },
+    currentRelativePath: string,
+  ): Promise<void> {
+    this.ensureTrustedWorkspace();
+    const absolutePath = path.resolve(repoRoot, currentRelativePath);
+    const relative = path.relative(path.resolve(repoRoot), absolutePath);
+    if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      throw new Error('Working-tree file must be inside the repository.');
+    }
+    const leftUri = buildShowUri(
+      repoRoot,
+      `${revision.hash}:${revision.pathAtCommit}`,
+      revision.pathAtCommit,
+      formatRevisionTag('OLDER', revision.shortHash, revision.isoDate),
+    );
+    const datePart = revisionDatePart(revision.isoDate);
+    const date = datePart === undefined ? '' : ` \u2022 ${datePart}`;
+    await vscode.commands.executeCommand(
+      'vscode.diff',
+      leftUri,
+      vscode.Uri.file(absolutePath),
+      `${path.posix.basename(currentRelativePath)} \u2014 OLDER (${revision.shortHash}${date}) \u2194 WORKING TREE`,
+      { preview: true },
+    );
+  }
+
+  public async openSingleRevisionFile(
+    repoRoot: string,
+    revision: { hash: string; shortHash: string; pathAtCommit: string; isoDate?: string },
+  ): Promise<void> {
+    this.ensureTrustedWorkspace();
+    await vscode.window.showTextDocument(
+      buildShowUri(
+        repoRoot,
+        `${revision.hash}:${revision.pathAtCommit}`,
+        revision.pathAtCommit,
+        formatRevisionTag('COMMIT', revision.shortHash, revision.isoDate),
+      ),
+      { preview: true },
+    );
+  }
+
+  private ensureTrustedWorkspace(): void {
+    if (!vscode.workspace.isTrusted) {
+      throw new Error(WORKSPACE_TRUST_REQUIRED_MESSAGE);
+    }
   }
 }
 
