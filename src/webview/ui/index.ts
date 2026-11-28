@@ -123,6 +123,8 @@ function runCommitMenuAction(id: MenuActionId, commit: CommitNode): void {
     case 'resetHard':
     case 'compareWithCurrent':
     case 'compareWithOther':
+    case 'amendCommit':
+    case 'createPatch':
       postGitAction(id, commit.hash);
       break;
     case 'openGitGraph':

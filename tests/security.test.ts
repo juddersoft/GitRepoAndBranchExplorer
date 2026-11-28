@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { validateGitRef } from '../src/git/gitExecutor';
-import { parseRemoteHostInfo, validateCloneUrl } from '../src/git/remoteUrlBuilder';
+import { buildRemoteFileUrl, parseRemoteHostInfo, validateCloneUrl } from '../src/git/remoteUrlBuilder';
 import { buildGitHubCommitUrl, buildRefMap, GitService, isValidCommitHash, parseForEachRefOutput, parseGitLogOutput } from '../src/git/gitService';
 import { isExtensionToWebviewMessage, isValidWebviewMessage, isWebviewToExtensionMessage } from '../src/types/messages';
 import { buildCspHeader, getNonce } from '../src/webview/security';
@@ -101,6 +101,54 @@ describe('Phase 20 reference comparison security', () => {
     const runGit = vi.fn(async () => '');
     await expect(new GitService(runGit).compareReferences('/repo', ref, 'main')).rejects.toThrow();
     expect(runGit).not.toHaveBeenCalled();
+  });
+
+  describe('Phase 20 Slice 3 convenience-action security', () => {
+    const github = parseRemoteHostInfo('https://github.com/owner/repo')!;
+
+    it('rejects adversarial remote file URL inputs', () => {
+      for (const relativePath of ['../secret', 'src/../../secret', 'src/\0bad', 'src/\nbad', '']) {
+        expect(buildRemoteFileUrl(
+          github,
+          { kind: 'branch', value: 'main' },
+          relativePath,
+        )).toBeNull();
+      }
+      for (const ref of ['main\n--upload-pack=evil', '../main']) {
+        expect(buildRemoteFileUrl(github, { kind: 'branch', value: ref }, 'src/file.ts')).toBeNull();
+        expect(buildRemoteFileUrl(github, { kind: 'commit', value: ref }, 'src/file.ts')).toBeNull();
+      }
+      for (const ref of ['HEAD', 'g'.repeat(40)]) {
+        expect(buildRemoteFileUrl(github, { kind: 'commit', value: ref }, 'src/file.ts')).toBeNull();
+      }
+      expect(buildRemoteFileUrl(
+        { ...github, webBaseUrl: 'https://user:pass@github.com/owner/repo' },
+        { kind: 'branch', value: 'main' },
+        'src/file.ts',
+      )).toBeNull();
+    });
+
+    it('rejects hostile amend messages and patch paths before Git starts', async () => {
+      const runGit = vi.fn(async () => '');
+      const service = new GitService(runGit);
+      for (const message of [' ', 'message\0--amend', 'message\r--exec=evil', 'message\u007f']) {
+        await expect(service.amendLastCommit('/repo', message)).rejects.toThrow();
+      }
+      for (const patchPath of ['', ' ', '--apply', 'patch\0file', 'patch\nfile']) {
+        await expect(service.applyPatchFile('/repo', patchPath)).rejects.toThrow();
+      }
+      expect(runGit).not.toHaveBeenCalled();
+    });
+
+    it('keeps file diff stats out of dangerous DOM sinks across the UI', () => {
+      const uiDir = path.resolve('src/webview/ui');
+      for (const name of fs.readdirSync(uiDir).filter((entry) => entry.endsWith('.ts'))) {
+        const source = fs.readFileSync(path.join(uiDir, name), 'utf8');
+        expect(source, name).not.toMatch(/\.(innerHTML|outerHTML)\b|insertAdjacentHTML|document\.write|eval\s*\(/);
+      }
+      const historyPane = fs.readFileSync(path.join(uiDir, 'HistoryPane.ts'), 'utf8');
+      expect(historyPane).toContain('file-diff-stat');
+    });
   });
 
   it('keeps the compare banner and changed-file list out of static DOM sinks', () => {

@@ -47,7 +47,10 @@ export type GitAction =
   | 'createWorktree'
   | 'openWorktree'
   | 'removeWorktree'
-  | 'copyWorktreePath';
+  | 'copyWorktreePath'
+  | 'amendCommit'
+  | 'createPatch'
+  | 'applyPatch';
 
 export const GIT_ACTION_LABELS: Readonly<Record<GitAction, string>> = {
   fetch: 'Fetch',
@@ -82,6 +85,9 @@ export const GIT_ACTION_LABELS: Readonly<Record<GitAction, string>> = {
   openWorktree: 'Open Worktree in New Window',
   removeWorktree: 'Remove Worktree',
   copyWorktreePath: 'Copy Worktree Path',
+  amendCommit: 'Amend Last Commit',
+  createPatch: 'Create Patch',
+  applyPatch: 'Apply Patch',
 };
 
 /** What a `gitAction` must carry in `target`: nothing, a ref/hash, a path, or a stash reflog selector. */
@@ -120,6 +126,9 @@ export const GIT_ACTION_TARGETS: Readonly<Record<GitAction, GitActionTargetKind>
   openWorktree: 'path',
   removeWorktree: 'path',
   copyWorktreePath: 'path',
+  amendCommit: 'commit',
+  createPatch: 'commit',
+  applyPatch: 'none',
 };
 
 export interface GitActionPayload {

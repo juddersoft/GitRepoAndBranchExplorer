@@ -12,6 +12,7 @@ import {
   buildRemoteBranchUrl,
   buildRemoteCommitUrl,
   buildRemoteCreatePrUrl,
+  buildRemoteFileUrl,
   buildRemoteRepoUrl,
   classifyRemoteDestination,
   isDefaultBranchName,
@@ -1811,6 +1812,15 @@ export class RepoCoordinator implements vscode.Disposable {
       case 'copyWorktreePath':
         await this.handleCopyWorktreePath(target);
         break;
+      case 'amendCommit':
+        await this.handleAmendCommit(target);
+        break;
+      case 'createPatch':
+        await this.handleCreatePatch(target);
+        break;
+      case 'applyPatch':
+        await this.applyPatch();
+        break;
       case 'removeWorktree':
         await this.handleRemoveWorktree(target);
         break;
@@ -1818,6 +1828,227 @@ export class RepoCoordinator implements vscode.Disposable {
       case 'compareWithOther':
         await this.handleRefComparison(action, target);
         break;
+    }
+  }
+
+  private async handleAmendCommit(targetHash?: string): Promise<void> {
+    const snapshot = this.lastSnapshot;
+    if (!this.ensureTrustedWorkspace() || snapshot === null) {
+      return;
+    }
+    if (snapshot.isDetachedHead) {
+      void vscode.window.showWarningMessage('Cannot amend while HEAD is detached.');
+      return;
+    }
+    if (targetHash === undefined || !isValidCommitHash(targetHash)) {
+      void vscode.window.showWarningMessage('The selected commit is not a valid commit hash.');
+      return;
+    }
+    const currentBranch = snapshot.localBranches.find((branch) => branch.isCurrent);
+    const headHash = currentBranch?.tipHash.toLowerCase();
+    if (
+      currentBranch === undefined ||
+      headHash === undefined ||
+      targetHash.toLowerCase() !== headHash
+    ) {
+      void vscode.window.showWarningMessage('Only the current branch tip can be amended. Refresh and try again.');
+      return;
+    }
+    if (
+      currentBranch.upstream !== null &&
+      currentBranch.upstream !== '' &&
+      !currentBranch.upstreamGone &&
+      currentBranch.ahead === 0
+    ) {
+      const choice = await vscode.window.showQuickPick(
+        ['Amend Anyway', 'Cancel'],
+        {
+          title: 'Amend Pushed Commit?',
+          placeHolder: 'HEAD appears to be pushed to upstream. Amending rewrites local commit history.',
+          ignoreFocusOut: true,
+        },
+      );
+      if (choice !== 'Amend Anyway') {
+        return;
+      }
+    }
+
+    const details = await this.gitService.getCommitDetails(snapshot.repoRoot, headHash).catch((err: unknown) => {
+      void vscode.window.showErrorMessage(`Could not read the current commit message: ${describeError(err)}`);
+      return null;
+    });
+    if (details === null) {
+      return;
+    }
+    const message = details.body || snapshot.commits.find((commit) => commit.hash === headHash)?.subject || '';
+    const newMessage = await vscode.window.showInputBox({
+      title: 'Amend Last Commit',
+      prompt: 'Edit commit message (includes any currently staged changes)',
+      value: message,
+      ignoreFocusOut: true,
+      validateInput: (value) => {
+        if (!value.trim()) {
+          return 'Commit message is required.';
+        }
+        if (/[\x00-\x08\x0b-\x0e\x1f\x7f]/.test(value)) {
+          return 'Commit message cannot contain NUL or control characters.';
+        }
+        return undefined;
+      },
+    });
+    if (newMessage === undefined) {
+      return;
+    }
+    await this.runGitOperation(
+      'Amending last commit',
+      (root) => this.gitService.amendLastCommit(root, newMessage),
+    );
+  }
+
+  private async handleCreatePatch(targetHash?: string): Promise<void> {
+    const snapshot = this.lastSnapshot;
+    if (!this.ensureTrustedWorkspace() || snapshot === null) {
+      return;
+    }
+    if (targetHash === undefined || !isValidCommitHash(targetHash)) {
+      void vscode.window.showWarningMessage('The selected commit is not a valid commit hash.');
+      return;
+    }
+    const normalizedHash = targetHash.toLowerCase();
+    const commit = snapshot.commits.find((candidate) => candidate.hash === normalizedHash);
+    if (commit === undefined) {
+      void vscode.window.showWarningMessage('That commit is no longer available. Refresh and try again.');
+      return;
+    }
+    let patchText: string;
+    try {
+      patchText = await this.gitService.createCommitPatch(snapshot.repoRoot, normalizedHash);
+    } catch (err) {
+      void vscode.window.showErrorMessage(`Could not create patch: ${describeError(err)}`);
+      return;
+    }
+    const slug = commit.subject
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 48) || 'commit';
+    const defaultName = `${normalizedHash.slice(0, 8)}-${slug}.patch`;
+    const saveUri = await vscode.window.showSaveDialog({
+      defaultUri: vscode.Uri.file(path.join(snapshot.repoRoot, defaultName)),
+      filters: { 'Patch Files': ['patch', 'diff'] },
+      saveLabel: 'Save Patch',
+    });
+    if (saveUri === undefined) {
+      return;
+    }
+    if (!this.ensureTrustedWorkspace()) {
+      return;
+    }
+    try {
+      await fs.promises.writeFile(saveUri.fsPath, patchText, 'utf8');
+      void vscode.window.showInformationMessage(
+        `Saved patch to ${path.basename(saveUri.fsPath)}.`,
+      );
+    } catch (err) {
+      void vscode.window.showErrorMessage(`Could not save patch: ${describeError(err)}`);
+    }
+  }
+
+  public async applyPatch(): Promise<void> {
+    if (!this.ensureTrustedWorkspace()) {
+      return;
+    }
+    if (this.lastSnapshot === null) {
+      void vscode.window.showInformationMessage('No Git repository is loaded.');
+      return;
+    }
+    const selected = await vscode.window.showOpenDialog({
+      canSelectFiles: true,
+      canSelectFolders: false,
+      canSelectMany: false,
+      filters: { 'Patch Files': ['patch', 'diff'] },
+      openLabel: 'Apply Patch',
+    });
+    const patchUri = selected?.[0];
+    if (patchUri === undefined) {
+      return;
+    }
+    const succeeded = await this.runGitOperation(
+      `Applying patch ${path.basename(patchUri.fsPath)}`,
+      (root) => this.gitService.applyPatchFile(root, patchUri.fsPath),
+      'The patch did not apply cleanly. No files were modified if the pre-check failed.',
+    );
+    if (succeeded) {
+      void vscode.window.showInformationMessage(
+        `Applied patch ${path.basename(patchUri.fsPath)}.`,
+      );
+    }
+  }
+
+  public async copyRemoteFileUrlByUri(uri?: vscode.Uri): Promise<void> {
+    if (!this.ensureTrustedWorkspace()) {
+      return;
+    }
+    const targetUri = uri ?? vscode.window.activeTextEditor?.document.uri;
+    const target = await this.resolveHistoryFileTarget(targetUri);
+    if (target === null) {
+      return;
+    }
+    const remoteHost = await this.resolveRemoteHost(target.repoRoot);
+    if (remoteHost === null) {
+      void vscode.window.showWarningMessage(
+        'No supported hosted remote (GitHub, GitHub Enterprise, Azure DevOps, GitLab, or Bitbucket) found for this repository.',
+      );
+      return;
+    }
+
+    const matchingSnapshot =
+      this.lastSnapshot !== null &&
+      normalizeRepoRootPath(this.lastSnapshot.repoRoot) === normalizeRepoRootPath(target.repoRoot)
+        ? this.lastSnapshot
+        : null;
+    let ref: { kind: 'branch' | 'commit'; value: string };
+    if (
+      matchingSnapshot !== null &&
+      !matchingSnapshot.isDetachedHead &&
+      matchingSnapshot.currentBranch.length > 0
+    ) {
+      ref = { kind: 'branch', value: matchingSnapshot.currentBranch };
+    } else {
+      const headHash = await this.gitService.resolveCommitHash(target.repoRoot, 'HEAD');
+      if (headHash === null) {
+        void vscode.window.showWarningMessage('Could not resolve HEAD for this repository.');
+        return;
+      }
+      ref = { kind: 'commit', value: headHash };
+    }
+
+    let startLine: number | undefined;
+    let endLine: number | undefined;
+    const editor = vscode.window.activeTextEditor;
+    if (
+      editor !== undefined &&
+      normalizeRepoRootPath(editor.document.uri.fsPath) === normalizeRepoRootPath(targetUri?.fsPath ?? '')
+    ) {
+      startLine = editor.selection.start.line + 1;
+      endLine = editor.selection.isEmpty
+        ? undefined
+        : editor.selection.end.character === 0 && editor.selection.end.line > editor.selection.start.line
+          ? editor.selection.end.line
+          : editor.selection.end.line + 1;
+    }
+    const url = buildRemoteFileUrl(remoteHost, ref, target.relativePath, startLine, endLine);
+    if (url === null) {
+      void vscode.window.showWarningMessage('Could not build a valid remote URL for this file.');
+      return;
+    }
+    await vscode.env.clipboard.writeText(url);
+    const action = await vscode.window.showInformationMessage(
+      'Copied remote file URL to clipboard.',
+      'Open in Browser',
+    );
+    if (action === 'Open in Browser') {
+      await vscode.env.openExternal(vscode.Uri.parse(url, true));
     }
   }
 

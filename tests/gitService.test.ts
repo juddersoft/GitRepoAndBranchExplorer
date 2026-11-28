@@ -15,6 +15,7 @@ import {
   NETWORK_GIT_TIMEOUT_MS,
   normalizeGitHubRemoteUrl,
   parseDiffTreeOutput,
+  parseDiffTreeNumstat,
   parseFileHistoryOutput,
   parseForEachRefOutput,
   parseGitLogOutput,
@@ -732,6 +733,23 @@ describe('parseDiffTreeOutput', () => {
     ]);
   });
 
+  describe('parseDiffTreeNumstat', () => {
+    it('parses numeric, binary and rename/copy records by destination path', () => {
+      const stats = parseDiffTreeNumstat(
+        '12\t3\tsrc/changed.ts\0-\t-\tassets/image.png\0'
+        + '0\t0\t\0old name.ts\0new name.ts\0'
+        + '4\t2\t\0src/original.ts\0src/copied.ts\0',
+      );
+
+      expect([...stats]).toEqual([
+        ['src/changed.ts', { additions: 12, deletions: 3 }],
+        ['assets/image.png', { isBinary: true }],
+        ['new name.ts', { additions: 0, deletions: 0 }],
+        ['src/copied.ts', { additions: 4, deletions: 2 }],
+      ]);
+    });
+  });
+
   it('parses renames and copies with their score and oldPath', () => {
     expect(parseDiffTreeOutput(z('R100', 'a b.txt', 'c d.txt', 'C075', 'src/x.ts', 'src/y.ts', 'M', 'z.ts'))).toEqual([
       { status: 'R', path: 'c d.txt', oldPath: 'a b.txt' },
@@ -1009,6 +1027,34 @@ describe('GitService operations (fake runner)', () => {
       upstreamGone: false,
     };
   }
+
+  it('rejects unsafe amend messages before spawning Git', async () => {
+    for (const message of ['', '   ', 'bad\0message', 'bad\u000bmessage', 'bad\u007fmessage']) {
+      const { calls, service } = recorder();
+      await expect(service.amendLastCommit(ROOT, message)).rejects.toThrow(/commit message/i);
+      expect(calls).toEqual([]);
+    }
+    const { calls, service } = recorder();
+    await service.amendLastCommit(ROOT, 'Subject\n\nBody');
+    expect(calls).toEqual([{ args: ['commit', '--amend', '-m', 'Subject\n\nBody'] }]);
+  });
+
+  it('validates patch hashes and patch file paths before applying', async () => {
+    const { calls, service } = recorder();
+    await expect(service.createCommitPatch(ROOT, 'HEAD')).rejects.toThrow(/invalid commit hash/i);
+    for (const patchPath of ['', '  ', 'bad\0.patch', 'bad\n.patch']) {
+      await expect(service.applyPatchFile(ROOT, patchPath)).rejects.toThrow(/invalid patch file path/i);
+    }
+    await expect(service.applyPatchFile(ROOT, path.join(ROOT, 'missing.patch')))
+      .rejects.toThrow();
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'git-patch-directory-'));
+    try {
+      await expect(service.applyPatchFile(ROOT, directory)).rejects.toThrow(/regular file/i);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+    expect(calls).toEqual([]);
+  });
 
   function remoteGroup(remoteName: string): RemoteGroup {
     return { remoteName, branches: [] };
@@ -1468,6 +1514,7 @@ describe('GitService operations (fake runner)', () => {
     expect(calls.map((c) => c.args)).toEqual([
       ['show', '-s', '--format=%B', lower],
       ['diff-tree', '--no-commit-id', '--name-status', '-r', '--root', '-M', '--diff-merges=first-parent', '-z', lower],
+      ['diff-tree', '--no-commit-id', '--numstat', '-r', '--root', '-M', '--diff-merges=first-parent', '-z', lower],
       ['show', `${lower}^:a.txt`],
       ['checkout', '-b', 'feature/sha256', lower, '--'],
     ]);
@@ -1487,20 +1534,26 @@ describe('GitService operations (fake runner)', () => {
   });
 
   it('reads commit details from show and NUL-delimited diff-tree output', async () => {
-    const { calls, service } = recorder((args) =>
-      args[0] === 'show' ? 'Subject line\n\nBody text\n\n' : 'M\0src/a.ts\0R100\0old name.md\0new name.md\0',
-    );
+    const { calls, service } = recorder((args) => {
+      if (args[0] === 'show') {
+        return 'Subject line\n\nBody text\n\n';
+      }
+      return args.includes('--numstat')
+        ? '2\t1\tsrc/a.ts\x000\t0\t\x00old name.md\x00new name.md\x00'
+        : 'M\0src/a.ts\0R100\0old name.md\0new name.md\0';
+    });
     await expect(service.getCommitDetails(ROOT, HASH)).resolves.toEqual({
       hash: HASH,
       body: 'Subject line\n\nBody text',
       files: [
-        { status: 'M', path: 'src/a.ts' },
-        { status: 'R', path: 'new name.md', oldPath: 'old name.md' },
+        { status: 'M', path: 'src/a.ts', additions: 2, deletions: 1 },
+        { status: 'R', path: 'new name.md', oldPath: 'old name.md', additions: 0, deletions: 0 },
       ],
     });
     expect(calls.map((c) => c.args)).toEqual([
       ['show', '-s', '--format=%B', HASH],
       ['diff-tree', '--no-commit-id', '--name-status', '-r', '--root', '-M', '--diff-merges=first-parent', '-z', HASH],
+      ['diff-tree', '--no-commit-id', '--numstat', '-r', '--root', '-M', '--diff-merges=first-parent', '-z', HASH],
     ]);
   });
 
@@ -1688,16 +1741,77 @@ describe.skipIf(!isGitAvailable())('GitService against real repositories', () =>
 
     const root = await service.getCommitDetails(dir, rootHash);
     expect(root.body).toBe('Root commit\n\nBody paragraph');
-    expect(root.files).toEqual([{ status: 'A', path: 'a b.txt' }]);
+    expect(root.files).toEqual([{ status: 'A', path: 'a b.txt', additions: 1, deletions: 0 }]);
 
     expect((await service.getCommitDetails(dir, renameHash)).files).toEqual([
-      { status: 'R', path: 'c d.txt', oldPath: 'a b.txt' },
+      { status: 'R', path: 'c d.txt', oldPath: 'a b.txt', additions: 0, deletions: 0 },
     ]);
-    expect((await service.getCommitDetails(dir, mergeHash)).files).toEqual([{ status: 'A', path: 'side.txt' }]);
+    expect((await service.getCommitDetails(dir, mergeHash)).files).toEqual([
+      { status: 'A', path: 'side.txt', additions: 1, deletions: 0 },
+    ]);
 
     expect(await service.getFileContentAtRevision(dir, `${rootHash}:a b.txt`)).toBe('hello\n');
     expect(await service.getFileContentAtRevision(dir, `${rootHash}^:a b.txt`)).toBe('');
     expect(await service.getFileContentAtRevision(dir, `${mergeHash}^:side.txt`)).toBe('');
+  });
+
+  it('exercises commit stats, amend, patch export and atomic patch application', async () => {
+    const dir = makeTempDir();
+    await git(dir, 'init', '-b', 'main');
+    fs.writeFileSync(path.join(dir, 'tracked.txt'), 'one\ntwo\nthree\n');
+    fs.writeFileSync(path.join(dir, 'rename-me.txt'), 'alpha\nbeta\ngamma\ndelta\n');
+    fs.writeFileSync(path.join(dir, 'old-name.bin'), Buffer.from([0, 1, 2, 3]));
+    await git(dir, 'add', '-A');
+    await git(dir, 'commit', '-m', 'Initial');
+
+    fs.writeFileSync(path.join(dir, 'tracked.txt'), 'one\nchanged\nthree\nadded\n');
+    fs.writeFileSync(path.join(dir, 'binary.bin'), Buffer.from([0, 255, 2, 128]));
+    await git(dir, 'rm', 'old-name.bin');
+    await git(dir, 'mv', 'rename-me.txt', 'renamed.txt');
+    await git(dir, 'add', '-A');
+    await git(dir, 'commit', '-m', 'Original subject');
+
+    const originalHash = (await git(dir, 'rev-parse', 'HEAD')).trim();
+    const details = await service.getCommitDetails(dir, originalHash);
+    expect(details.files.find((file) => file.path === 'tracked.txt'))
+      .toMatchObject({ status: 'M', additions: 2, deletions: 1 });
+    expect(details.files.find((file) => file.path === 'renamed.txt'))
+      .toMatchObject({ status: 'R', oldPath: 'rename-me.txt', additions: 0, deletions: 0 });
+    expect(details.files.find((file) => file.path === 'binary.bin'))
+      .toMatchObject({ status: 'A', isBinary: true });
+    expect(details.files.find((file) => file.path === 'old-name.bin'))
+      .toMatchObject({ status: 'D', isBinary: true });
+
+    await service.amendLastCommit(dir, 'Amended subject\n\nBody');
+    const amendedHash = (await git(dir, 'rev-parse', 'HEAD')).trim();
+    expect((await service.getCommitDetails(dir, amendedHash)).body).toBe('Amended subject\n\nBody');
+    expect((await git(dir, 'log', '-1', '--format=%s')).trim()).toBe('Amended subject');
+
+    const patchText = await service.createCommitPatch(dir, amendedHash);
+    const patchPath = path.join(dir, 'exported.patch');
+    fs.writeFileSync(patchPath, patchText);
+    await git(dir, 'reset', '--hard', 'HEAD^');
+
+    fs.writeFileSync(path.join(dir, 'tracked.txt'), 'conflicting working tree\n');
+    const beforeConflict = fs.readFileSync(path.join(dir, 'tracked.txt'), 'utf8');
+    await expect(service.applyPatchFile(dir, patchPath)).rejects.toThrow();
+    expect(fs.readFileSync(path.join(dir, 'tracked.txt'), 'utf8')).toBe(beforeConflict);
+    expect(fs.existsSync(path.join(dir, 'renamed.txt'))).toBe(false);
+
+    const corruptPath = path.join(dir, 'corrupt.patch');
+    fs.writeFileSync(corruptPath, 'not a patch\n');
+    await expect(service.applyPatchFile(dir, corruptPath)).rejects.toThrow();
+    expect(fs.readFileSync(path.join(dir, 'tracked.txt'), 'utf8')).toBe(beforeConflict);
+
+    await git(dir, 'reset', '--hard', 'HEAD');
+    await service.applyPatchFile(dir, patchPath);
+    expect(fs.readFileSync(path.join(dir, 'tracked.txt'), 'utf8').replace(/\r\n/g, '\n'))
+      .toBe('one\nchanged\nthree\nadded\n');
+    expect(fs.readFileSync(path.join(dir, 'renamed.txt'), 'utf8').replace(/\r\n/g, '\n'))
+      .toBe('alpha\nbeta\ngamma\ndelta\n');
+    expect(fs.readFileSync(path.join(dir, 'binary.bin'))).toEqual(Buffer.from([0, 255, 2, 128]));
+    expect(fs.existsSync(path.join(dir, 'old-name.bin'))).toBe(false);
+    expect((await git(dir, 'status', '--short', '--untracked-files=no')).trim()).not.toBe('');
   });
 
   it('creates and checks out branches', async () => {

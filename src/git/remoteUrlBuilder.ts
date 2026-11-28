@@ -6,6 +6,11 @@ export interface ParsedRemoteHost {
   readonly displayName: string;
 }
 
+export interface RemoteFileRef {
+  readonly kind: 'branch' | 'commit';
+  readonly value: string;
+}
+
 export type RemoteDestinationKind = 'hosted' | 'localPath' | 'other';
 
 export interface RemoteDestinationInfo {
@@ -365,6 +370,105 @@ export function buildRemoteBranchUrl(remote: ParsedRemoteHost, branchName: strin
       return `${remote.webBaseUrl}/-/tree/${encodeBranchPath(branchName)}`;
     case 'bitbucket':
       return `${remote.webBaseUrl}/src/${encodeBranchPath(branchName)}`;
+  }
+}
+
+export function buildRemoteFileUrl(
+  remote: ParsedRemoteHost,
+  ref: RemoteFileRef,
+  relativePath: string,
+  startLine?: number,
+  endLine?: number,
+): string | null {
+  if (
+    typeof remote.webBaseUrl !== 'string' ||
+    CONTROL_CHARS.test(remote.webBaseUrl) ||
+    typeof ref?.value !== 'string' ||
+    (ref.kind !== 'branch' && ref.kind !== 'commit') ||
+    typeof relativePath !== 'string'
+  ) {
+    return null;
+  }
+  let remoteUrl: URL;
+  try {
+    remoteUrl = new URL(remote.webBaseUrl);
+  } catch {
+    return null;
+  }
+  if (
+    remoteUrl.protocol !== 'https:' ||
+    remoteUrl.hostname.length === 0 ||
+    remoteUrl.username.length > 0 ||
+    remoteUrl.password.length > 0 ||
+    remoteUrl.search.length > 0 ||
+    remoteUrl.hash.length > 0
+  ) {
+    return null;
+  }
+  let encodedRef: string;
+  let normalizedRef: string;
+  if (ref.kind === 'commit') {
+    if (!COMMIT_HASH.test(ref.value)) {
+      return null;
+    }
+    normalizedRef = ref.value.toLowerCase();
+    encodedRef = normalizedRef;
+  } else {
+    if (!isSafeBranchName(ref.value) || !validPathSegments(ref.value.split('/'))) {
+      return null;
+    }
+    normalizedRef = ref.value;
+    encodedRef = encodeBranchPath(normalizedRef);
+  }
+
+  const normalizedPath = relativePath.replace(/\\/g, '/').replace(/^(?:\.\/|\/)+/, '');
+  const pathSegments = normalizedPath.split('/');
+  if (
+    normalizedPath.length === 0 ||
+    normalizedPath.length > 4096 ||
+    CONTROL_CHARS.test(normalizedPath) ||
+    !validPathSegments(pathSegments)
+  ) {
+    return null;
+  }
+  if (startLine !== undefined && (!Number.isInteger(startLine) || startLine < 1)) {
+    return null;
+  }
+  if (
+    endLine !== undefined &&
+    (!Number.isInteger(endLine) || endLine < 1 || startLine === undefined || endLine < startLine)
+  ) {
+    return null;
+  }
+  const encodedPath = pathSegments.map((segment) => encodeURIComponent(segment)).join('/');
+  const lineStart = startLine;
+  const lineEnd = endLine ?? startLine;
+  switch (remote.provider) {
+    case 'github': {
+      const fragment = lineStart === undefined
+        ? ''
+        : `#L${lineStart}${lineEnd !== undefined && lineEnd !== lineStart ? `-L${lineEnd}` : ''}`;
+      return `${remote.webBaseUrl}/blob/${encodedRef}/${encodedPath}${fragment}`;
+    }
+    case 'gitlab': {
+      const fragment = lineStart === undefined
+        ? ''
+        : `#L${lineStart}${lineEnd !== undefined && lineEnd !== lineStart ? `-${lineEnd}` : ''}`;
+      return `${remote.webBaseUrl}/-/blob/${encodedRef}/${encodedPath}${fragment}`;
+    }
+    case 'bitbucket': {
+      const fragment = lineStart === undefined
+        ? ''
+        : `#lines-${lineStart}${lineEnd !== undefined && lineEnd !== lineStart ? `:${lineEnd}` : ''}`;
+      return `${remote.webBaseUrl}/src/${encodedRef}/${encodedPath}${fragment}`;
+    }
+    case 'azureDevOps': {
+      const version = ref.kind === 'branch' ? `GB${encodeURIComponent(normalizedRef)}` : `GC${normalizedRef}`;
+      const lineParams = lineStart === undefined
+        ? ''
+        : `&line=${lineStart}&lineEnd=${lineEnd ?? lineStart}&lineStartColumn=1&lineEndColumn=1&lineStyle=plain`;
+      return `${remote.webBaseUrl}?path=${encodeURIComponent(`/${normalizedPath}`)}&version=${version}${lineParams}`;
+    }
   }
 }
 

@@ -1608,6 +1608,28 @@ col.col-id {
   font-weight: 600;
 }
 
+.file-diff-stat {
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: 4px;
+  margin-left: 6px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.file-diff-stat-add {
+  color: var(--vscode-gitDecoration-addedResourceForeground, #2ea043);
+}
+
+.file-diff-stat-del {
+  color: var(--vscode-gitDecoration-deletedResourceForeground, #cf222e);
+}
+
+.file-diff-stat-binary {
+  color: var(--vscode-descriptionForeground);
+}
+
 .changed-file-list {
   margin: 0;
   padding: 0;

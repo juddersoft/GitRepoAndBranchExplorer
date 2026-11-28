@@ -583,6 +583,42 @@ describe('buildCommitMenu', () => {
     expect(item(menu, 'createTag').enabled).toBe(false);
     expect(item(menu, 'revert').enabled).toBe(false);
   });
+
+  it('only offers amend for HEAD, disables it when detached or busy, and always offers create patch', () => {
+    const headMenu = buildCommitMenu(snapshot, state(), find(M));
+    expect(ids(headMenu)).toContain('amendCommit');
+    expect(item(headMenu, 'amendCommit').enabled).toBe(true);
+    expect(ids(headMenu)).toContain('createPatch');
+    expect(item(headMenu, 'createPatch').enabled).toBe(true);
+
+    const nonHeadMenu = buildCommitMenu(snapshot, state(), find(B));
+    expect(ids(nonHeadMenu)).not.toContain('amendCommit');
+    expect(ids(nonHeadMenu)).toContain('createPatch');
+
+    const detached: RepoSnapshot = {
+      ...snapshot,
+      isDetachedHead: true,
+      localBranches: snapshot.localBranches.map((b) => ({ ...b, isCurrent: false })),
+      commits: snapshot.commits.map((c) => c.hash === M
+        ? { ...c, refs: [{ kind: 'head', label: 'HEAD' }] }
+        : c),
+    };
+    const detachedMenu = buildCommitMenu(detached, state({ snapshot: detached }), find(M));
+    expect(item(detachedMenu, 'amendCommit')).toMatchObject({
+      enabled: false,
+      reason: expect.stringMatching(/detached/i),
+    });
+
+    const busyMenu = buildCommitMenu(snapshot, state({ isBusy: true }), find(M));
+    expect(item(busyMenu, 'amendCommit')).toMatchObject({
+      enabled: false,
+      reason: expect.stringMatching(/running/i),
+    });
+    expect(item(busyMenu, 'createPatch')).toMatchObject({
+      enabled: false,
+      reason: expect.stringMatching(/running/i),
+    });
+  });
 });
 
 describe('buildRepoMenu', () => {
@@ -611,11 +647,12 @@ describe('buildRepoMenu', () => {
     const menu = menuFor(snapshot);
     expect(ids(menu)).toEqual([
       'fetchTracked', 'pull', 'push', 'pushAndOpenPr', 'createPrInBrowser', 'openRepoInBrowser',
-      'newBranch', 'createWorktree', 'stashChanges', 'refresh',
+      'newBranch', 'createWorktree', 'stashChanges', 'applyPatch', 'refresh',
     ]);
     expect(enabled(menu)).toEqual([
-      'fetchTracked', 'pull', 'push', 'newBranch', 'createWorktree', 'stashChanges', 'refresh',
+      'fetchTracked', 'pull', 'push', 'newBranch', 'createWorktree', 'stashChanges', 'applyPatch', 'refresh',
     ]);
+    expect(ids(menu).indexOf('applyPatch')).toBe(ids(menu).indexOf('stashChanges') + 1);
     expect(item(menu, 'push').label).toBe('Push');
     expect(item(menu, 'stashChanges').label).toBe('Stash Changes...');
   });
@@ -740,6 +777,10 @@ describe('buildRepoMenu', () => {
     const menu = menuFor(snapshot, { isBusy: true });
     expect(enabled(menu)).toEqual(['refresh']);
     expect(item(menu, 'fetchTracked').reason).toMatch(/running/i);
+    expect(item(menu, 'applyPatch')).toMatchObject({
+      enabled: false,
+      reason: expect.stringMatching(/running/i),
+    });
   });
 });
 

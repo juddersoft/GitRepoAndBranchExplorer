@@ -119,6 +119,24 @@ describe('gitAction validation', () => {
     expect(Object.keys(GIT_ACTION_TARGETS).sort()).toEqual(Object.keys(GIT_ACTION_LABELS).sort());
   });
 
+  it('validates Phase 20 commit and patch actions exactly', () => {
+    for (const action of ['amendCommit', 'createPatch'] as GitAction[]) {
+      expect(isWebviewToExtensionMessage(gitAction({ action, target: HASH }))).toBe(true);
+      expect(isWebviewToExtensionMessage(gitAction({ action, target: SHA256 }))).toBe(true);
+      expect(isWebviewToExtensionMessage(gitAction({ action }))).toBe(false);
+      expect(isWebviewToExtensionMessage(gitAction({ action, target: 'HEAD' }))).toBe(false);
+    }
+    expect(isWebviewToExtensionMessage(gitAction({ action: 'applyPatch' }))).toBe(true);
+    expect(isWebviewToExtensionMessage(gitAction({ action: 'applyPatch', target: HASH }))).toBe(false);
+    expect(isWebviewToExtensionMessage(gitAction({ action: 'applyPatch', extra: true }))).toBe(false);
+    expect(isWebviewToExtensionMessage(JSON.parse(
+      '{"type":"gitAction","payload":{"action":"applyPatch","constructor":{"prototype":{"polluted":true}}}}',
+    ))).toBe(false);
+    expect(isWebviewToExtensionMessage(JSON.parse(
+      '{"type":"gitAction","payload":{"action":"applyPatch"},"__proto__":{"polluted":true}}',
+    ))).toBe(false);
+  });
+
   it.each(['fetch', 'fetchTracked', 'pull', 'push', 'pushAndOpenPr', 'createPrInBrowser', 'openRepoInBrowser', 'createBranch', 'publishRepository'] as GitAction[])('accepts %s without a target', (action) => {
     expect(isWebviewToExtensionMessage(gitAction({ action }))).toBe(true);
   });

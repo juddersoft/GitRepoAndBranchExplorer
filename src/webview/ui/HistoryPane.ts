@@ -1046,10 +1046,23 @@ export class HistoryPane {
   }
 
   private renderChangedFiles(commitHash: string, details: CommitDetails | undefined): HTMLElement {
+    const numericFiles = details?.files.filter(
+      (file) => file.additions !== undefined || file.deletions !== undefined,
+    ) ?? [];
+    const totalAdditions = numericFiles.reduce((total, file) => total + (file.additions ?? 0), 0);
+    const totalDeletions = numericFiles.reduce((total, file) => total + (file.deletions ?? 0), 0);
     const heading = el('div', {
       className: 'changed-files-heading',
-      text: details ? `Changed files (${details.files.length})` : 'Changed files',
     });
+    heading.append(document.createTextNode(details ? `Changed files (${details.files.length})` : 'Changed files'));
+    if (numericFiles.length > 0) {
+      heading.append(
+        el('span', { className: 'file-diff-stat' }, [
+          el('span', { className: 'file-diff-stat-add', text: `+${totalAdditions}` }),
+          el('span', { className: 'file-diff-stat-del', text: `-${totalDeletions}` }),
+        ]),
+      );
+    }
     if (!details) {
       return el('div', { className: 'changed-files' }, [heading, el('div', { className: 'muted', text: 'Loading\u2026' })]);
     }
@@ -1080,6 +1093,16 @@ export class HistoryPane {
       });
       openFile.addEventListener('keydown', (event) => event.stopPropagation());
       fileButton.append(openFile);
+      if (file.isBinary === true) {
+        fileButton.append(el('span', { className: 'file-diff-stat file-diff-stat-binary', text: 'Binary' }));
+      } else if (file.additions !== undefined || file.deletions !== undefined) {
+        fileButton.append(
+          el('span', { className: 'file-diff-stat' }, [
+            ...(file.additions === undefined ? [] : [el('span', { className: 'file-diff-stat-add', text: `+${file.additions}` })]),
+            ...(file.deletions === undefined ? [] : [el('span', { className: 'file-diff-stat-del', text: `-${file.deletions}` })]),
+          ]),
+        );
+      }
       fileButton.addEventListener('click', () => this.callbacks.onOpenFileDiff(commitHash, file));
       fileButton.addEventListener('keydown', (event) => {
         if (event.target === fileButton && (event.key === 'Enter' || event.key === ' ')) {

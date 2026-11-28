@@ -112,6 +112,9 @@ export interface ChangedFileEntry {
   path: string;
   /** Source path for renames (`R`) and copies (`C`). */
   oldPath?: string;
+  additions?: number;
+  deletions?: number;
+  isBinary?: boolean;
 }
 
 export interface RefComparisonResult {

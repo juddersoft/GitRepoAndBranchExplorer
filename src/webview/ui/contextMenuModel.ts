@@ -53,6 +53,9 @@ export type MenuActionId =
   | 'openRepoInBrowser'
   | 'openBranchInBrowser'
   | 'openCommitInBrowser'
+  | 'amendCommit'
+  | 'createPatch'
+  | 'applyPatch'
   | 'compareSelectedRevisions'
   | 'compareWithWorkingTree'
   | 'openFileAtRevision'
@@ -378,6 +381,7 @@ export function buildRepoMenu(
     item('newBranch', 'New Branch\u2026', firstReason(busy)),
     item('createWorktree', 'New Worktree\u2026', firstReason(busy)),
     item('stashChanges', 'Stash Changes...', firstReason(busy)),
+    gitActionItem('applyPatch', 'Apply Patch\u2026', 'applyPatch', firstReason(busy)),
     SEPARATOR,
     item('refresh', 'Refresh'),
   ];
@@ -468,6 +472,17 @@ export function buildCommitMenu(snapshot: RepoSnapshot, state: ExplorerUiState, 
     item('copyHash', 'Copy Commit Hash'),
     item('createBranchHere', 'Create Branch from Here\u2026', firstReason(busy)),
     gitActionItem('createTag', 'Create Tag\u2026', 'createTag', firstReason(busy)),
+    ...(commit.hash === getHeadHash(snapshot)
+      ? [
+          gitActionItem(
+            'amendCommit',
+            'Amend Last Commit\u2026',
+            'amendCommit',
+            firstReason(busy, snapshot.isDetachedHead && 'Cannot amend while HEAD is detached.'),
+          ),
+        ]
+      : []),
+    gitActionItem('createPatch', 'Create Patch\u2026', 'createPatch', firstReason(busy)),
     SEPARATOR,
     item(
       'cherryPick',

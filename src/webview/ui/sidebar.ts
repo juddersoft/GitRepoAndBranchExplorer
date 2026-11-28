@@ -161,6 +161,7 @@ function runRepoMenuAction(id: MenuActionId): void {
     case 'createPrInBrowser':
     case 'openRepoInBrowser':
     case 'publishRepository':
+    case 'applyPatch':
       postGitAction(id);
       break;
     case 'newBranch':

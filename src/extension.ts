@@ -10,8 +10,10 @@ import {
 } from './git/gitDiffProvider';
 import { isValidCommitHash } from './git/gitService';
 import {
+  APPLY_PATCH_COMMAND,
   CLONE_REPOSITORY_COMMAND,
   COMPARE_WITH_PREVIOUS_REVISION_COMMAND,
+  COPY_REMOTE_FILE_URL_COMMAND,
   GitRepoPanel,
   OPEN_PREVIOUS_REVISION_COMMAND,
   OPEN_REPOSITORY_COMMAND,
@@ -61,6 +63,11 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand(
       OPEN_PREVIOUS_REVISION_COMMAND,
       (uri?: vscode.Uri) => GitRepoPanel.openPreviousRevision(uri),
+    ),
+    vscode.commands.registerCommand(APPLY_PATCH_COMMAND, () => GitRepoPanel.applyPatch()),
+    vscode.commands.registerCommand(
+      COPY_REMOTE_FILE_URL_COMMAND,
+      (uri?: vscode.Uri) => GitRepoPanel.copyRemoteFileUrl(uri),
     ),
     vscode.commands.registerCommand(
       'gitRepoAndBranchExplorer.toggleInlineBlame',

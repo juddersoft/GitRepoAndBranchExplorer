@@ -3,6 +3,7 @@ import {
   buildRemoteBranchUrl,
   buildRemoteCommitUrl,
   buildRemoteCreatePrUrl,
+  buildRemoteFileUrl,
   buildRemoteRepoUrl,
   classifyRemoteDestination,
   encodeBranchPath,
@@ -185,6 +186,108 @@ describe('remote URL builders', () => {
     expect(buildRemoteCreatePrUrl(githubEnterprise, 'feature/x')).toBe(
       'https://acme.ghe.com/owner/repo/compare/feature/x?expand=1',
     );
+  });
+
+  describe('buildRemoteFileUrl', () => {
+    const providers = [
+      [github, 'https://github.com/owner/repo/blob'],
+      [githubEnterprise, 'https://acme.ghe.com/owner/repo/blob'],
+    ] as const;
+
+    it.each(providers)('builds GitHub-compatible URLs for branch and commit refs on %s', (remote, base) => {
+      expect(buildRemoteFileUrl(remote, { kind: 'branch', value: 'feature/test' }, 'src/file.ts'))
+        .toBe(`${base}/feature/test/src/file.ts`);
+      expect(buildRemoteFileUrl(remote, { kind: 'commit', value: sha1 }, 'src/file.ts'))
+        .toBe(`${base}/${sha1.toLowerCase()}/src/file.ts`);
+      expect(buildRemoteFileUrl(remote, { kind: 'branch', value: 'main' }, 'src/file.ts', 10))
+        .toBe(`${base}/main/src/file.ts#L10`);
+      expect(buildRemoteFileUrl(remote, { kind: 'branch', value: 'main' }, 'src/file.ts', 10, 10))
+        .toBe(`${base}/main/src/file.ts#L10`);
+      expect(buildRemoteFileUrl(remote, { kind: 'branch', value: 'main' }, 'src/file.ts', 10, 25))
+        .toBe(`${base}/main/src/file.ts#L10-L25`);
+    });
+
+    it('encodes GitHub paths per segment without encoding separators', () => {
+      expect(buildRemoteFileUrl(
+        github,
+        { kind: 'branch', value: 'feature/new branch' },
+        'docs/a b/100% + #?.ts',
+      )).toBe(
+        'https://github.com/owner/repo/blob/feature/new%20branch/docs/a%20b/100%25%20%2B%20%23%3F.ts',
+      );
+    });
+
+    it('builds GitLab and Bitbucket file URLs and line fragments', () => {
+      expect(buildRemoteFileUrl(gitlab, { kind: 'branch', value: 'main' }, 'src/file.ts'))
+        .toBe('https://gitlab.com/group/subgroup/repo/-/blob/main/src/file.ts');
+      expect(buildRemoteFileUrl(gitlab, { kind: 'commit', value: sha1 }, 'src/file.ts', 10, 25))
+        .toBe(`https://gitlab.com/group/subgroup/repo/-/blob/${sha1.toLowerCase()}/src/file.ts#L10-25`);
+      expect(buildRemoteFileUrl(bitbucket, { kind: 'branch', value: 'main' }, 'src/file.ts', 10))
+        .toBe('https://bitbucket.org/workspace/repo/src/main/src/file.ts#lines-10');
+      expect(buildRemoteFileUrl(bitbucket, { kind: 'commit', value: sha1 }, 'src/file.ts', 10, 25))
+        .toBe(`https://bitbucket.org/workspace/repo/src/${sha1.toLowerCase()}/src/file.ts#lines-10:25`);
+    });
+
+    it('builds Azure DevOps file, branch, commit and line URLs', () => {
+      expect(buildRemoteFileUrl(azure, { kind: 'branch', value: 'feature/x' }, 'src/a b.ts'))
+        .toBe('https://dev.azure.com/org/project/_git/repo?path=%2Fsrc%2Fa%20b.ts&version=GBfeature%2Fx');
+      expect(buildRemoteFileUrl(azure, { kind: 'commit', value: sha1 }, 'src/file.ts'))
+        .toBe(`https://dev.azure.com/org/project/_git/repo?path=%2Fsrc%2Ffile.ts&version=GC${sha1.toLowerCase()}`);
+      expect(buildRemoteFileUrl(azure, { kind: 'branch', value: 'main' }, 'src/file.ts', 10, 25))
+        .toBe(
+          'https://dev.azure.com/org/project/_git/repo?path=%2Fsrc%2Ffile.ts&version=GBmain'
+          + '&line=10&lineEnd=25&lineStartColumn=1&lineEndColumn=1&lineStyle=plain',
+        );
+    });
+
+    it.each([
+      ['empty path', ''],
+      ['traversal path', '../secret'],
+      ['embedded traversal path', 'src/../../secret'],
+      ['control path', 'src/\nsecret'],
+    ])('rejects unsafe %s', (_label, relativePath) => {
+      expect(buildRemoteFileUrl(github, { kind: 'branch', value: 'main' }, relativePath)).toBeNull();
+    });
+
+    it.each([
+      { kind: 'branch' as const, value: '' },
+      { kind: 'branch' as const, value: 'feature/../main' },
+      { kind: 'branch' as const, value: 'main\nbad' },
+      { kind: 'commit' as const, value: 'HEAD' },
+      { kind: 'commit' as const, value: 'g'.repeat(40) },
+    ])('rejects invalid ref $kind $value', (ref) => {
+      expect(buildRemoteFileUrl(github, ref, 'src/file.ts')).toBeNull();
+    });
+
+    it.each([
+      [0, undefined],
+      [-1, undefined],
+      [1.5, undefined],
+      [undefined, 2],
+      [10, 9],
+      [10, 10.5],
+      [10, Number.NaN],
+    ])('rejects invalid line range %j-%j', (startLine, endLine) => {
+      expect(buildRemoteFileUrl(github, { kind: 'branch', value: 'main' }, 'src/file.ts', startLine, endLine))
+        .toBeNull();
+    });
+
+    it.each([
+      '',
+      'http://github.com/owner/repo',
+      'file:///tmp/repo',
+      'not-a-url',
+      'https://user:pass@github.com/owner/repo',
+      'https://github.com/owner/repo?x=1',
+      'https://github.com/owner/repo#fragment',
+      'https://github.com/owner/repo\nbad',
+    ])('rejects malformed or non-HTTPS web base URL %j', (webBaseUrl) => {
+      expect(buildRemoteFileUrl(
+        { ...github, webBaseUrl },
+        { kind: 'branch', value: 'main' },
+        'src/file.ts',
+      )).toBeNull();
+    });
   });
 
   it('classifies GitHub Enterprise Cloud remotes with the enterprise provider name', () => {

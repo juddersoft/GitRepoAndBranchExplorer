@@ -14,6 +14,8 @@ export const VIEW_FILE_HISTORY_COMMAND = 'gitRepoAndBranchExplorer.viewFileHisto
 export const VIEW_LINE_HISTORY_COMMAND = 'gitRepoAndBranchExplorer.viewLineHistory';
 export const COMPARE_WITH_PREVIOUS_REVISION_COMMAND = 'gitRepoAndBranchExplorer.compareWithPreviousRevision';
 export const OPEN_PREVIOUS_REVISION_COMMAND = 'gitRepoAndBranchExplorer.openPreviousRevision';
+export const APPLY_PATCH_COMMAND = 'gitRepoAndBranchExplorer.applyPatch';
+export const COPY_REMOTE_FILE_URL_COMMAND = 'gitRepoAndBranchExplorer.copyRemoteFileUrl';
 /** Built-in command that selects (and, if needed, shows) this extension's Activity Bar container. */
 export const SHOW_CONTAINER_COMMAND = 'workbench.view.extension.gitRepoAndBranchExplorer-container';
 const TAB_PINNED_KEY = 'gitRepoAndBranchExplorer.tabPinned';
@@ -201,6 +203,14 @@ export class GitRepoPanel {
 
   public static async openPreviousRevision(uri?: vscode.Uri): Promise<void> {
     await GitRepoPanel.coordinator?.openPreviousRevisionByUri(uri);
+  }
+
+  public static async applyPatch(): Promise<void> {
+    await GitRepoPanel.coordinator?.applyPatch();
+  }
+
+  public static async copyRemoteFileUrl(uri?: vscode.Uri): Promise<void> {
+    await GitRepoPanel.coordinator?.copyRemoteFileUrlByUri(uri);
   }
 
   public static disposeCurrent(): void {

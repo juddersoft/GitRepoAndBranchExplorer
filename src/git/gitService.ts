@@ -269,6 +269,56 @@ export function parseDiffTreeOutput(rawOutput: string): ChangedFileEntry[] {
   return files;
 }
 
+export function parseDiffTreeNumstat(
+  rawOutput: string,
+): Map<string, { additions?: number; deletions?: number; isBinary?: boolean }> {
+  const tokens = rawOutput.split('\0');
+  const stats = new Map<string, { additions?: number; deletions?: number; isBinary?: boolean }>();
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i] ?? '';
+    if (token.length === 0) {
+      continue;
+    }
+    const firstTab = token.indexOf('\t');
+    const secondTab = firstTab < 0 ? -1 : token.indexOf('\t', firstTab + 1);
+    if (firstTab < 0 || secondTab < 0) {
+      throw new Error('Git returned an invalid numstat record.');
+    }
+    const addToken = token.slice(0, firstTab);
+    const delToken = token.slice(firstTab + 1, secondTab);
+    const pathPart = token.slice(secondTab + 1);
+    let filePath = pathPart;
+    if (pathPart.length === 0) {
+      const oldPath = tokens[i + 1];
+      const newPath = tokens[i + 2];
+      i += 2;
+      if (!oldPath || !newPath) {
+        throw new Error('Git returned an invalid numstat rename record.');
+      }
+      filePath = newPath;
+    }
+
+    if (addToken === '-' && delToken === '-') {
+      stats.set(filePath, { isBinary: true });
+      continue;
+    }
+    const additions = Number(addToken);
+    const deletions = Number(delToken);
+    if (
+      !/^\d+$/.test(addToken) ||
+      !/^\d+$/.test(delToken) ||
+      !Number.isSafeInteger(additions) ||
+      !Number.isSafeInteger(deletions) ||
+      additions < 0 ||
+      deletions < 0
+    ) {
+      throw new Error('Git returned invalid numstat counts.');
+    }
+    stats.set(filePath, { additions, deletions });
+  }
+  return stats;
+}
+
 /** Converts supported GitHub remote URL formats to a normalized HTTPS repository URL. */
 export function normalizeGitHubRemoteUrl(remoteUrl: string): string | null {
   const parsed = parseRemoteHostInfo(remoteUrl);
@@ -860,13 +910,52 @@ export class GitService {
 
   public async getCommitDetails(repoRoot: string, commitHash: string): Promise<CommitDetails> {
     const hash = assertCommitHash(commitHash);
-    const [body, diffTree] = await Promise.all([
+    const [body, diffTree, numstat] = await Promise.all([
       this.runGit(['show', '-s', '--format=%B', hash], repoRoot),
       // --diff-merges=first-parent lists merge-commit changes against the first parent (matching the `<hash>^` diff);
       // -M reports renames as `R` entries with their original path.
       this.runGit(['diff-tree', '--no-commit-id', '--name-status', '-r', '--root', '-M', '--diff-merges=first-parent', '-z', hash], repoRoot),
+      this.runGit(['diff-tree', '--no-commit-id', '--numstat', '-r', '--root', '-M', '--diff-merges=first-parent', '-z', hash], repoRoot),
     ]);
-    return { hash, body: body.replace(/\s+$/, ''), files: parseDiffTreeOutput(diffTree) };
+    const stats = parseDiffTreeNumstat(numstat);
+    const files = parseDiffTreeOutput(diffTree).map((file) => {
+      const fileStats = stats.get(file.path);
+      return fileStats === undefined ? file : { ...file, ...fileStats };
+    });
+    return { hash, body: body.replace(/\s+$/, ''), files };
+  }
+
+  public async amendLastCommit(repoRoot: string, message: string): Promise<void> {
+    const trimmed = message.trim();
+    if (trimmed.length === 0) {
+      throw new Error('Commit message cannot be empty.');
+    }
+    if (/[\x00-\x08\x0b-\x0e\x1f\x7f]/.test(message)) {
+      throw new Error('Commit message cannot contain NUL or control characters.');
+    }
+    await this.runGit(['commit', '--amend', '-m', message], repoRoot);
+  }
+
+  public async createCommitPatch(repoRoot: string, commitHash: string): Promise<string> {
+    const hash = assertCommitHash(commitHash);
+    return this.runGit(['format-patch', '-1', '--stdout', hash], repoRoot);
+  }
+
+  public async applyPatchFile(repoRoot: string, patchFilePath: string): Promise<void> {
+    if (
+      typeof patchFilePath !== 'string' ||
+      patchFilePath.length === 0 ||
+      !patchFilePath.trim() ||
+      /[\x00-\x1f\x7f]/.test(patchFilePath)
+    ) {
+      throw new Error('Invalid patch file path.');
+    }
+    const stats = await fs.promises.stat(patchFilePath);
+    if (!stats.isFile()) {
+      throw new Error('Patch path is not a regular file.');
+    }
+    await this.runGit(['apply', '--check', '--', patchFilePath], repoRoot);
+    await this.runGit(['apply', '--', patchFilePath], repoRoot);
   }
 
   public async compareReferences(

@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   showQuickPick: vi.fn(),
   showInputBox: vi.fn(),
   showOpenDialog: vi.fn(),
+  showSaveDialog: vi.fn(),
   fetchTrackedBranches: vi.fn(),
   pullCurrentBranch: vi.fn(),
   fetchAll: vi.fn(),
@@ -63,6 +64,9 @@ const mocks = vi.hoisted(() => ({
   openRevisionVsWorkingTreeDiff: vi.fn(),
   openSingleRevisionFile: vi.fn(),
   compareReferences: vi.fn(),
+  amendLastCommit: vi.fn(),
+  createCommitPatch: vi.fn(),
+  applyPatchFile: vi.fn(),
   openReferenceFileDiff: vi.fn(),
   setAllowedRepoRoots: vi.fn(),
   buildShowUri: vi.fn(),
@@ -84,10 +88,18 @@ const mocks = vi.hoisted(() => ({
   getAuthenticationSession: vi.fn(),
   fsExistsSync: vi.fn(),
   fsStatSync: vi.fn(),
+  writeFile: vi.fn(),
   getConfiguration: vi.fn(),
   cancellationListener: undefined as (() => void) | undefined,
   activeTextEditor: undefined as
-    | { document: { uri: { scheme: string; fsPath: string } } }
+    | {
+        document: { uri: { scheme: string; fsPath: string } };
+        selection: {
+          start: { line: number; character: number };
+          end: { line: number; character: number };
+          isEmpty: boolean;
+        };
+      }
     | undefined,
 }));
 
@@ -123,6 +135,7 @@ vi.mock('vscode', () => {
       showQuickPick: mocks.showQuickPick,
       showInputBox: mocks.showInputBox,
       showOpenDialog: mocks.showOpenDialog,
+      showSaveDialog: mocks.showSaveDialog,
       get activeTextEditor() {
         return mocks.activeTextEditor;
       },
@@ -203,6 +216,9 @@ vi.mock('../src/git/gitService', () => ({
     pushTag = mocks.pushTag;
     searchCommitsByFile = mocks.searchCommitsByFile;
     compareReferences = mocks.compareReferences;
+    amendLastCommit = mocks.amendLastCommit;
+    createCommitPatch = mocks.createCommitPatch;
+    applyPatchFile = mocks.applyPatchFile;
   },
   isValidCommitHash: (value: string): boolean => /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value),
 }));
@@ -210,7 +226,7 @@ vi.mock('../src/git/gitService', () => ({
 vi.mock('fs', () => ({
   existsSync: mocks.fsExistsSync,
   statSync: mocks.fsStatSync,
-  promises: { stat: mocks.stat, readdir: mocks.readdir },
+  promises: { stat: mocks.stat, readdir: mocks.readdir, writeFile: mocks.writeFile },
 }));
 vi.mock('../src/git/cloneDiscoveryService', () => ({
   CloneDiscoveryService: class {
@@ -402,6 +418,10 @@ describe('RepoCoordinator', () => {
       behindCount: 0,
       changedFiles: [],
     });
+    mocks.amendLastCommit.mockResolvedValue(undefined);
+    mocks.createCommitPatch.mockResolvedValue('From: test\npatch body\n');
+    mocks.applyPatchFile.mockResolvedValue(undefined);
+    mocks.writeFile.mockResolvedValue(undefined);
     mocks.openReferenceFileDiff.mockResolvedValue(undefined);
     mocks.createBranch.mockResolvedValue(undefined);
     mocks.createTag.mockResolvedValue(undefined);
@@ -470,6 +490,236 @@ describe('RepoCoordinator', () => {
     coordinator.attach(editor);
     coordinator.handleMessage('editor', { type: 'webviewReady' });
   }
+
+  describe('commit and file convenience actions', () => {
+    const currentHash = sha('a');
+
+    function snapshotWithHead(patch: Partial<RepoSnapshot> = {}): RepoSnapshot {
+      const snapshot = MAIN_AND_FEATURE();
+      return {
+        ...snapshot,
+        commits: [{ ...commitNode(currentHash), subject: 'Current subject' }],
+        ...patch,
+      };
+    }
+
+    it('blocks all convenience actions in an untrusted workspace', async () => {
+      mocks.isTrusted = false;
+
+      coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'amendCommit', target: currentHash },
+      });
+      coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'createPatch', target: currentHash },
+      });
+      coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'applyPatch' },
+      });
+      await coordinator.copyRemoteFileUrlByUri({ scheme: 'file', fsPath: '/repo/src/file.ts' } as never);
+
+      expect(mocks.amendLastCommit).not.toHaveBeenCalled();
+      expect(mocks.createCommitPatch).not.toHaveBeenCalled();
+      expect(mocks.applyPatchFile).not.toHaveBeenCalled();
+      expect(mocks.getRemoteUrl).not.toHaveBeenCalled();
+      expect(mocks.discoverWorkspaceRepositories).not.toHaveBeenCalled();
+    });
+
+    it('confirms before amending an apparently pushed branch and aborts on Cancel', async () => {
+      const snapshot = snapshotWithHead({
+        localBranches: snapshotWithHead().localBranches.map((item) =>
+          item.isCurrent ? { ...item, upstream: 'origin/main', ahead: 0, upstreamGone: false } : item,
+        ),
+      });
+      mocks.getRepoSnapshot.mockResolvedValue(snapshot);
+      mocks.showQuickPick.mockResolvedValueOnce('Cancel');
+      await openBoth();
+
+      coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'amendCommit', target: currentHash },
+      });
+      await vi.waitFor(() => expect(mocks.showQuickPick).toHaveBeenCalledWith(
+        ['Amend Anyway', 'Cancel'],
+        expect.objectContaining({ title: 'Amend Pushed Commit?' }),
+      ));
+      expect(mocks.amendLastCommit).not.toHaveBeenCalled();
+      expect(mocks.showInputBox).not.toHaveBeenCalled();
+
+      mocks.showQuickPick.mockResolvedValueOnce('Amend Anyway');
+      mocks.getCommitDetails.mockResolvedValueOnce({ hash: currentHash, body: 'Current body', files: [] });
+      mocks.showInputBox.mockResolvedValueOnce('New subject');
+      coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'amendCommit', target: currentHash },
+      });
+      await vi.waitFor(() => expect(mocks.amendLastCommit).toHaveBeenCalledWith('/repo', 'New subject'));
+      expect(mocks.showInputBox).toHaveBeenCalledWith(expect.objectContaining({ value: 'Current body' }));
+      expect(mocks.showWarningMessage).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['ahead of upstream', { upstream: 'origin/main', ahead: 1 }],
+      ['without upstream', { upstream: null, ahead: 0 }],
+    ])('amends an unpushed branch %s without the pushed warning', async (_label, branchPatch) => {
+      mocks.getRepoSnapshot.mockResolvedValue(snapshotWithHead({
+        localBranches: snapshotWithHead().localBranches.map((item) =>
+          item.isCurrent ? { ...item, ...branchPatch } : item,
+        ),
+      }));
+      mocks.getCommitDetails.mockResolvedValue({ hash: currentHash, body: 'Current body', files: [] });
+      mocks.showInputBox.mockResolvedValueOnce(undefined);
+      await openBoth();
+
+      coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'amendCommit', target: currentHash },
+      });
+      await vi.waitFor(() => expect(mocks.showInputBox).toHaveBeenCalledWith(
+        expect.objectContaining({ value: 'Current body' }),
+      ));
+      expect(mocks.showQuickPick).not.toHaveBeenCalled();
+      expect(mocks.amendLastCommit).not.toHaveBeenCalled();
+    });
+
+    it('calls amendLastCommit for an unpushed branch with the edited message', async () => {
+      mocks.getRepoSnapshot.mockResolvedValue(snapshotWithHead({
+        localBranches: snapshotWithHead().localBranches.map((item) =>
+          item.isCurrent ? { ...item, upstream: null, ahead: 0 } : item,
+        ),
+      }));
+      mocks.showInputBox.mockResolvedValueOnce('Edited body');
+      await openBoth();
+
+      coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'amendCommit', target: currentHash },
+      });
+      await vi.waitFor(() => expect(mocks.amendLastCommit).toHaveBeenCalledWith('/repo', 'Edited body'));
+    });
+
+    it('rejects amend on detached HEAD without invoking Git', async () => {
+      mocks.getRepoSnapshot.mockResolvedValue(snapshotWithHead({ isDetachedHead: true }));
+      await openBoth();
+      coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'amendCommit', target: currentHash },
+      });
+      await vi.waitFor(() => expect(mocks.showWarningMessage).toHaveBeenCalledWith(
+        'Cannot amend while HEAD is detached.',
+      ));
+      expect(mocks.amendLastCommit).not.toHaveBeenCalled();
+    });
+
+    it('creates and saves a patch, and cleanly exits when save is cancelled', async () => {
+      mocks.getRepoSnapshot.mockResolvedValue(snapshotWithHead());
+      mocks.createCommitPatch.mockResolvedValue('patch contents');
+      mocks.showSaveDialog
+        .mockResolvedValueOnce({ fsPath: '/repo/saved.patch' })
+        .mockResolvedValueOnce(undefined);
+      await openBoth();
+
+      coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'createPatch', target: currentHash },
+      });
+      await vi.waitFor(() => expect(mocks.writeFile).toHaveBeenCalledWith(
+        '/repo/saved.patch',
+        'patch contents',
+        'utf8',
+      ));
+      expect(mocks.createCommitPatch).toHaveBeenCalledWith('/repo', currentHash);
+      expect(mocks.createCommitPatch.mock.invocationCallOrder[0])
+        .toBeLessThan(mocks.showSaveDialog.mock.invocationCallOrder[0]!);
+
+      coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'createPatch', target: currentHash },
+      });
+      await vi.waitFor(() => expect(mocks.showSaveDialog).toHaveBeenCalledTimes(2));
+      expect(mocks.writeFile).toHaveBeenCalledTimes(1);
+    });
+
+    it('opens and applies a patch, and cleanly exits when selection is cancelled', async () => {
+      await openBoth();
+      mocks.showOpenDialog
+        .mockResolvedValueOnce([{ fsPath: '/patches/change.patch' }])
+        .mockResolvedValueOnce(undefined);
+
+      await coordinator.applyPatch();
+      expect(mocks.applyPatchFile).toHaveBeenCalledWith('/repo', '/patches/change.patch');
+      await coordinator.applyPatch();
+      expect(mocks.applyPatchFile).toHaveBeenCalledTimes(1);
+    });
+
+    it('copies hosted branch URLs for active-editor single and multi-line selections', async () => {
+      mocks.getRepoSnapshot.mockResolvedValue(snapshotWithHead());
+      mocks.getRemoteUrl.mockResolvedValue('https://github.com/owner/repo.git');
+      mocks.showInformationMessage.mockResolvedValue('Open in Browser');
+      await openBoth();
+
+      mocks.activeTextEditor = {
+        document: { uri: { scheme: 'file', fsPath: '/repo/src/file.ts' } },
+        selection: {
+          start: { line: 2, character: 4 },
+          end: { line: 2, character: 8 },
+          isEmpty: true,
+        },
+      };
+      await coordinator.copyRemoteFileUrlByUri(mocks.activeTextEditor.document.uri as never);
+      expect(mocks.clipboardWriteText).toHaveBeenLastCalledWith(
+        'https://github.com/owner/repo/blob/main/src/file.ts#L3',
+      );
+
+      mocks.activeTextEditor.selection = {
+        start: { line: 2, character: 0 },
+        end: { line: 7, character: 5 },
+        isEmpty: false,
+      };
+      await coordinator.copyRemoteFileUrlByUri(mocks.activeTextEditor.document.uri as never);
+      expect(mocks.clipboardWriteText).toHaveBeenLastCalledWith(
+        'https://github.com/owner/repo/blob/main/src/file.ts#L3-L8',
+      );
+      expect(mocks.openExternal).toHaveBeenCalledWith(expect.objectContaining({
+        url: 'https://github.com/owner/repo/blob/main/src/file.ts#L3-L8',
+        strict: true,
+      }));
+    });
+
+    it.each([
+      ['detached HEAD', '/repo/src/file.ts', true],
+      ['a different repository', '/other/src/file.ts', false],
+    ])('falls back to the resolved HEAD hash for %s', async (_label, filePath, detached) => {
+      mocks.discoverWorkspaceRepositories.mockResolvedValue([
+        { repoRoot: '/repo', repoName: 'repo', commonDir: '/repo/.git', currentBranch: 'main' },
+        { repoRoot: '/other', repoName: 'other', commonDir: '/other/.git', currentBranch: 'main' },
+      ]);
+      mocks.getRepoSnapshot.mockResolvedValue(snapshotWithHead(detached ? { isDetachedHead: true } : {}));
+      mocks.getRemoteUrl.mockResolvedValue('https://gitlab.com/group/repo.git');
+      mocks.resolveCommitHash.mockResolvedValue(sha('f'));
+      await openBoth();
+
+      await coordinator.copyRemoteFileUrlByUri({ scheme: 'file', fsPath: filePath } as never);
+      const repoRoot = detached ? '/repo' : '/other';
+      expect(mocks.resolveCommitHash).toHaveBeenCalledWith(repoRoot, 'HEAD');
+      expect(mocks.clipboardWriteText).toHaveBeenCalledWith(
+        `https://gitlab.com/group/repo/-/blob/${sha('f')}/src/file.ts`,
+      );
+    });
+
+    it('warns when no supported hosted remote is available', async () => {
+      mocks.getRepoSnapshot.mockResolvedValue(snapshotWithHead());
+      mocks.getRemoteUrl.mockResolvedValue(null);
+      await openBoth();
+      await coordinator.copyRemoteFileUrlByUri({ scheme: 'file', fsPath: '/repo/src/file.ts' } as never);
+      expect(mocks.showWarningMessage).toHaveBeenCalledWith(
+        expect.stringContaining('No supported hosted remote'),
+      );
+      expect(mocks.clipboardWriteText).not.toHaveBeenCalled();
+    });
+  });
 
   describe('stashFileByUri', () => {
     it('blocks file stashing in an untrusted workspace before discovery or Git calls', async () => {
