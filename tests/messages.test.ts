@@ -62,6 +62,19 @@ describe('gitAction validation', () => {
     }
   });
 
+  it('validates tag action target kinds', () => {
+    expect(isWebviewToExtensionMessage(gitAction({ action: 'createTag', target: HASH }))).toBe(true);
+    expect(isWebviewToExtensionMessage(gitAction({ action: 'createTag', target: 'main' }))).toBe(false);
+    expect(isWebviewToExtensionMessage(gitAction({ action: 'createTag', target: HASH.slice(0, 8) }))).toBe(false);
+    for (const action of ['deleteTag', 'pushTag'] as GitAction[]) {
+      expect(isWebviewToExtensionMessage(gitAction({ action, target: 'v1.0.0' }))).toBe(true);
+      for (const target of ['--delete', '-a', 'v1..v2', ':(exclude)src']) {
+        expect(isWebviewToExtensionMessage(gitAction({ action, target }))).toBe(false);
+      }
+      expect(isWebviewToExtensionMessage(gitAction({ action }))).toBe(false);
+    }
+  });
+
   it.each(['merge', 'rebase', 'deleteBranch', 'checkoutRemoteBranch', 'renameBranch', 'untrackBranch'] as GitAction[])('requires a safe ref target for %s', (action) => {
     expect(isWebviewToExtensionMessage(gitAction({ action, target: 'origin/feature/x' }))).toBe(true);
     expect(isWebviewToExtensionMessage(gitAction({ action }))).toBe(false);
@@ -71,6 +84,54 @@ describe('gitAction validation', () => {
     expect(isWebviewToExtensionMessage(gitAction({ action, target: 'a\nb' }))).toBe(false);
     expect(isWebviewToExtensionMessage(gitAction({ action, target: 'x'.repeat(256) }))).toBe(false);
     expect(isWebviewToExtensionMessage(gitAction({ action, target: 42 }))).toBe(false);
+  });
+
+  describe('file commit search message validation', () => {
+    it('accepts bounded control-free searches and file results', () => {
+      expect(isWebviewToExtensionMessage({
+        type: 'searchCommitsByFile',
+        payload: { query: 'src/index.ts', requestId: 0 },
+      })).toBe(true);
+      expect(isExtensionToWebviewMessage({
+        type: 'fileSearchResults',
+        payload: { query: 'src/index.ts', requestId: 0, matchingHashes: [HASH, SHA256] },
+      })).toBe(true);
+    });
+
+    it('requires exact keys and rejects invalid queries, request IDs and hashes', () => {
+      const valid = { type: 'searchCommitsByFile', payload: { query: 'src', requestId: 1 } };
+      expect(isWebviewToExtensionMessage({ ...valid, extra: true })).toBe(false);
+      expect(isWebviewToExtensionMessage({ ...valid, payload: { ...valid.payload, extra: true } })).toBe(false);
+      for (const payload of [
+        { query: '', requestId: 1 },
+        { query: '   ', requestId: 1 },
+        { query: 'x'.repeat(501), requestId: 1 },
+        { query: 'bad\u007fpath', requestId: 1 },
+        { query: '-all', requestId: 1 },
+        { query: 'src/../secret', requestId: 1 },
+        { query: ':(exclude)src', requestId: 1 },
+        { query: 'src', requestId: -1 },
+        { query: 'src', requestId: 1.5 },
+        { query: 'src', requestId: Number.POSITIVE_INFINITY },
+      ]) {
+        expect(isWebviewToExtensionMessage({ type: 'searchCommitsByFile', payload })).toBe(false);
+      }
+      expect(isExtensionToWebviewMessage({
+        type: 'fileSearchResults',
+        payload: { query: 'src', requestId: 1, matchingHashes: ['short'] },
+      })).toBe(false);
+    });
+
+    it('rejects prototype-pollution payloads at every file-search level', () => {
+      const pollutedTop = JSON.parse(
+        '{"type":"searchCommitsByFile","payload":{"query":"src","requestId":1},"__proto__":{"polluted":true}}',
+      );
+      const pollutedPayload = JSON.parse(
+        '{"type":"searchCommitsByFile","payload":{"query":"src","requestId":1,"constructor":{"polluted":true}}}',
+      );
+      expect(isWebviewToExtensionMessage(pollutedTop)).toBe(false);
+      expect(isWebviewToExtensionMessage(pollutedPayload)).toBe(false);
+    });
   });
 
   it.each(['cherryPick', 'revert', 'revertMerge'] as GitAction[])('requires a full commit hash for %s', (action) => {

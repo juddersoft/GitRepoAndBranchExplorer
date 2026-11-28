@@ -19,6 +19,7 @@ import {
   isSameSelection,
   listRefTargets,
   normalizeRepoKey,
+  parseHistoryFilterQuery,
   normalizeSelection,
   reconcileStateWithSnapshot,
   repoNodeKey,
@@ -194,8 +195,71 @@ describe('filterBranches', () => {
 });
 
 describe('computeVisibleCommits', () => {
+  it.each([
+    ['plain text', 'fix part', { textTerms: ['fix', 'part'], authorTerms: [], hashTerms: [], fileTerms: [] }],
+    ['author', 'author:alice', { textTerms: [], authorTerms: ['alice'], hashTerms: [], fileTerms: [] }],
+    ['quoted author', 'author:"Peter Judd"', { textTerms: [], authorTerms: ['Peter Judd'], hashTerms: [], fileTerms: [] }],
+    ['hash', 'hash:abc123', { textTerms: [], authorTerms: [], hashTerms: ['abc123'], fileTerms: [] }],
+    ['file', 'file:src/foo.ts', { textTerms: [], authorTerms: [], hashTerms: [], fileTerms: ['src/foo.ts'] }],
+    ['quoted file', 'file:"src/my file.ts"', { textTerms: [], authorTerms: [], hashTerms: [], fileTerms: ['src/my file.ts'] }],
+    ['mixed tokens', 'fix author:alice hash:abc file:src/foo.ts', {
+      textTerms: ['fix'],
+      authorTerms: ['alice'],
+      hashTerms: ['abc'],
+      fileTerms: ['src/foo.ts'],
+    }],
+    ['empty prefixes', 'author: hash: file: author:alice', {
+      textTerms: [],
+      authorTerms: ['alice'],
+      hashTerms: [],
+      fileTerms: [],
+    }],
+  ])('parses %s filters', (_label, query, expected) => {
+    expect(parseHistoryFilterQuery(query)).toEqual(expected);
+  });
+
+  it('parses commit-level author, hash and file filters alongside quoted text terms', () => {
+    expect(parseHistoryFilterQuery('fix author:"Grace Hopper" hash:abc file:src/index.ts "part two"')).toEqual({
+      textTerms: ['fix', 'part two'],
+      authorTerms: ['Grace Hopper'],
+      hashTerms: ['abc'],
+      fileTerms: ['src/index.ts'],
+    });
+  });
+
+  it('applies qualifier filters and asynchronous file matches as an AND', () => {
+    const state = stateWith({
+      historyFilterText: 'author:grace hash:ddd file:src/index.ts',
+      historyFileMatchingHashes: new Set([F2]),
+    });
+    expect(hashes(computeVisibleCommits(snapshot, state))).toEqual([F2]);
+    expect(computeVisibleCommits(snapshot, { ...state, historyFileMatchingHashes: new Set() })).toEqual([]);
+  });
+
   it('shows every commit when nothing is pinned or filtered', () => {
     expect(hashes(computeVisibleCommits(snapshot, stateWith({})))).toEqual([M, F2, B, F1, A, X]);
+  });
+
+  it('filters accurately by author, hash and author combined with plain text', () => {
+    expect(hashes(computeVisibleCommits(snapshot, stateWith({ historyFilterText: 'author:grace' })))).toEqual([F2, F1]);
+    expect(hashes(computeVisibleCommits(snapshot, stateWith({ historyFilterText: `hash:${B.slice(0, 8)}` })))).toEqual([B]);
+    expect(hashes(computeVisibleCommits(snapshot, stateWith({
+      historyFilterText: 'author:grace part two',
+    })))).toEqual([F2]);
+  });
+
+  it('uses file matches only for the query that produced them', () => {
+    const matched = stateWith({
+      historyFilterText: 'file:src/foo.ts',
+      historyFileMatchingHashes: new Set([F2, A]),
+    });
+    expect(hashes(computeVisibleCommits(snapshot, matched))).toEqual([F2, A]);
+
+    const mismatched = {
+      ...matched,
+      historyFileMatchingHashes: new Set<string>(),
+    };
+    expect(computeVisibleCommits(snapshot, mismatched)).toEqual([]);
   });
 
   it('walks the ancestors of a single pinned branch', () => {

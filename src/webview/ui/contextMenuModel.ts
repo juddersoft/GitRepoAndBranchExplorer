@@ -1,6 +1,6 @@
 import type { CommitNode, RepoSnapshot, StashInfo, WorktreeInfo } from '../../types/git';
 import type { BranchInfo } from '../../types/git';
-import type { TrackingIndicatorOrder } from '../../types/messages';
+import type { GitAction, TrackingIndicatorOrder } from '../../types/messages';
 import { planTrackedFetch } from '../../git/trackedFetch';
 import { parseUpstreamRef } from '../../git/remoteUrlBuilder';
 import type { ExplorerUiState, RefTarget } from './state';
@@ -23,6 +23,9 @@ export type MenuActionId =
   | 'toggleFolderCounts'
   | 'toggleTrackingOrder'
   | 'createBranchHere'
+  | 'createTag'
+  | 'deleteTag'
+  | 'pushTag'
   | 'renameBranch'
   | 'untrackBranch'
   | 'publishRepository'
@@ -50,16 +53,39 @@ export type MenuActionId =
   | 'openGitHub';
 
 export type MenuEntry =
-  | { kind: 'item'; id: MenuActionId; label: string; enabled: boolean; reason?: string }
+  | {
+      kind: 'item';
+      id: MenuActionId;
+      label: string;
+      enabled: boolean;
+      reason?: string;
+      gitAction?: GitAction;
+      danger?: boolean;
+    }
   | { kind: 'separator' };
 
 const BUSY_REASON = 'Another Git operation is running.';
 const DETACHED_REASON = 'HEAD is detached; check out a branch first.';
 
-function item(id: MenuActionId, label: string, disabledReason?: string): MenuEntry {
+function item(
+  id: MenuActionId,
+  label: string,
+  disabledReason?: string,
+  danger = false,
+): Extract<MenuEntry, { kind: 'item' }> {
   return disabledReason === undefined
-    ? { kind: 'item', id, label, enabled: true }
-    : { kind: 'item', id, label, enabled: false, reason: disabledReason };
+    ? { kind: 'item', id, label, enabled: true, ...(danger ? { danger: true } : {}) }
+    : { kind: 'item', id, label, enabled: false, reason: disabledReason, ...(danger ? { danger: true } : {}) };
+}
+
+function gitActionItem(
+  id: MenuActionId,
+  label: string,
+  gitAction: GitAction,
+  disabledReason?: string,
+  danger = false,
+): Extract<MenuEntry, { kind: 'item' }> {
+  return { ...item(id, label, disabledReason, danger), gitAction };
 }
 
 const SEPARATOR: MenuEntry = { kind: 'separator' };
@@ -137,7 +163,24 @@ export function buildRefMenu(snapshot: RepoSnapshot, state: ExplorerUiState, tar
   ];
 
   if (target.kind === 'tag') {
-    return [createBranch, SEPARATOR, merge, rebase, SEPARATOR, ...resetEntries];
+    const hasRemotes = (snapshot.remotes?.length ?? 0) > 0 || snapshot.remoteGroups.length > 0;
+    return [
+      createBranch,
+      SEPARATOR,
+      gitActionItem(
+        'pushTag',
+        'Push Tag to Remote\u2026',
+        'pushTag',
+        firstReason(busy, !hasRemotes && 'No remotes configured.'),
+      ),
+      SEPARATOR,
+      merge,
+      rebase,
+      SEPARATOR,
+      ...resetEntries,
+      SEPARATOR,
+      gitActionItem('deleteTag', 'Delete Tag\u2026', 'deleteTag', firstReason(busy), true),
+    ];
   }
 
   const isolate = item(
@@ -375,6 +418,7 @@ export function buildCommitMenu(snapshot: RepoSnapshot, state: ExplorerUiState, 
   return [
     item('copyHash', 'Copy Commit Hash'),
     item('createBranchHere', 'Create Branch from Here\u2026', firstReason(busy)),
+    gitActionItem('createTag', 'Create Tag\u2026', 'createTag', firstReason(busy)),
     SEPARATOR,
     item(
       'cherryPick',

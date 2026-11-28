@@ -1,9 +1,9 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { validateGitRef } from '../src/git/gitExecutor';
 import { parseRemoteHostInfo, validateCloneUrl } from '../src/git/remoteUrlBuilder';
-import { buildGitHubCommitUrl, buildRefMap, isValidCommitHash, parseForEachRefOutput, parseGitLogOutput } from '../src/git/gitService';
+import { buildGitHubCommitUrl, buildRefMap, GitService, isValidCommitHash, parseForEachRefOutput, parseGitLogOutput } from '../src/git/gitService';
 import { isExtensionToWebviewMessage, isValidWebviewMessage, isWebviewToExtensionMessage } from '../src/types/messages';
 import { buildCspHeader, getNonce } from '../src/webview/security';
 
@@ -59,6 +59,31 @@ describe('validateGitRef rejects hostile refs', () => {
     // `$(whoami)` is a legal ref name; execGit uses spawn() with an argv array, so it is never interpreted.
     expect(validateGitRef('$(whoami)')).toBe('$(whoami)');
   });
+});
+
+describe('tag and file-search injection guards', () => {
+  it.each(['--delete', '-a', 'v1..v2'])('rejects adversarial tag name %j at both boundaries', async (tag) => {
+    expect(isWebviewToExtensionMessage({
+      type: 'gitAction',
+      payload: { action: 'deleteTag', target: tag },
+    })).toBe(false);
+    const runGit = vi.fn(async () => '');
+    await expect(new GitService(runGit).deleteLocalTag('/repo', tag)).rejects.toThrow();
+    expect(runGit).not.toHaveBeenCalled();
+  });
+
+  it.each([':(exclude)src', '--all', '../secret', '\u0000'])(
+    'rejects adversarial file search %j before Git is spawned',
+    async (query) => {
+      expect(isWebviewToExtensionMessage({
+        type: 'searchCommitsByFile',
+        payload: { query, requestId: 1 },
+      })).toBe(false);
+      const runGit = vi.fn(async () => '');
+      await expect(new GitService(runGit).searchCommitsByFile('/repo', query)).rejects.toThrow();
+      expect(runGit).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('buildCspHeader', () => {

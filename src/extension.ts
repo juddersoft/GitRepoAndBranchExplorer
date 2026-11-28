@@ -14,6 +14,7 @@ import {
   GitRepoPanel,
   OPEN_REPOSITORY_COMMAND,
   REFRESH_COMMAND,
+  STASH_FILE_COMMAND,
 } from './webview/GitRepoPanel';
 import { SidebarViewProvider } from './webview/SidebarViewProvider';
 
@@ -40,6 +41,10 @@ export function activate(context: vscode.ExtensionContext): void {
       GitRepoPanel.refresh();
     }),
     vscode.commands.registerCommand(CLONE_REPOSITORY_COMMAND, () => GitRepoPanel.cloneRepository()),
+    vscode.commands.registerCommand(
+      STASH_FILE_COMMAND,
+      (uri?: vscode.Uri) => GitRepoPanel.stashFile(uri),
+    ),
     vscode.commands.registerCommand(
       'gitRepoAndBranchExplorer.toggleInlineBlame',
       () => blameController.toggleEnabled(),

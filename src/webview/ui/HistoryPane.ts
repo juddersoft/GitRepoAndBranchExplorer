@@ -292,6 +292,7 @@ export class HistoryPane {
     });
 
     this.search = createSearchBox('Filter History', (value) => callbacks.onHistoryFilterChange(value));
+    this.search.input.title = 'Filter by text, author:term, hash:prefix, or file:path';
 
     this.tabPinButton = button({
       className: 'toolbar-button toggle-button pin-button',

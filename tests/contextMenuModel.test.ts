@@ -326,12 +326,26 @@ describe('buildRefMenu: remote branches and tags', () => {
 
   it('offers branch creation, merge and rebase for a tag', () => {
     const menu = buildRefMenu(snapshot, state(), tagRefTarget(snapshot.tags[0]));
-    expect(ids(menu)).toEqual(['createBranchHere', 'merge', 'rebase', 'resetMixed', 'resetHard']);
+    expect(ids(menu)).toEqual([
+      'createBranchHere', 'pushTag', 'merge', 'rebase', 'resetMixed', 'resetHard', 'deleteTag',
+    ]);
+    expect(item(menu, 'pushTag').enabled).toBe(true);
+    expect(item(menu, 'deleteTag').danger).toBe(true);
     // The tag sits on HEAD's ancestry, so merging it would be a no-op.
     expect(item(menu, 'merge')).toMatchObject({ enabled: false, reason: expect.stringMatching(/already/i) });
     expect(item(menu, 'rebase').enabled).toBe(true);
     expect(item(menu, 'resetMixed').enabled).toBe(true);
     expect(item(menu, 'resetHard').enabled).toBe(true);
+  });
+
+  it('disables tag push without remotes while keeping local deletion available', () => {
+    const noRemotes = { ...snapshot, remotes: [], remoteGroups: [] };
+    const menu = buildRefMenu(noRemotes, state({ snapshot: noRemotes }), tagRefTarget(noRemotes.tags[0]));
+    expect(item(menu, 'pushTag')).toMatchObject({
+      enabled: false,
+      reason: 'No remotes configured.',
+    });
+    expect(item(menu, 'deleteTag').enabled).toBe(true);
   });
 });
 
@@ -408,8 +422,10 @@ describe('buildCommitMenu', () => {
 
   it('always allows copying the hash and disables mutations while busy', () => {
     const menu = buildCommitMenu(snapshot, state({ isBusy: true }), find(B));
+    expect(ids(menu).slice(0, 3)).toEqual(['copyHash', 'createBranchHere', 'createTag']);
     expect(item(menu, 'copyHash').enabled).toBe(true);
     expect(item(menu, 'createBranchHere').enabled).toBe(false);
+    expect(item(menu, 'createTag').enabled).toBe(false);
     expect(item(menu, 'revert').enabled).toBe(false);
   });
 });

@@ -25,7 +25,7 @@ export class ContextMenu {
       const row = el(
         'button',
         {
-          className: entry.enabled ? 'context-menu-item' : 'context-menu-item disabled',
+          className: `${entry.enabled ? 'context-menu-item' : 'context-menu-item disabled'}${entry.danger ? ' danger' : ''}`,
           title: entry.reason ?? '',
           attrs: { type: 'button', role: 'menuitem', 'aria-disabled': String(!entry.enabled), tabindex: '-1' },
         },

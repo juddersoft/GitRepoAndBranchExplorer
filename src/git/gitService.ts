@@ -822,6 +822,86 @@ export class GitService {
     await this.runGit(['checkout', ref, '--'], repoRoot);
   }
 
+  public async createTag(
+    repoRoot: string,
+    tagName: string,
+    targetHash: string,
+    message?: string,
+  ): Promise<void> {
+    const tag = validateGitRef(tagName);
+    const hash = assertCommitHash(targetHash);
+    if (message !== undefined && /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(message)) {
+      throw new Error('Tag message must not contain control characters.');
+    }
+    const args = message !== undefined && message.trim() !== ''
+      ? ['tag', '-a', tag, '-m', message, hash]
+      : ['tag', tag, hash];
+    await this.runGit(args, repoRoot);
+  }
+
+  public async deleteLocalTag(repoRoot: string, tagName: string): Promise<void> {
+    const tag = validateGitRef(tagName);
+    await this.runGit(['tag', '-d', tag], repoRoot);
+  }
+
+  public async pushTag(repoRoot: string, remoteName: string, tagName: string): Promise<void> {
+    const remote = validateGitRef(remoteName);
+    const tag = validateGitRef(tagName);
+    await this.runGit(
+      ['push', '--', remote, `refs/tags/${tag}`],
+      repoRoot,
+      { timeoutMs: NETWORK_GIT_TIMEOUT_MS },
+    );
+  }
+
+  public async searchCommitsByFile(
+    repoRoot: string,
+    fileQuery: string,
+    maxCount = 500,
+  ): Promise<string[]> {
+    if (/[\x00-\x1f\x7f]/.test(fileQuery)) {
+      throw new Error('Invalid file search query.');
+    }
+    let cleanQuery = fileQuery.trim().replace(/\\/g, '/');
+    while (cleanQuery.startsWith('./') || cleanQuery.startsWith('/')) {
+      cleanQuery = cleanQuery.startsWith('./') ? cleanQuery.slice(2) : cleanQuery.slice(1);
+    }
+    if (
+      cleanQuery.length === 0 ||
+      cleanQuery.length > 500 ||
+      /[\x00-\x1f\x7f]/.test(cleanQuery) ||
+      cleanQuery.startsWith('-') ||
+      cleanQuery.split('/').includes('..') ||
+      cleanQuery.includes(':(')
+    ) {
+      throw new Error('Invalid file search query.');
+    }
+    const wildcardQuery = `${cleanQuery.startsWith('*') ? '' : '*'}${cleanQuery}${cleanQuery.endsWith('*') ? '' : '*'}`;
+    const pathspec = `:(icase)${wildcardQuery}`;
+    const boundedMax = Number.isFinite(maxCount)
+      ? Math.max(1, Math.min(Math.floor(maxCount), 5000))
+      : 500;
+    const output = await this.runGit(
+      [
+        'log',
+        '--exclude=refs/stash',
+        '--exclude=refs/notes/*',
+        '--all',
+        '--date-order',
+        `--max-count=${boundedMax}`,
+        '--format=%H',
+        '--',
+        pathspec,
+      ],
+      repoRoot,
+    );
+    const hashes = output
+      .split(/\r?\n/)
+      .filter(isValidCommitHash)
+      .map((hash) => hash.toLowerCase());
+    return [...new Set(hashes)];
+  }
+
   public async createBranch(
     repoRoot: string,
     branchName: string,

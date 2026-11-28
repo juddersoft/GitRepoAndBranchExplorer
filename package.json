@@ -76,6 +76,10 @@
         "title": "Git Repo & Branch Explorer: Clone Repository…"
       },
       {
+        "command": "gitRepoAndBranchExplorer.stashFile",
+        "title": "Git Repo & Branch Explorer: Stash File…"
+      },
+      {
         "command": "gitRepoAndBranchExplorer.toggleInlineBlame",
         "title": "Git Repo & Branch Explorer: Toggle Inline Git Blame",
         "icon": "$(git-commit)"
@@ -91,6 +95,18 @@
         {
           "command": "gitRepoAndBranchExplorer.toggleFileAnnotate",
           "when": "resourceScheme == file",
+          "group": "gitRepoAndBranchExplorer@1"
+        },
+        {
+          "command": "gitRepoAndBranchExplorer.stashFile",
+          "when": "resourceScheme == file",
+          "group": "gitRepoAndBranchExplorer@2"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "gitRepoAndBranchExplorer.stashFile",
+          "when": "resourceScheme == file && !explorerResourceIsFolder",
           "group": "gitRepoAndBranchExplorer@1"
         }
       ]

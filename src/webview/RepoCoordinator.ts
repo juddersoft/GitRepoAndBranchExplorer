@@ -385,6 +385,9 @@ export class RepoCoordinator implements vscode.Disposable {
       case 'gitAction':
         void this.handleGitAction(message.payload.action, message.payload.target);
         break;
+      case 'searchCommitsByFile':
+        void this.handleSearchCommitsByFile(message.payload.query, message.payload.requestId);
+        break;
       case 'createBranchAtRef':
         void this.openCreateBranchDialog(message.payload.startPoint);
         break;
@@ -549,6 +552,176 @@ export class RepoCoordinator implements vscode.Disposable {
       this.postActionStatus(false);
     }
     await this.offerPostCloneActions(clonedPath);
+  }
+
+  public async stashFileByUri(uri?: vscode.Uri): Promise<void> {
+    if (!vscode.workspace.isTrusted) {
+      void vscode.window.showWarningMessage(WORKSPACE_TRUST_ERROR_MESSAGE);
+      return;
+    }
+    if (this.operationInProgress) {
+      void vscode.window.showInformationMessage('Another Git operation is already running.');
+      return;
+    }
+
+    const targetUri = uri ?? vscode.window.activeTextEditor?.document.uri;
+    if (!targetUri || targetUri.scheme !== 'file') {
+      void vscode.window.showInformationMessage('Select a file on disk to stash.');
+      return;
+    }
+
+    try {
+      if (fs.statSync(targetUri.fsPath).isDirectory()) {
+        void vscode.window.showInformationMessage('Select a file (not a folder) to stash.');
+        return;
+      }
+    } catch (err) {
+      void vscode.window.showWarningMessage(
+        `Could not inspect the selected file: ${describeError(err)}`,
+      );
+      return;
+    }
+
+    if (this.discoveredRepos.length === 0) {
+      if (!vscode.workspace.isTrusted) {
+        void vscode.window.showWarningMessage(WORKSPACE_TRUST_ERROR_MESSAGE);
+        return;
+      }
+      const workspaceFolderPaths = vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? [];
+      const configuredWorkspaceRoot = vscode.workspace
+        .getConfiguration('gitRepoAndBranchExplorer')
+        .get<string>('workspaceRoot', '')
+        .trim();
+      try {
+        this.discoveredRepos = await discoverWorkspaceRepositories(
+          workspaceFolderPaths,
+          configuredWorkspaceRoot,
+        );
+      } catch (err) {
+        void vscode.window.showErrorMessage(
+          `Could not discover Git repositories: ${describeError(err)}`,
+        );
+        return;
+      }
+    }
+
+    const candidateRoots = [
+      ...this.discoveredRepos.map((repo) => repo.repoRoot),
+      ...(this.lastSnapshot?.worktrees?.map((worktree) => worktree.path) ?? []),
+      ...(this.lastSnapshot?.repoRoot === undefined ? [] : [this.lastSnapshot.repoRoot]),
+    ];
+    const candidatePath = canonicalizeRepoPath(targetUri.fsPath);
+    const targetRepoRoot = Array.from(
+      new Map(
+        candidateRoots.map((repoRoot) => [normalizeRepoRootPath(repoRoot), repoRoot]),
+      ).entries(),
+    )
+      .filter(([normalizedRoot]) => this.isPathInsideRepo(normalizedRoot, candidatePath))
+      .sort(([left], [right]) => right.length - left.length)[0]?.[1];
+    if (targetRepoRoot === undefined) {
+      void vscode.window.showInformationMessage('This file is not inside a Git repository.');
+      return;
+    }
+
+    const relativePath = path.relative(targetRepoRoot, targetUri.fsPath).replace(/\\/g, '/');
+    if (
+      relativePath.length === 0 ||
+      path.posix.isAbsolute(relativePath) ||
+      relativePath === '..' ||
+      relativePath.startsWith('../')
+    ) {
+      void vscode.window.showInformationMessage('Select a file inside a Git repository to stash.');
+      return;
+    }
+
+    if (!vscode.workspace.isTrusted) {
+      void vscode.window.showWarningMessage(WORKSPACE_TRUST_ERROR_MESSAGE);
+      return;
+    }
+    if (this.operationInProgress) {
+      void vscode.window.showInformationMessage('Another Git operation is already running.');
+      return;
+    }
+    let entry: WorkingTreeFile | undefined;
+    try {
+      const files = await this.gitService.getWorkingTreeFiles(targetRepoRoot);
+      const matchesPath = (candidate: string): boolean =>
+        process.platform === 'win32'
+          ? candidate.toLowerCase() === relativePath.toLowerCase()
+          : candidate === relativePath;
+      entry = files.find(
+        (file) => matchesPath(file.path) || (file.originalPath !== undefined && matchesPath(file.originalPath)),
+      );
+    } catch (err) {
+      void vscode.window.showErrorMessage(
+        `Could not read changes for ${path.basename(targetUri.fsPath)}: ${describeError(err)}`,
+      );
+      return;
+    }
+    if (entry === undefined) {
+      void vscode.window.showInformationMessage(
+        'No uncommitted changes to stash for ' + path.basename(targetUri.fsPath) + '.',
+      );
+      return;
+    }
+
+    const message = await vscode.window.showInputBox({
+      title: 'Stash File',
+      prompt: 'Optional stash message for ' + entry.path,
+      placeHolder: 'Leave blank for default stash message',
+      ignoreFocusOut: true,
+    });
+    if (message === undefined) {
+      return;
+    }
+    if (!vscode.workspace.isTrusted) {
+      void vscode.window.showWarningMessage(WORKSPACE_TRUST_ERROR_MESSAGE);
+      return;
+    }
+    if (this.operationInProgress) {
+      void vscode.window.showInformationMessage('Another Git operation is already running.');
+      return;
+    }
+
+    this.operationInProgress = true;
+    this.postActionStatus(true, `Stashing ${path.basename(entry.path)}…`);
+    try {
+      await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: `Stashing ${path.basename(entry.path)}…`,
+          cancellable: false,
+        },
+        () => this.gitService.stashPush(targetRepoRoot, {
+          includeUntracked: entry.untracked,
+          ...(message.trim() === '' ? {} : { message }),
+          paths: entry.originalPath === undefined
+            ? [entry.path]
+            : [entry.originalPath, entry.path],
+        }),
+      );
+      void vscode.window.showInformationMessage('Stashed ' + entry.path + '.');
+    } catch (err) {
+      void vscode.window.showErrorMessage(`Could not stash ${entry.path}: ${describeError(err)}`);
+    } finally {
+      this.operationInProgress = false;
+      this.postActionStatus(false);
+      const snapshotRoots = this.lastSnapshot === null
+        ? []
+        : [
+            this.lastSnapshot.repoRoot,
+            ...this.lastSnapshot.worktrees?.map((worktree) => worktree.path) ?? [],
+          ];
+      if (
+        snapshotRoots.some(
+          (repoRoot) => normalizeRepoRootPath(repoRoot) === normalizeRepoRootPath(targetRepoRoot),
+        )
+      ) {
+        await this.loadRepository();
+      } else {
+        this.notifyRepositoryChange(targetRepoRoot);
+      }
+    }
   }
 
   private async resolveCloneSource(
@@ -1057,6 +1230,9 @@ export class RepoCoordinator implements vscode.Disposable {
       case 'createBranch':
         this.openCreateBranchDialog();
         break;
+      case 'createTag':
+        await this.handleCreateTag(target);
+        break;
       case 'renameBranch':
         await this.handleRenameBranch(target);
         break;
@@ -1081,6 +1257,12 @@ export class RepoCoordinator implements vscode.Disposable {
         break;
       case 'deleteBranch':
         await this.handleDeleteBranch(target);
+        break;
+      case 'deleteTag':
+        await this.handleDeleteTag(target);
+        break;
+      case 'pushTag':
+        await this.handlePushTag(target);
         break;
       case 'checkoutRemoteBranch':
         await this.handleCheckoutRemoteBranch(target);
@@ -1908,6 +2090,194 @@ export class RepoCoordinator implements vscode.Disposable {
       await this.runGitOperation(`Force-deleting branch ${target.name}`, (root) =>
         this.gitService.deleteLocalBranch(root, target.name, true),
       );
+    }
+  }
+
+  private async handleCreateTag(targetHash: string | undefined): Promise<void> {
+    if (!this.ensureTrustedWorkspace()) {
+      return;
+    }
+    const snapshot = this.lastSnapshot;
+    if (!snapshot) {
+      void vscode.window.showWarningMessage('No Git repository is loaded.');
+      return;
+    }
+    if (!isValidCommitHash(targetHash)) {
+      void vscode.window.showWarningMessage('Select a valid commit before creating a tag.');
+      return;
+    }
+    const normalizedHash = targetHash.toLowerCase();
+    const tagNames = new Set(snapshot.tags.map((tag) => tag.name));
+    const input = await vscode.window.showInputBox({
+      title: 'Create Tag',
+      placeHolder: 'e.g. v1.8.1',
+      ignoreFocusOut: true,
+      validateInput: (value) => {
+        try {
+          const tagName = validateGitRef(value);
+          return tagNames.has(tagName) ? `A tag named "${tagName}" already exists.` : undefined;
+        } catch (err) {
+          return describeError(err);
+        }
+      },
+    });
+    if (input === undefined) {
+      return;
+    }
+    let tagName: string;
+    try {
+      tagName = validateGitRef(input);
+    } catch (err) {
+      void vscode.window.showWarningMessage(`Cannot create tag: ${describeError(err)}`);
+      return;
+    }
+    if (tagNames.has(tagName)) {
+      void vscode.window.showWarningMessage(`A tag named "${tagName}" already exists.`);
+      return;
+    }
+    const message = await vscode.window.showInputBox({
+      title: 'Tag Message (Optional)',
+      placeHolder: 'Leave blank for a lightweight tag',
+      ignoreFocusOut: true,
+    });
+    if (message === undefined) {
+      return;
+    }
+    const succeeded = await this.runGitOperation(
+      `Creating tag ${tagName}`,
+      (root) => this.gitService.createTag(root, tagName, normalizedHash, message),
+    );
+    if (succeeded) {
+      void vscode.window.showInformationMessage(`Created tag "${tagName}".`);
+    }
+  }
+
+  private async handleDeleteTag(tagName: string | undefined): Promise<void> {
+    if (!this.ensureTrustedWorkspace()) {
+      return;
+    }
+    const snapshot = this.lastSnapshot;
+    if (!snapshot) {
+      void vscode.window.showWarningMessage('No Git repository is loaded.');
+      return;
+    }
+    let validatedName: string;
+    try {
+      validatedName = validateGitRef(tagName ?? '');
+    } catch (err) {
+      void vscode.window.showWarningMessage(`Cannot delete tag: ${describeError(err)}`);
+      return;
+    }
+    if (!snapshot.tags.some((tag) => tag.name === validatedName)) {
+      void vscode.window.showWarningMessage(`Tag "${validatedName}" is not available in the loaded repository.`);
+      return;
+    }
+    const choice = await vscode.window.showQuickPick(
+      [
+        {
+          label: 'Delete Tag',
+          detail: 'Removes the local tag only. Remote tags are not affected.',
+        },
+        { label: 'Cancel' },
+      ],
+      {
+        title: 'Delete Local Tag',
+        placeHolder: `Delete local tag "${validatedName}"?`,
+        ignoreFocusOut: true,
+      },
+    );
+    if (choice?.label !== 'Delete Tag') {
+      return;
+    }
+    await this.runGitOperation(
+      `Deleting tag ${validatedName}`,
+      (root) => this.gitService.deleteLocalTag(root, validatedName),
+    );
+  }
+
+  private async handlePushTag(tagName: string | undefined): Promise<void> {
+    if (!this.ensureTrustedWorkspace()) {
+      return;
+    }
+    const snapshot = this.lastSnapshot;
+    if (!snapshot) {
+      void vscode.window.showWarningMessage('No Git repository is loaded.');
+      return;
+    }
+    let validatedName: string;
+    try {
+      validatedName = validateGitRef(tagName ?? '');
+    } catch (err) {
+      void vscode.window.showWarningMessage(`Cannot push tag: ${describeError(err)}`);
+      return;
+    }
+    if (!snapshot.tags.some((tag) => tag.name === validatedName)) {
+      void vscode.window.showWarningMessage(`Tag "${validatedName}" is not available in the loaded repository.`);
+      return;
+    }
+    const remotes = this.getRemoteNames(snapshot);
+    if (remotes.length === 0) {
+      void vscode.window.showWarningMessage('No remotes configured to push this tag.');
+      return;
+    }
+    let remoteName = remotes[0] ?? '';
+    if (remotes.length > 1) {
+      const options = remotes.map((name) => {
+        const group = snapshot.remoteGroups.find((candidate) => candidate.remoteName === name);
+        return {
+          label: name,
+          ...(group?.providerName ? { description: group.providerName } : {}),
+          ...(group?.url ? { detail: group.url } : {}),
+          remoteName: name,
+        };
+      });
+      const selected = await vscode.window.showQuickPick(options, {
+        title: 'Push Tag to Remote',
+        placeHolder: `Choose a destination for tag "${validatedName}"`,
+        ignoreFocusOut: true,
+      });
+      if (!selected) {
+        return;
+      }
+      remoteName = selected.remoteName;
+    }
+    const succeeded = await this.runGitOperation(
+      `Pushing tag ${validatedName} to ${remoteName}`,
+      (root) => this.gitService.pushTag(root, remoteName, validatedName),
+    );
+    if (succeeded) {
+      void vscode.window.showInformationMessage(`Pushed tag "${validatedName}" to "${remoteName}".`);
+    }
+  }
+
+  private async handleSearchCommitsByFile(query: string, requestId: number): Promise<void> {
+    const empty = (): void => {
+      this.surfaces.get('editor')?.post({
+        type: 'fileSearchResults',
+        payload: { query, requestId, matchingHashes: [] },
+      });
+    };
+    if (!vscode.workspace.isTrusted) {
+      empty();
+      return;
+    }
+    const snapshot = this.lastSnapshot;
+    if (!snapshot) {
+      empty();
+      return;
+    }
+    try {
+      const matchingHashes = await this.gitService.searchCommitsByFile(
+        snapshot.repoRoot,
+        query,
+        Math.max(500, snapshot.commits.length),
+      );
+      this.surfaces.get('editor')?.post({
+        type: 'fileSearchResults',
+        payload: { query, requestId, matchingHashes },
+      });
+    } catch {
+      empty();
     }
   }
 

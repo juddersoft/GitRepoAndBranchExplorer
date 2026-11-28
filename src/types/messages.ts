@@ -23,6 +23,7 @@ export type GitAction =
   | 'openCommitInBrowser'
   | 'createPrInBrowser'
   | 'createBranch'
+  | 'createTag'
   | 'renameBranch'
   | 'untrackBranch'
   | 'publishRepository'
@@ -32,6 +33,8 @@ export type GitAction =
   | 'revert'
   | 'revertMerge'
   | 'deleteBranch'
+  | 'deleteTag'
+  | 'pushTag'
   | 'checkoutRemoteBranch'
   | 'resetMixed'
   | 'resetHard'
@@ -51,6 +54,7 @@ export const GIT_ACTION_LABELS: Readonly<Record<GitAction, string>> = {
   openCommitInBrowser: 'Open Commit in Browser',
   createPrInBrowser: 'Create Pull Request in Browser',
   createBranch: 'New Branch',
+  createTag: 'Create Tag',
   renameBranch: 'Rename Branch',
   untrackBranch: 'Untrack Remote Branch',
   publishRepository: 'Publish Repository / Add Remote',
@@ -60,6 +64,8 @@ export const GIT_ACTION_LABELS: Readonly<Record<GitAction, string>> = {
   revert: 'Revert',
   revertMerge: 'Revert Merge Commit',
   deleteBranch: 'Delete Branch',
+  deleteTag: 'Delete Tag',
+  pushTag: 'Push Tag',
   checkoutRemoteBranch: 'Check Out as Local Branch',
   resetMixed: 'Reset (Keep Changes)',
   resetHard: 'Reset (Delete Changes)',
@@ -83,6 +89,7 @@ export const GIT_ACTION_TARGETS: Readonly<Record<GitAction, GitActionTargetKind>
   openCommitInBrowser: 'commit',
   createPrInBrowser: 'optionalRef',
   createBranch: 'none',
+  createTag: 'commit',
   renameBranch: 'ref',
   untrackBranch: 'ref',
   publishRepository: 'none',
@@ -92,6 +99,8 @@ export const GIT_ACTION_TARGETS: Readonly<Record<GitAction, GitActionTargetKind>
   revert: 'commit',
   revertMerge: 'commit',
   deleteBranch: 'ref',
+  deleteTag: 'ref',
+  pushTag: 'ref',
   checkoutRemoteBranch: 'ref',
   resetMixed: 'refOrCommit',
   resetHard: 'refOrCommit',
@@ -157,6 +166,7 @@ export type WebviewToExtensionMessage =
   | { type: 'setTrackingOrder'; payload: { order: TrackingIndicatorOrder } }
   | { type: 'copyCommitHash'; payload: { hash: string } }
   | { type: 'requestCommitDetails'; payload: { hash: string } }
+  | { type: 'searchCommitsByFile'; payload: { query: string; requestId: number } }
   | { type: 'openFile'; payload: { hash: string; filePath: string; status: string } }
   | { type: 'openFileDiff'; payload: OpenFileDiffPayload }
   | { type: 'openInGitGraph' }
@@ -221,6 +231,7 @@ export type ExtensionToWebviewMessage =
   | { type: 'commitsAppended'; payload: { commits: CommitNode[]; hasMoreCommits: boolean } }
   | { type: 'repoError'; payload: RepoErrorPayload }
   | { type: 'commitDetails'; payload: CommitDetails }
+  | { type: 'fileSearchResults'; payload: { query: string; requestId: number; matchingHashes: string[] } }
   | { type: 'integrationsInfo'; payload: ExternalIntegrationsInfo }
   | { type: 'actionStatus'; payload: ActionStatusPayload }
   | { type: 'syncState'; payload: SyncStatePayload }
@@ -290,6 +301,44 @@ export function isSafeRefArgument(value: unknown): value is string {
   );
 }
 
+function isSafeStrictRefArgument(value: unknown): value is string {
+  if (!isSafeRefArgument(value)) {
+    return false;
+  }
+  return !(
+    ['..', '@{', '~', '^', ':', '?', '*', '[', '\\'].some((sequence) => value.includes(sequence)) ||
+    value === '@' ||
+    value.startsWith('/') ||
+    value.startsWith('.') ||
+    value.endsWith('/') ||
+    value.endsWith('.') ||
+    value.endsWith('.lock') ||
+    value.includes('//') ||
+    value.includes('/.')
+  );
+}
+
+function isSafeFileSearchQuery(value: unknown): value is string {
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.length > 500 ||
+    /[\x00-\x1f\x7f]/.test(value)
+  ) {
+    return false;
+  }
+  let normalized = value.trim().replace(/\\/g, '/');
+  while (normalized.startsWith('./') || normalized.startsWith('/')) {
+    normalized = normalized.startsWith('./') ? normalized.slice(2) : normalized.slice(1);
+  }
+  return (
+    normalized.length > 0 &&
+    !normalized.startsWith('-') &&
+    !normalized.split('/').includes('..') &&
+    !normalized.includes(':(')
+  );
+}
+
 /** Shape check for a selection payload; whether the refs exist is decided against the loaded snapshot. */
 export function isSyncStatePayload(value: unknown): value is SyncStatePayload {
   if (!isSafeRecord(value)) {
@@ -323,7 +372,9 @@ function isValidGitActionPayload(payload: Record<string, unknown> | null): boole
     case 'optionalRef':
       return target === undefined || isSafeRefArgument(target);
     case 'ref':
-      return isSafeRefArgument(target);
+      return action === 'deleteTag' || action === 'pushTag'
+        ? isSafeStrictRefArgument(target)
+        : isSafeRefArgument(target);
     case 'commit':
       return isCommitHash(target);
     case 'refOrCommit':
@@ -402,6 +453,26 @@ export function isWebviewToExtensionMessage(value: unknown): value is WebviewToE
       return isSyncStatePayload(payload);
     case 'gitAction':
       return isValidGitActionPayload(payload);
+    case 'searchCommitsByFile': {
+      if (
+        !hasOnlyFields(value, ['type', 'payload']) ||
+        Object.keys(value).length !== 2 ||
+        payload === null ||
+        !hasOnlyFields(payload, ['query', 'requestId']) ||
+        Object.keys(payload).length !== 2
+      ) {
+        return false;
+      }
+      const query = ownField(payload, 'query');
+      const requestId = ownField(payload, 'requestId');
+      return (
+        isSafeFileSearchQuery(query) &&
+        typeof requestId === 'number' &&
+        Number.isFinite(requestId) &&
+        Number.isInteger(requestId) &&
+        requestId >= 0
+      );
+    }
     case 'createBranchAtRef': {
       const startPoint = payload === null ? undefined : ownField(payload, 'startPoint');
       return isCommitHash(startPoint) || isSafeRefArgument(startPoint);
@@ -623,6 +694,25 @@ export function isExtensionToWebviewMessage(value: unknown): value is ExtensionT
         payload.files.every(
           (f: unknown) => isRecord(f) && isChangedFileStatus(f.status) && typeof f.path === 'string',
         )
+      );
+    case 'fileSearchResults':
+      return (
+        isSafeRecord(value) &&
+        hasOnlyFields(value, ['type', 'payload']) &&
+        Object.keys(value).length === 2 &&
+        isSafeRecord(payload) &&
+        hasOnlyFields(payload, ['query', 'requestId', 'matchingHashes']) &&
+        Object.keys(payload).length === 3 &&
+        typeof ownField(payload, 'query') === 'string' &&
+        (ownField(payload, 'query') as string).length >= 1 &&
+        (ownField(payload, 'query') as string).length <= 500 &&
+        !/[\x00-\x1f\x7f]/.test(ownField(payload, 'query') as string) &&
+        typeof ownField(payload, 'requestId') === 'number' &&
+        Number.isFinite(ownField(payload, 'requestId') as number) &&
+        Number.isInteger(ownField(payload, 'requestId') as number) &&
+        (ownField(payload, 'requestId') as number) >= 0 &&
+        Array.isArray(ownField(payload, 'matchingHashes')) &&
+        (ownField(payload, 'matchingHashes') as unknown[]).every(isCommitHash)
       );
     case 'integrationsInfo':
       return (

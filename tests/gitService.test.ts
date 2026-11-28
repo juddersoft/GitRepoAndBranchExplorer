@@ -47,6 +47,143 @@ describe('GitService cloneRepository', () => {
     }
   });
 
+  describe('GitService tags and file search', () => {
+    it('creates lightweight and annotated tags with validated refs and hashes', async () => {
+      const runGit = vi.fn(async () => '');
+      const service = new GitService(runGit);
+
+      await service.createTag('/repo', 'v1.0.0', sha('A'));
+      await service.createTag('/repo', 'release/v2', sha('B'), 'Release notes');
+
+      expect(runGit).toHaveBeenNthCalledWith(1, ['tag', 'v1.0.0', sha('a')], '/repo');
+      expect(runGit).toHaveBeenNthCalledWith(2, ['tag', '-a', 'release/v2', '-m', 'Release notes', sha('b')], '/repo');
+      await expect(service.createTag('/repo', 'v3', sha('c'), 'bad\u000bmessage')).rejects.toThrow(/control/i);
+    });
+
+    it.each(['-bad', 'a..b'])('rejects invalid tag name %j before spawning Git', async (tagName) => {
+      const runGit = vi.fn(async () => '');
+      await expect(new GitService(runGit).createTag('/repo', tagName, sha('a'))).rejects.toThrow();
+      expect(runGit).not.toHaveBeenCalled();
+    });
+
+    it.each(['HEAD', 'abc123', sha('g'), `${sha('a')}\n`])(
+      'rejects invalid tag target %j before spawning Git',
+      async (hash) => {
+        const runGit = vi.fn(async () => '');
+        await expect(new GitService(runGit).createTag('/repo', 'v1', hash)).rejects.toThrow();
+        expect(runGit).not.toHaveBeenCalled();
+      },
+    );
+
+    it('deletes tags locally, rejecting unsafe names, and pushes an explicit tag refspec', async () => {
+      const runGit = vi.fn(async () => '');
+      const service = new GitService(runGit);
+
+      await service.deleteLocalTag('/repo', 'v1.0.0');
+      await service.pushTag('/repo', 'origin', 'v1.0.0');
+
+      expect(runGit).toHaveBeenNthCalledWith(1, ['tag', '-d', 'v1.0.0'], '/repo');
+      expect(runGit).toHaveBeenNthCalledWith(
+        2,
+        ['push', '--', 'origin', 'refs/tags/v1.0.0'],
+        '/repo',
+        { timeoutMs: NETWORK_GIT_TIMEOUT_MS },
+      );
+      runGit.mockClear();
+      await expect(service.deleteLocalTag('/repo', '-bad')).rejects.toThrow();
+      await expect(service.pushTag('/repo', '--delete', 'v1')).rejects.toThrow();
+      await expect(service.pushTag('/repo', 'origin', '-a')).rejects.toThrow();
+      expect(runGit).not.toHaveBeenCalled();
+    });
+
+    it('builds a safe case-insensitive pathspec and returns unique lowercase hashes', async () => {
+      const runGit = vi.fn(async () => `${sha('A')}\n${sha('B')}\n${sha('A')}\ninvalid\n`);
+      const hashes = await new GitService(runGit).searchCommitsByFile('/repo', String.raw`.\src\*.ts`, 9000);
+
+      expect(hashes).toEqual([sha('a'), sha('b')]);
+      expect(runGit).toHaveBeenCalledWith(
+        [
+          'log',
+          '--exclude=refs/stash',
+          '--exclude=refs/notes/*',
+          '--all',
+          '--date-order',
+          '--max-count=5000',
+          '--format=%H',
+          '--',
+          ':(icase)*src/*.ts*',
+        ],
+        '/repo',
+      );
+    });
+
+    it.each([
+      '',
+      '   ',
+      '-all',
+      '../src/file.ts',
+      'src/../file.ts',
+      ':(glob)src/*',
+      ':(exclude)src',
+      'bad\u0000path',
+      'bad\npath',
+      'x'.repeat(501),
+    ])(
+      'rejects unsafe file query %j before spawning Git',
+      async (query) => {
+        const runGit = vi.fn(async () => '');
+        await expect(new GitService(runGit).searchCommitsByFile('/repo', query)).rejects.toThrow(/invalid file search/i);
+        expect(runGit).not.toHaveBeenCalled();
+      },
+    );
+
+    it('creates, snapshots and deletes lightweight and annotated tags in a real repository', async () => {
+      const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'git-tags-integration-'));
+      try {
+        execFileSync('git', ['init', '--quiet', repo]);
+        execFileSync('git', ['-C', repo, 'config', 'user.name', 'Test']);
+        execFileSync('git', ['-C', repo, 'config', 'user.email', 'test@example.com']);
+        execFileSync('git', ['-C', repo, 'commit', '--allow-empty', '-m', 'initial'], { stdio: 'ignore' });
+        const hash = execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+        const service = new GitService();
+
+        await service.createTag(repo, 'lightweight', hash);
+        await service.createTag(repo, 'annotated', hash, 'Release notes');
+        expect((await service.getRepoSnapshot(repo)).tags.map((tag) => tag.name).sort())
+          .toEqual(['annotated', 'lightweight']);
+
+        await service.deleteLocalTag(repo, 'lightweight');
+        expect((await service.getRepoSnapshot(repo)).tags.map((tag) => tag.name)).toEqual(['annotated']);
+      } finally {
+        fs.rmSync(repo, { recursive: true, force: true });
+      }
+    });
+
+    it('searches only commits touching a file in a real repository', async () => {
+      const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'git-file-search-integration-'));
+      try {
+        execFileSync('git', ['init', '--quiet', repo]);
+        execFileSync('git', ['-C', repo, 'config', 'user.name', 'Test']);
+        execFileSync('git', ['-C', repo, 'config', 'user.email', 'test@example.com']);
+        fs.mkdirSync(path.join(repo, 'src'));
+        fs.writeFileSync(path.join(repo, 'src', 'Alpha.ts'), 'export const alpha = 1;\n');
+        execFileSync('git', ['-C', repo, 'add', '.']);
+        execFileSync('git', ['-C', repo, 'commit', '-m', 'add alpha'], { stdio: 'ignore' });
+        const alphaHash = execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+        fs.writeFileSync(path.join(repo, 'docs.txt'), 'second file\n');
+        execFileSync('git', ['-C', repo, 'add', '.']);
+        execFileSync('git', ['-C', repo, 'commit', '-m', 'add docs'], { stdio: 'ignore' });
+        const docsHash = execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+
+        await expect(new GitService().searchCommitsByFile(repo, 'SRC/aLpHa.Ts'))
+          .resolves.toEqual([alphaHash]);
+        expect(docsHash).not.toBe(alphaHash);
+      } finally {
+        fs.rmSync(repo, { recursive: true, force: true });
+      }
+    });
+  });
+
   it('rejects an existing target folder before spawning Git', async () => {
     const runGit = vi.fn(async () => '');
     const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'git-clone-existing-'));

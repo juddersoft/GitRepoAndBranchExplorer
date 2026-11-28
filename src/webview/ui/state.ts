@@ -198,6 +198,8 @@ export interface ExplorerUiState {
   isLoadingMore: boolean;
   branchFilterText: string;
   historyFilterText: string;
+  historyFileMatchingHashes: Set<string>;
+  historyFileSearchPending: boolean;
   /** Branches isolated via the eye toggle; empty means every branch's history is shown. */
   pinnedBranchFullNames: Set<string>;
   /** Branch/tag inspected via single-click (full ref name); its history is focused. Distinct from the checked-out branch. */
@@ -237,6 +239,8 @@ export function createInitialState(): ExplorerUiState {
     isLoadingMore: false,
     branchFilterText: '',
     historyFilterText: '',
+    historyFileMatchingHashes: new Set(),
+    historyFileSearchPending: false,
     pinnedBranchFullNames: new Set(),
     selectedBranchFullName: null,
     selectedBranchRef: null,
@@ -310,18 +314,94 @@ export function collectReachableHashes(commits: readonly CommitNode[], tipHashes
   return reachable;
 }
 
-export function commitMatchesQuery(commit: CommitNode, query: string): boolean {
-  const q = normalizeQuery(query);
-  if (q === '') {
-    return true;
+export interface ParsedHistoryFilter {
+  textTerms: string[];
+  authorTerms: string[];
+  hashTerms: string[];
+  fileTerms: string[];
+}
+
+function tokenizeHistoryFilter(rawQuery: string): string[] {
+  const tokens: string[] = [];
+  let token = '';
+  let quote: '"' | "'" | null = null;
+  for (const char of rawQuery.trim()) {
+    if (quote !== null) {
+      if (char === quote) {
+        quote = null;
+      } else {
+        token += char;
+      }
+    } else if (char === '"' || char === "'") {
+      quote = char;
+    } else if (/\s/.test(char)) {
+      if (token !== '') {
+        tokens.push(token);
+        token = '';
+      }
+    } else {
+      token += char;
+    }
   }
+  if (token !== '') {
+    tokens.push(token);
+  }
+  return tokens;
+}
+
+export function parseHistoryFilterQuery(rawQuery: string): ParsedHistoryFilter {
+  const parsed: ParsedHistoryFilter = {
+    textTerms: [],
+    authorTerms: [],
+    hashTerms: [],
+    fileTerms: [],
+  };
+  for (const token of tokenizeHistoryFilter(rawQuery)) {
+    const qualifier = /^(author|hash|file):(.*)$/i.exec(token);
+    if (qualifier === null) {
+      parsed.textTerms.push(token);
+      continue;
+    }
+    const value = qualifier[2].trim();
+    if (value === '') {
+      continue;
+    }
+    switch (qualifier[1].toLowerCase()) {
+      case 'author':
+        parsed.authorTerms.push(value);
+        break;
+      case 'hash':
+        parsed.hashTerms.push(value);
+        break;
+      case 'file':
+        parsed.fileTerms.push(value);
+        break;
+    }
+  }
+  return parsed;
+}
+
+export function commitMatchesQuery(
+  commit: CommitNode,
+  query: string,
+  fileMatchingHashes?: ReadonlySet<string>,
+): boolean {
+  const filter = parseHistoryFilterQuery(query);
+  const searchableText = [
+    commit.subject,
+    commit.authorName,
+    commit.authorEmail,
+    commit.hash,
+    commit.shortHash,
+    ...commit.refs.map((ref) => ref.label),
+  ].map((value) => value.toLowerCase());
+  const author = `${commit.authorName}\n${commit.authorEmail}`.toLowerCase();
+  const hash = commit.hash.toLowerCase();
   return (
-    commit.subject.toLowerCase().includes(q) ||
-    commit.authorName.toLowerCase().includes(q) ||
-    commit.authorEmail.toLowerCase().includes(q) ||
-    commit.hash.startsWith(q) ||
-    commit.shortHash.startsWith(q) ||
-    commit.refs.some((ref) => ref.label.toLowerCase().includes(q))
+    filter.textTerms.every((term) => searchableText.some((value) => value.includes(term.toLowerCase()))) &&
+    filter.authorTerms.every((term) => author.includes(term.toLowerCase())) &&
+    filter.hashTerms.every((term) => hash.startsWith(term.toLowerCase())) &&
+    (filter.fileTerms.length === 0 || fileMatchingHashes?.has(commit.hash.toLowerCase()) === true)
   );
 }
 
@@ -408,7 +488,9 @@ export function computeVisibleCommits(snapshot: RepoSnapshot, state: ExplorerUiS
     const reachable = collectReachableHashes(snapshot.commits, tips);
     commits = commits.filter((c) => reachable.has(c.hash));
   }
-  return commits.filter((c) => commitMatchesQuery(c, state.historyFilterText));
+  return commits.filter((c) =>
+    commitMatchesQuery(c, state.historyFilterText, state.historyFileMatchingHashes)
+  );
 }
 
 /** Names of the branches/tags whose history is shown (selected ref first), or `[]` when showing everything. */

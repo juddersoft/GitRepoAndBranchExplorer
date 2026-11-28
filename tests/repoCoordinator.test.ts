@@ -25,6 +25,10 @@ const mocks = vi.hoisted(() => ({
   pushToRemoteBranch: vi.fn(),
   openExternal: vi.fn(),
   createBranch: vi.fn(),
+  createTag: vi.fn(),
+  deleteLocalTag: vi.fn(),
+  pushTag: vi.fn(),
+  searchCommitsByFile: vi.fn(),
   hasWorkingTreeChanges: vi.fn(),
   getWorkingTreeFiles: vi.fn(),
   resolveCommitHash: vi.fn(),
@@ -74,6 +78,9 @@ const mocks = vi.hoisted(() => ({
   fsStatSync: vi.fn(),
   getConfiguration: vi.fn(),
   cancellationListener: undefined as (() => void) | undefined,
+  activeTextEditor: undefined as
+    | { document: { uri: { scheme: string; fsPath: string } } }
+    | undefined,
 }));
 
 vi.mock('vscode', () => {
@@ -108,6 +115,9 @@ vi.mock('vscode', () => {
       showQuickPick: mocks.showQuickPick,
       showInputBox: mocks.showInputBox,
       showOpenDialog: mocks.showOpenDialog,
+      get activeTextEditor() {
+        return mocks.activeTextEditor;
+      },
       withProgress: (_options: unknown, task: (progress: unknown, token: unknown) => Promise<unknown>) => task(
         {},
         {
@@ -178,6 +188,10 @@ vi.mock('../src/git/gitService', () => ({
     resetCurrentBranch = mocks.resetCurrentBranch;
     revertMergeCommit = mocks.revertMergeCommit;
     cloneRepository = mocks.cloneRepository;
+    createTag = mocks.createTag;
+    deleteLocalTag = mocks.deleteLocalTag;
+    pushTag = mocks.pushTag;
+    searchCommitsByFile = mocks.searchCommitsByFile;
   },
   isValidCommitHash: (value: string): boolean => /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value),
 }));
@@ -312,6 +326,7 @@ describe('RepoCoordinator', () => {
     mocks.isTrusted = true;
     mocks.trustGrantedListeners.length = 0;
     mocks.cancellationListener = undefined;
+    mocks.activeTextEditor = undefined;
     mocks.getConfiguration.mockImplementation((section: string) => ({
       get: (_key: string, fallback: unknown) => {
         if (section === 'gitRepoAndBranchExplorer' && _key === 'workspaceRoot') return '/repo';
@@ -352,6 +367,10 @@ describe('RepoCoordinator', () => {
     mocks.getWorkingTreeFiles.mockResolvedValue([]);
     mocks.resolveCommitHash.mockResolvedValue(sha('a'));
     mocks.createBranch.mockResolvedValue(undefined);
+    mocks.createTag.mockResolvedValue(undefined);
+    mocks.deleteLocalTag.mockResolvedValue(undefined);
+    mocks.pushTag.mockResolvedValue(undefined);
+    mocks.searchCommitsByFile.mockResolvedValue([]);
     mocks.addWorktree.mockResolvedValue(undefined);
     mocks.removeWorktree.mockResolvedValue(undefined);
     mocks.applyStash.mockResolvedValue(undefined);
@@ -414,6 +433,305 @@ describe('RepoCoordinator', () => {
     coordinator.attach(editor);
     coordinator.handleMessage('editor', { type: 'webviewReady' });
   }
+
+  describe('stashFileByUri', () => {
+    it('blocks file stashing in an untrusted workspace before discovery or Git calls', async () => {
+      mocks.isTrusted = false;
+
+      await coordinator.stashFileByUri({ scheme: 'file', fsPath: '/repo/src/foo.ts' } as never);
+
+      expect(mocks.showWarningMessage).toHaveBeenCalledWith(
+        'Trust this workspace in VS Code before using Git Repo & Branch Explorer. Git commands are disabled in untrusted workspaces.',
+      );
+      expect(mocks.discoverWorkspaceRepositories).not.toHaveBeenCalled();
+      expect(mocks.getWorkingTreeFiles).not.toHaveBeenCalled();
+      expect(mocks.stashPush).not.toHaveBeenCalled();
+    });
+
+    it('shows an info message and returns while another Git operation is running', async () => {
+      (coordinator as unknown as { operationInProgress: boolean }).operationInProgress = true;
+
+      await coordinator.stashFileByUri({ scheme: 'file', fsPath: '/repo/src/foo.ts' } as never);
+
+      expect(mocks.showInformationMessage).toHaveBeenCalledWith(
+        'Another Git operation is already running.',
+      );
+      expect(mocks.discoverWorkspaceRepositories).not.toHaveBeenCalled();
+      expect(mocks.getWorkingTreeFiles).not.toHaveBeenCalled();
+      expect(mocks.stashPush).not.toHaveBeenCalled();
+    });
+
+    it('returns cleanly for a missing URI or a non-file URI', async () => {
+      await coordinator.stashFileByUri();
+      await coordinator.stashFileByUri({ scheme: 'untitled', fsPath: 'Untitled-1' } as never);
+
+      expect(mocks.showInformationMessage).toHaveBeenCalledTimes(2);
+      expect(mocks.showInformationMessage).toHaveBeenCalledWith('Select a file on disk to stash.');
+      expect(mocks.getWorkingTreeFiles).not.toHaveBeenCalled();
+      expect(mocks.stashPush).not.toHaveBeenCalled();
+    });
+
+    it('shows folder information and does not call Git for a directory path', async () => {
+      mocks.fsStatSync.mockImplementation(() => ({ isDirectory: () => true }));
+
+      await coordinator.stashFileByUri({ scheme: 'file', fsPath: '/repo/src' } as never);
+
+      expect(mocks.showInformationMessage).toHaveBeenCalledWith('Select a file (not a folder) to stash.');
+      expect(mocks.discoverWorkspaceRepositories).not.toHaveBeenCalled();
+      expect(mocks.getWorkingTreeFiles).not.toHaveBeenCalled();
+      expect(mocks.stashPush).not.toHaveBeenCalled();
+    });
+
+    it('returns cleanly for a file outside discovered repositories, including sibling-prefix paths', async () => {
+      mocks.fsStatSync.mockImplementation(() => ({ isDirectory: () => false }));
+      mocks.discoverWorkspaceRepositories.mockResolvedValue([
+        { repoRoot: '/repos/app', repoName: 'app', commonDir: '/repos/app/.git', currentBranch: 'main' },
+      ]);
+
+      await coordinator.stashFileByUri({ scheme: 'file', fsPath: '/repos/app-evil/file.ts' } as never);
+
+      expect(mocks.showInformationMessage).toHaveBeenCalledWith('This file is not inside a Git repository.');
+      expect(mocks.getWorkingTreeFiles).not.toHaveBeenCalled();
+      expect(mocks.stashPush).not.toHaveBeenCalled();
+    });
+
+    it('reports a clean file without prompting or pushing', async () => {
+      await openBoth();
+      mocks.fsStatSync.mockImplementation(() => ({ isDirectory: () => false }));
+      mocks.getWorkingTreeFiles.mockResolvedValue([]);
+
+      await coordinator.stashFileByUri({ scheme: 'file', fsPath: '/repo/src/foo.ts' } as never);
+
+      expect(mocks.getWorkingTreeFiles).toHaveBeenCalledWith('/repo');
+      expect(mocks.showInformationMessage).toHaveBeenCalledWith(
+        'No uncommitted changes to stash for foo.ts.',
+      );
+      expect(mocks.showInputBox).not.toHaveBeenCalled();
+      expect(mocks.stashPush).not.toHaveBeenCalled();
+    });
+
+    it('stashes a tracked modified file with a message, refreshes the active repo, and resets busy state', async () => {
+      await openBoth();
+      mocks.fsStatSync.mockImplementation(() => ({ isDirectory: () => false }));
+      mocks.getWorkingTreeFiles.mockResolvedValue([{
+        path: 'src/foo.ts',
+        indexStatus: ' ',
+        worktreeStatus: 'M',
+        untracked: false,
+      }]);
+      mocks.showInputBox.mockResolvedValue('work in progress');
+      mocks.getRepoSnapshot.mockClear();
+
+      await coordinator.stashFileByUri({ scheme: 'file', fsPath: '/repo/src/foo.ts' } as never);
+
+      expect(mocks.showInputBox).toHaveBeenCalledWith(expect.objectContaining({
+        title: 'Stash File',
+        prompt: 'Optional stash message for src/foo.ts',
+      }));
+      expect(mocks.stashPush).toHaveBeenCalledWith('/repo', {
+        includeUntracked: false,
+        message: 'work in progress',
+        paths: ['src/foo.ts'],
+      });
+      await vi.waitFor(() => expect(mocks.getRepoSnapshot).toHaveBeenCalledWith('/repo'));
+      expect((coordinator as unknown as { operationInProgress: boolean }).operationInProgress).toBe(false);
+    });
+
+    it('omits message for a blank optional message', async () => {
+      await openBoth();
+      mocks.fsStatSync.mockImplementation(() => ({ isDirectory: () => false }));
+      mocks.getWorkingTreeFiles.mockResolvedValue([{
+        path: 'src/foo.ts',
+        indexStatus: ' ',
+        worktreeStatus: 'M',
+        untracked: false,
+      }]);
+      mocks.showInputBox.mockResolvedValue('');
+
+      await coordinator.stashFileByUri({ scheme: 'file', fsPath: '/repo/src/foo.ts' } as never);
+
+      expect(mocks.stashPush).toHaveBeenCalledWith('/repo', {
+        includeUntracked: false,
+        paths: ['src/foo.ts'],
+      });
+    });
+
+    it('returns cleanly when the stash message input is cancelled', async () => {
+      await openBoth();
+      mocks.fsStatSync.mockImplementation(() => ({ isDirectory: () => false }));
+      mocks.getWorkingTreeFiles.mockResolvedValue([{
+        path: 'src/foo.ts',
+        indexStatus: ' ',
+        worktreeStatus: 'M',
+        untracked: false,
+      }]);
+      mocks.showInputBox.mockResolvedValue(undefined);
+
+      await coordinator.stashFileByUri({ scheme: 'file', fsPath: '/repo/src/foo.ts' } as never);
+
+      expect(mocks.stashPush).not.toHaveBeenCalled();
+    });
+
+    it('automatically includes untracked files in the stash', async () => {
+      await openBoth();
+      mocks.fsStatSync.mockImplementation(() => ({ isDirectory: () => false }));
+      mocks.getWorkingTreeFiles.mockResolvedValue([{
+        path: 'notes.txt',
+        indexStatus: '?',
+        worktreeStatus: '?',
+        untracked: true,
+      }]);
+      mocks.showInputBox.mockResolvedValue('');
+
+      await coordinator.stashFileByUri({ scheme: 'file', fsPath: '/repo/notes.txt' } as never);
+
+      expect(mocks.stashPush).toHaveBeenCalledWith('/repo', {
+        includeUntracked: true,
+        paths: ['notes.txt'],
+      });
+    });
+
+    it('stashes both original and renamed paths when either side is selected', async () => {
+      await openBoth();
+      mocks.fsStatSync.mockImplementation(() => ({ isDirectory: () => false }));
+      const renamed = {
+        path: 'new name.ts',
+        originalPath: 'old name.ts',
+        indexStatus: 'R',
+        worktreeStatus: ' ',
+        untracked: false,
+      };
+      mocks.getWorkingTreeFiles.mockResolvedValue([renamed]);
+
+      for (const fsPath of ['/repo/new name.ts', '/repo/old name.ts']) {
+        mocks.showInputBox.mockResolvedValueOnce('rename');
+        await coordinator.stashFileByUri({ scheme: 'file', fsPath } as never);
+      }
+
+      expect(mocks.stashPush).toHaveBeenCalledTimes(2);
+      expect(mocks.stashPush).toHaveBeenNthCalledWith(1, '/repo', {
+        includeUntracked: false,
+        message: 'rename',
+        paths: ['old name.ts', 'new name.ts'],
+      });
+      expect(mocks.stashPush).toHaveBeenNthCalledWith(2, '/repo', {
+        includeUntracked: false,
+        message: 'rename',
+        paths: ['old name.ts', 'new name.ts'],
+      });
+    });
+
+    it('resolves a file in a linked worktree to the longest worktree root', async () => {
+      mocks.getRepoSnapshot.mockResolvedValue({
+        ...MAIN_AND_FEATURE(),
+        worktrees: [
+          {
+            path: '/repo', headHash: sha('a'), branchName: 'main', isDetached: false,
+            isBare: false, isMain: true, isCurrent: true, isLocked: false, isPrunable: false,
+          },
+          {
+            path: '/repos/wt', headHash: sha('b'), branchName: 'feature', isDetached: false,
+            isBare: false, isMain: false, isCurrent: false, isLocked: false, isPrunable: false,
+          },
+        ],
+      });
+      await openBoth();
+      mocks.fsStatSync.mockImplementation(() => ({ isDirectory: () => false }));
+      mocks.getWorkingTreeFiles.mockResolvedValue([{
+        path: 'src/foo.ts',
+        indexStatus: ' ',
+        worktreeStatus: 'M',
+        untracked: false,
+      }]);
+      mocks.showInputBox.mockResolvedValue('worktree stash');
+
+      await coordinator.stashFileByUri({ scheme: 'file', fsPath: '/repos/wt/src/foo.ts' } as never);
+
+      expect(mocks.getWorkingTreeFiles).toHaveBeenCalledWith('/repos/wt');
+      expect(mocks.stashPush).toHaveBeenCalledWith('/repos/wt', {
+        includeUntracked: false,
+        message: 'worktree stash',
+        paths: ['src/foo.ts'],
+      });
+    });
+
+    it('stashes in a non-active discovered repo and notifies without clobbering the active snapshot', async () => {
+      mocks.discoverWorkspaceRepositories.mockResolvedValue([
+        { repoRoot: '/repo', repoName: 'repo', commonDir: '/repo/.git', currentBranch: 'main' },
+        { repoRoot: '/other', repoName: 'other', commonDir: '/other/.git', currentBranch: 'dev' },
+      ]);
+      await openBoth();
+      mocks.fsStatSync.mockImplementation(() => ({ isDirectory: () => false }));
+      mocks.getWorkingTreeFiles.mockResolvedValue([{
+        path: 'src/other.ts',
+        indexStatus: ' ',
+        worktreeStatus: 'M',
+        untracked: false,
+      }]);
+      mocks.showInputBox.mockResolvedValue('other repo');
+      const listener = vi.fn();
+      coordinator.onDidRepositoryChange(listener);
+      mocks.getRepoSnapshot.mockClear();
+
+      await coordinator.stashFileByUri({ scheme: 'file', fsPath: '/other/src/other.ts' } as never);
+
+      expect(mocks.stashPush).toHaveBeenCalledWith('/other', {
+        includeUntracked: false,
+        message: 'other repo',
+        paths: ['src/other.ts'],
+      });
+      expect(listener).toHaveBeenCalledWith('/other');
+      expect(mocks.getRepoSnapshot).not.toHaveBeenCalled();
+      expect(coordinator.getActiveRepoRoot()).toBe('/repo');
+    });
+
+    it('falls back to the active text editor URI when called without a URI', async () => {
+      await openBoth();
+      mocks.fsStatSync.mockImplementation(() => ({ isDirectory: () => false }));
+      mocks.activeTextEditor = {
+        document: { uri: { scheme: 'file', fsPath: '/repo/src/foo.ts' } },
+      };
+      mocks.getWorkingTreeFiles.mockResolvedValue([{
+        path: 'src/foo.ts',
+        indexStatus: ' ',
+        worktreeStatus: 'M',
+        untracked: false,
+      }]);
+      mocks.showInputBox.mockResolvedValue('');
+
+      await coordinator.stashFileByUri();
+
+      expect(mocks.getWorkingTreeFiles).toHaveBeenCalledWith('/repo');
+      expect(mocks.stashPush).toHaveBeenCalledWith('/repo', {
+        includeUntracked: false,
+        paths: ['src/foo.ts'],
+      });
+    });
+
+    it('cold-starts repository discovery before resolving and stashing a file', async () => {
+      mocks.fsStatSync.mockImplementation(() => ({ isDirectory: () => false }));
+      mocks.discoverWorkspaceRepositories.mockResolvedValue([
+        { repoRoot: '/repo', repoName: 'repo', commonDir: '/repo/.git', currentBranch: 'main' },
+      ]);
+      mocks.getWorkingTreeFiles.mockResolvedValue([{
+        path: 'src/cold.ts',
+        indexStatus: ' ',
+        worktreeStatus: 'M',
+        untracked: false,
+      }]);
+      mocks.showInputBox.mockResolvedValue('cold start');
+
+      await coordinator.stashFileByUri({ scheme: 'file', fsPath: '/repo/src/cold.ts' } as never);
+
+      expect(mocks.discoverWorkspaceRepositories).toHaveBeenCalled();
+      expect(mocks.getWorkingTreeFiles).toHaveBeenCalledWith('/repo');
+      expect(mocks.stashPush).toHaveBeenCalledWith('/repo', {
+        includeUntracked: false,
+        message: 'cold start',
+        paths: ['src/cold.ts'],
+      });
+    });
+  });
 
   it('switches only to discovered repositories and resets repo-scoped selection', async () => {
     const diffProvider = {
@@ -668,6 +986,190 @@ describe('RepoCoordinator', () => {
     });
 
     await vi.waitFor(() => expect(mocks.unsetBranchUpstream).toHaveBeenCalledWith('/repo', 'main'));
+  });
+
+  describe('tag management', () => {
+    it('creates lightweight and annotated tags from validated commit targets', async () => {
+      await openBoth();
+      mocks.showInputBox
+        .mockResolvedValueOnce('v2-light')
+        .mockResolvedValueOnce('')
+        .mockResolvedValueOnce('v2-release')
+        .mockResolvedValueOnce('Release notes');
+
+      coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'createTag', target: sha('A') },
+      });
+      await vi.waitFor(() => expect(mocks.createTag).toHaveBeenCalledWith('/repo', 'v2-light', sha('a'), ''));
+
+      coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'createTag', target: sha('B') },
+      });
+      await vi.waitFor(() => expect(mocks.createTag).toHaveBeenLastCalledWith(
+        '/repo',
+        'v2-release',
+        sha('b'),
+        'Release notes',
+      ));
+    });
+
+    it('validates duplicate tag names and cancels cleanly on Escape', async () => {
+      await openBoth();
+      mocks.showInputBox.mockResolvedValueOnce('v1');
+
+      coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'createTag', target: sha('a') },
+      });
+      await vi.waitFor(() => expect(mocks.showInputBox).toHaveBeenCalled());
+      const options = mocks.showInputBox.mock.calls[0][0] as {
+        validateInput: (value: string) => string | undefined;
+      };
+      expect(options.validateInput('v1')).toBe('A tag named "v1" already exists.');
+      await vi.waitFor(() => expect(mocks.showWarningMessage).toHaveBeenCalledWith(
+        'A tag named "v1" already exists.',
+      ));
+      expect(mocks.createTag).not.toHaveBeenCalled();
+
+      mocks.showInputBox.mockReset();
+      mocks.showInputBox.mockResolvedValueOnce(undefined);
+      coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'createTag', target: sha('a') },
+      });
+      await vi.waitFor(() => expect(mocks.showInputBox).toHaveBeenCalled());
+      expect(mocks.createTag).not.toHaveBeenCalled();
+    });
+
+    it('silently confirms or cancels local tag deletion and rejects unknown tags', async () => {
+      await openBoth();
+      mocks.showQuickPick.mockResolvedValueOnce({ label: 'Delete Tag' });
+      coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'deleteTag', target: 'v1' },
+      });
+      await vi.waitFor(() => expect(mocks.deleteLocalTag).toHaveBeenCalledWith('/repo', 'v1'));
+      expect(mocks.showQuickPick).toHaveBeenCalledWith(expect.any(Array), {
+        title: 'Delete Local Tag',
+        placeHolder: 'Delete local tag "v1"?',
+        ignoreFocusOut: true,
+      });
+
+      mocks.showQuickPick.mockResolvedValueOnce({ label: 'Cancel' });
+      coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'deleteTag', target: 'v1' },
+      });
+      await vi.waitFor(() => expect(mocks.showQuickPick).toHaveBeenCalledTimes(2));
+      expect(mocks.deleteLocalTag).toHaveBeenCalledTimes(1);
+
+      coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'deleteTag', target: 'unknown' },
+      });
+      await vi.waitFor(() => expect(mocks.showWarningMessage).toHaveBeenCalledWith(
+        'Tag "unknown" is not available in the loaded repository.',
+      ));
+      expect(mocks.showQuickPick).toHaveBeenCalledTimes(2);
+    });
+
+    it('warns when no remotes exist and otherwise auto-pushes to one remote', async () => {
+      await openBoth();
+      coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'pushTag', target: 'v1' },
+      });
+      await vi.waitFor(() => expect(mocks.showWarningMessage).toHaveBeenCalledWith(
+        'No remotes configured to push this tag.',
+      ));
+      expect(mocks.pushTag).not.toHaveBeenCalled();
+
+      const withRemote = MAIN_AND_FEATURE();
+      withRemote.remoteGroups = [{ remoteName: 'origin', branches: [] }];
+      mocks.getRepoSnapshot.mockResolvedValue(withRemote);
+      coordinator.handleMessage('sidebar', { type: 'requestRefresh' });
+      await vi.waitFor(() => expect(sidebar.ofType('repoSnapshot').length).toBeGreaterThan(1));
+      coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'pushTag', target: 'v1' },
+      });
+      await vi.waitFor(() => expect(mocks.pushTag).toHaveBeenCalledWith('/repo', 'origin', 'v1'));
+      expect(mocks.showQuickPick).not.toHaveBeenCalled();
+    });
+
+    it('uses a silent QuickPick to select among multiple remotes', async () => {
+      const snapshot = MAIN_AND_FEATURE();
+      snapshot.remoteGroups = [
+        { remoteName: 'origin', branches: [], providerName: 'GitHub', url: 'https://github.com/o/r' },
+        { remoteName: 'upstream', branches: [], providerName: 'GitHub', url: 'https://github.com/u/r' },
+      ];
+      mocks.getRepoSnapshot.mockResolvedValue(snapshot);
+      mocks.showQuickPick.mockResolvedValueOnce({ label: 'upstream', remoteName: 'upstream' });
+      await openBoth();
+
+      coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'pushTag', target: 'v1' },
+      });
+      await vi.waitFor(() => expect(mocks.pushTag).toHaveBeenCalledWith('/repo', 'upstream', 'v1'));
+      expect(mocks.showQuickPick).toHaveBeenCalledWith([
+        { label: 'origin', description: 'GitHub', detail: 'https://github.com/o/r', remoteName: 'origin' },
+        { label: 'upstream', description: 'GitHub', detail: 'https://github.com/u/r', remoteName: 'upstream' },
+      ], {
+        title: 'Push Tag to Remote',
+        placeHolder: 'Choose a destination for tag "v1"',
+        ignoreFocusOut: true,
+      });
+    });
+  });
+
+  describe('commit file search', () => {
+    it('returns empty matches without invoking Git in an untrusted workspace', async () => {
+      await openBoth();
+      mocks.isTrusted = false;
+
+      coordinator.handleMessage('editor', {
+        type: 'searchCommitsByFile',
+        payload: { query: 'src/a.ts', requestId: 7 },
+      });
+      await vi.waitFor(() => expect(editor.ofType('fileSearchResults')).toContainEqual({
+        type: 'fileSearchResults',
+        payload: { query: 'src/a.ts', requestId: 7, matchingHashes: [] },
+      }));
+      expect(mocks.searchCommitsByFile).not.toHaveBeenCalled();
+    });
+
+    it('returns matching hashes with the originating request ID', async () => {
+      const matches = [sha('a'), sha('b')];
+      mocks.searchCommitsByFile.mockResolvedValue(matches);
+      await openBoth();
+
+      coordinator.handleMessage('editor', {
+        type: 'searchCommitsByFile',
+        payload: { query: 'src/a.ts', requestId: 8 },
+      });
+      await vi.waitFor(() => expect(editor.ofType('fileSearchResults')).toContainEqual({
+        type: 'fileSearchResults',
+        payload: { query: 'src/a.ts', requestId: 8, matchingHashes: matches },
+      }));
+      expect(mocks.searchCommitsByFile).toHaveBeenCalledWith('/repo', 'src/a.ts', 500);
+    });
+
+    it('falls back to empty matches when Git or validation fails', async () => {
+      mocks.searchCommitsByFile.mockRejectedValue(new Error('Invalid file search query.'));
+      await openBoth();
+
+      coordinator.handleMessage('editor', {
+        type: 'searchCommitsByFile',
+        payload: { query: 'src/missing.ts', requestId: 9 },
+      });
+      await vi.waitFor(() => expect(editor.ofType('fileSearchResults')).toContainEqual({
+        type: 'fileSearchResults',
+        payload: { query: 'src/missing.ts', requestId: 9, matchingHashes: [] },
+      }));
+    });
   });
 
   it('shows an irreversible silent delete confirmation', async () => {

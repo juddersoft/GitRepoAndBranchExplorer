@@ -10,7 +10,7 @@ import type { MenuActionId } from './contextMenuModel';
 import { buildCommitMenu } from './contextMenuModel';
 import { el } from './dom';
 import { HistoryPane } from './HistoryPane';
-import { computeVisibleCommits } from './state';
+import { computeVisibleCommits, parseHistoryFilterQuery } from './state';
 import type { BadgeKindToggle, ExplorerUiState } from './state';
 import {
   cacheCommitDetails,
@@ -61,6 +61,14 @@ let columnWidths: StoredColumnWidths = readPersistedColumnWidths(vscode.getState
 const knownRemoteNames = new Set<string>();
 let pendingRevealCommitHash: string | null = null;
 let createWorktreeModal: CreateWorktreeModal | null = null;
+let fileSearchRequestId = 0;
+let activeFileSearch:
+  | {
+      requestId: number;
+      queries: string[];
+      results: Map<string, string[]>;
+    }
+  | null = null;
 
 function persist(): void {
   const data: PersistedState = {
@@ -100,6 +108,9 @@ function runCommitMenuAction(id: MenuActionId, commit: CommitNode): void {
         payload: { startPoint: commit.hash, sourceKind: 'commit' },
       });
       break;
+    case 'createTag':
+      postGitAction('createTag', commit.hash);
+      break;
     case 'cherryPick':
     case 'revert':
     case 'revertMerge':
@@ -115,6 +126,34 @@ function runCommitMenuAction(id: MenuActionId, commit: CommitNode): void {
       break;
     default:
       break;
+  }
+}
+
+function updateHistoryFilter(text: string): void {
+  const fileTerms = [...new Set(parseHistoryFilterQuery(text).fileTerms)];
+  const searchableTerms = fileTerms.every((term) => term.length <= 500)
+    ? fileTerms
+    : [];
+  activeFileSearch = searchableTerms.length === 0
+    ? null
+    : {
+        requestId: ++fileSearchRequestId,
+        queries: searchableTerms,
+        results: new Map(),
+      };
+  setState({
+    historyFilterText: text,
+    historyFileMatchingHashes: new Set(),
+    historyFileSearchPending: activeFileSearch !== null,
+  });
+  const search = activeFileSearch;
+  if (search !== null) {
+    for (const query of search.queries) {
+      vscode.postMessage({
+        type: 'searchCommitsByFile',
+        payload: { query, requestId: search.requestId },
+      });
+    }
   }
 }
 
@@ -143,7 +182,7 @@ const historyPane = new HistoryPane({
     setState({ tabPinned: pinned });
     vscode.postMessage({ type: 'setTabPinned', payload: { pinned } });
   },
-  onHistoryFilterChange: (text) => setState({ historyFilterText: text }),
+  onHistoryFilterChange: updateHistoryFilter,
   onClearFocus: () => {
     setState({ pinnedBranchFullNames: new Set(), ...selectRefPatch(null) });
     vscode.postMessage({ type: 'syncState', payload: selectionFromState(state) });
@@ -222,7 +261,11 @@ function applyRevealCommit(hash: string, outsideGraph = false): void {
       selectedBranchRef: null,
       pinnedBranchFullNames: new Set(),
       historyFilterText: '',
+      historyFileMatchingHashes: new Set(),
+      historyFileSearchPending: false,
     };
+    activeFileSearch = null;
+    fileSearchRequestId++;
     if (selectionChanged) {
       vscode.postMessage({ type: 'syncState', payload: selectionFromState(state) });
     }
@@ -246,6 +289,9 @@ function handleMessage(message: ExtensionToWebviewMessage): void {
     case 'repoSnapshot':
       state = reconcileStateWithSnapshot(state, message.payload, knownRemoteNames);
       message.payload.remoteGroups.forEach((group) => knownRemoteNames.add(group.remoteName));
+      if (parseHistoryFilterQuery(state.historyFilterText).fileTerms.length > 0) {
+        updateHistoryFilter(state.historyFilterText);
+      }
       render();
       pendingDetailRequests.clear();
       requestCommitDetailsIfNeeded(state.selectedCommitHash);
@@ -276,6 +322,9 @@ function handleMessage(message: ExtensionToWebviewMessage): void {
         },
         isLoadingMore: false,
       });
+      if (parseHistoryFilterQuery(state.historyFilterText).fileTerms.length > 0) {
+        updateHistoryFilter(state.historyFilterText);
+      }
       break;
     }
     case 'repoError':
@@ -285,6 +334,35 @@ function handleMessage(message: ExtensionToWebviewMessage): void {
       pendingDetailRequests.delete(message.payload.hash);
       setState({ commitDetails: cacheCommitDetails(state.commitDetails, message.payload) });
       break;
+    case 'fileSearchResults': {
+      const search = activeFileSearch;
+      if (
+        search === null ||
+        message.payload.requestId !== search.requestId ||
+        !search.queries.includes(message.payload.query) ||
+        search.results.has(message.payload.query)
+      ) {
+        break;
+      }
+      search.results.set(
+        message.payload.query,
+        [...new Set(message.payload.matchingHashes.map((hash) => hash.toLowerCase()))],
+      );
+      if (search.results.size < search.queries.length) {
+        break;
+      }
+      const first = new Set(search.results.get(search.queries[0]) ?? []);
+      for (const query of search.queries.slice(1)) {
+        const matches = new Set(search.results.get(query) ?? []);
+        for (const hash of first) {
+          if (!matches.has(hash)) {
+            first.delete(hash);
+          }
+        }
+      }
+      setState({ historyFileMatchingHashes: first, historyFileSearchPending: false });
+      break;
+    }
     case 'integrationsInfo':
       setState({ integrations: message.payload });
       break;

@@ -98,6 +98,10 @@ function runRefMenuAction(id: MenuActionId, target: RefTarget): void {
     case 'deleteBranch':
       postGitAction(id === 'checkoutRemote' ? 'checkoutRemoteBranch' : id, target.name);
       break;
+    case 'pushTag':
+    case 'deleteTag':
+      postGitAction(id, target.name);
+      break;
     case 'renameBranch':
       postGitAction('renameBranch', target.name);
       break;

@@ -1081,6 +1081,10 @@ button {
   opacity: 0.5;
 }
 
+.context-menu-item.danger:not(.disabled) .context-menu-label {
+  color: var(--vscode-errorForeground);
+}
+
 .context-menu-hint {
   font-size: 0.85em;
   opacity: 0.85;

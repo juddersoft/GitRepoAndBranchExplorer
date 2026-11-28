@@ -9,6 +9,7 @@ import { getLocalResourceRoots, getWebviewHtml } from './webviewResources';
 export const OPEN_REPOSITORY_COMMAND = 'gitRepoAndBranchExplorer.openRepository';
 export const REFRESH_COMMAND = 'gitRepoAndBranchExplorer.refresh';
 export const CLONE_REPOSITORY_COMMAND = 'gitRepoAndBranchExplorer.cloneRepository';
+export const STASH_FILE_COMMAND = 'gitRepoAndBranchExplorer.stashFile';
 /** Built-in command that selects (and, if needed, shows) this extension's Activity Bar container. */
 export const SHOW_CONTAINER_COMMAND = 'workbench.view.extension.gitRepoAndBranchExplorer-container';
 const TAB_PINNED_KEY = 'gitRepoAndBranchExplorer.tabPinned';
@@ -176,6 +177,10 @@ export class GitRepoPanel {
 
   public static async cloneRepository(): Promise<void> {
     await GitRepoPanel.coordinator?.cloneRepository();
+  }
+
+  public static async stashFile(uri?: vscode.Uri): Promise<void> {
+    await GitRepoPanel.coordinator?.stashFileByUri(uri);
   }
 
   public static disposeCurrent(): void {
