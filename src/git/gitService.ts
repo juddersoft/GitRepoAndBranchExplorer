@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import type { BranchInfo, ChangedFileEntry, CommitDetails, CommitNode, FileHistoryCommit, RefBadge, RemoteGroup, RepoSnapshot, StashInfo, TagInfo, WorkingTreeFile, WorktreeInfo } from '../types/git';
-import { isChangedFileStatus, isSafeRepoRelativePath, MAX_FILE_PATH_LENGTH } from '../types/messages';
+import type { BranchInfo, ChangedFileEntry, CommitDetails, CommitNode, FileHistoryCommit, RefBadge, RefComparisonResult, RemoteGroup, RepoSnapshot, StashInfo, TagInfo, WorkingTreeFile, WorktreeInfo } from '../types/git';
+import { isChangedFileStatus, isSafeRefArgument, isSafeRepoRelativePath, MAX_FILE_PATH_LENGTH } from '../types/messages';
 import type { ExecGitOptions } from './gitExecutor';
 import { execGit, GitExecutionError, validateGitRef } from './gitExecutor';
 import type { TrackedFetchResult } from './trackedFetch';
@@ -867,6 +867,58 @@ export class GitService {
       this.runGit(['diff-tree', '--no-commit-id', '--name-status', '-r', '--root', '-M', '--diff-merges=first-parent', '-z', hash], repoRoot),
     ]);
     return { hash, body: body.replace(/\s+$/, ''), files: parseDiffTreeOutput(diffTree) };
+  }
+
+  public async compareReferences(
+    repoRoot: string,
+    baseRef: string,
+    targetRef: string,
+    baseLabel?: string,
+    targetLabel?: string,
+    limit = 500,
+  ): Promise<RefComparisonResult> {
+    if (!Number.isSafeInteger(limit) || limit <= 0) {
+      throw new Error('Comparison commit limit must be a positive safe integer.');
+    }
+    for (const [role, ref] of [['base', baseRef], ['target', targetRef]] as const) {
+      if (ref !== 'HEAD' && !isValidCommitHash(ref) && !isSafeRefArgument(ref)) {
+        throw new Error(`Invalid ${role} reference "${ref}".`);
+      }
+    }
+    const [baseHash, targetHash] = await Promise.all([
+      this.resolveCommitHash(repoRoot, baseRef),
+      this.resolveCommitHash(repoRoot, targetRef),
+    ]);
+    if (baseHash === null) {
+      throw new Error(`Could not resolve base reference "${baseRef}".`);
+    }
+    if (targetHash === null) {
+      throw new Error(`Could not resolve target reference "${targetRef}".`);
+    }
+    const [logOutput, behindOutput, diffOutput] = await Promise.all([
+      this.runGit(
+        ['log', '--date-order', `--max-count=${limit + 1}`, `--format=${LOG_FORMAT}`, `${baseHash}..${targetHash}`],
+        repoRoot,
+      ),
+      this.runGit(['rev-list', '--count', `${targetHash}..${baseHash}`], repoRoot),
+      this.runGit(['diff', '--name-status', '-M', '-z', baseHash, targetHash], repoRoot),
+    ]);
+    const parsedCommits = parseGitLogOutput(logOutput, new Map());
+    const parsedBehind = Number.parseInt(behindOutput.trim(), 10);
+    const behindCount = Number.isSafeInteger(parsedBehind) && parsedBehind >= 0 ? parsedBehind : 0;
+    return {
+      repoRoot,
+      baseRef,
+      baseLabel: baseLabel ?? baseRef,
+      baseHash,
+      targetRef,
+      targetLabel: targetLabel ?? targetRef,
+      targetHash,
+      commits: parsedCommits.slice(0, limit),
+      hasMoreCommits: parsedCommits.length > limit,
+      behindCount,
+      changedFiles: parseDiffTreeOutput(diffOutput),
+    };
   }
 
   /** Returns file contents at `<hash>:<path>` (or `<hash>^:<path>`), or `""` if the path/parent does not exist. */

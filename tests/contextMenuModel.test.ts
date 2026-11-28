@@ -142,6 +142,17 @@ describe('buildFileHistoryCommitMenu', () => {
 });
 
 describe('buildRefMenu: local branches', () => {
+  it('guards compareWithCurrent and allows compareWithOther for ref types and busy/empty states', () => {
+    expect(item(buildRefMenu(snapshot, state(), branchRefTarget(main)), 'compareWithCurrent')).toMatchObject({
+      enabled: false,
+      reason: expect.stringMatching(/checked-out/i),
+    });
+    expect(item(buildRefMenu(snapshot, state(), branchRefTarget(feature)), 'compareWithCurrent').enabled).toBe(true);
+    expect(item(buildRefMenu(snapshot, state({ isBusy: true }), branchRefTarget(feature)), 'compareWithCurrent').enabled).toBe(false);
+    expect(item(buildRefMenu({ ...snapshot, commits: [] }, state({ snapshot: { ...snapshot, commits: [] } }), branchRefTarget(feature)), 'compareWithCurrent').enabled).toBe(false);
+    expect(item(buildRefMenu(snapshot, state(), branchRefTarget(feature)), 'compareWithOther').enabled).toBe(true);
+  });
+
   it('disables Create PR for a local branch tracking the remote default branch', () => {
     const withDefaultMain: RepoSnapshot = {
       ...snapshot,
@@ -171,7 +182,7 @@ describe('buildRefMenu: local branches', () => {
 
   it('offers the full branch menu', () => {
     expect(ids(buildRefMenu(snapshot, state(), branchRefTarget(feature)))).toEqual([
-      'checkout', 'merge', 'rebase', 'resetMixed', 'resetHard',
+      'checkout', 'merge', 'rebase', 'compareWithCurrent', 'compareWithOther', 'resetMixed', 'resetHard',
       'pull', 'push', 'pushAndOpenPr', 'fetch', 'createPrInBrowser', 'openBranchInBrowser',
       'createBranchHere', 'createWorktree', 'stashChanges', 'renameBranch', 'untrackBranch', 'isolate', 'deleteBranch',
     ]);
@@ -221,7 +232,7 @@ describe('buildRefMenu: local branches', () => {
   it('enables checkout, merge, rebase and delete for another branch, but not pull/push', () => {
     const menu = buildRefMenu(snapshot, state(), branchRefTarget(feature));
     expect(enabled(menu)).toEqual([
-      'checkout', 'merge', 'rebase', 'resetMixed', 'resetHard',
+      'checkout', 'merge', 'rebase', 'compareWithCurrent', 'compareWithOther', 'resetMixed', 'resetHard',
       'push', 'fetch', 'createBranchHere', 'createWorktree', 'renameBranch', 'isolate', 'deleteBranch',
     ]);
     expect(item(menu, 'pull').reason).toMatch(/check out/i);
@@ -235,7 +246,7 @@ describe('buildRefMenu: local branches', () => {
       expect(item(menu, id).enabled, id).toBe(false);
     }
     expect(enabled(menu)).toEqual([
-      'resetMixed', 'resetHard', 'pull', 'push', 'fetch', 'createBranchHere',
+      'compareWithOther', 'resetMixed', 'resetHard', 'pull', 'push', 'fetch', 'createBranchHere',
       'stashChanges', 'renameBranch', 'untrackBranch', 'isolate',
     ]);
   });
@@ -322,6 +333,17 @@ describe('buildRefMenu: local branches', () => {
 });
 
 describe('buildRefMenu: remote branches and tags', () => {
+  it('enables both comparison actions for remote branches and tags', () => {
+    for (const target of [originFeature]) {
+      const menu = buildRefMenu(snapshot, state(), branchRefTarget(target));
+      expect(item(menu, 'compareWithCurrent').enabled).toBe(true);
+      expect(item(menu, 'compareWithOther').enabled).toBe(true);
+    }
+    const tagMenu = buildRefMenu(snapshot, state(), tagRefTarget(snapshot.tags[0]));
+    expect(item(tagMenu, 'compareWithCurrent').enabled).toBe(true);
+    expect(item(tagMenu, 'compareWithOther').enabled).toBe(true);
+  });
+
   it('disables Create PR for a remote default branch and enables feature branches', () => {
     const remoteMain: BranchInfo = {
       ...originFeature,
@@ -357,11 +379,11 @@ describe('buildRefMenu: remote branches and tags', () => {
   it('offers a tracking checkout, merge and rebase for a remote branch, and never delete/pull/push', () => {
     const menu = buildRefMenu(snapshot, state(), branchRefTarget(originFeature));
     expect(ids(menu)).toEqual([
-      'checkoutRemote', 'merge', 'rebase', 'resetMixed', 'resetHard', 'createBranchHere', 'isolate', 'fetch',
+      'checkoutRemote', 'merge', 'rebase', 'compareWithCurrent', 'compareWithOther', 'resetMixed', 'resetHard', 'createBranchHere', 'isolate', 'fetch',
       'createPrInBrowser', 'openBranchInBrowser',
     ]);
     expect(enabled(menu)).toEqual([
-      'checkoutRemote', 'merge', 'rebase', 'resetMixed', 'resetHard', 'createBranchHere', 'isolate', 'fetch',
+      'checkoutRemote', 'merge', 'rebase', 'compareWithCurrent', 'compareWithOther', 'resetMixed', 'resetHard', 'createBranchHere', 'isolate', 'fetch',
     ]);
   });
 
@@ -378,7 +400,7 @@ describe('buildRefMenu: remote branches and tags', () => {
   it('offers branch creation, merge and rebase for a tag', () => {
     const menu = buildRefMenu(snapshot, state(), tagRefTarget(snapshot.tags[0]));
     expect(ids(menu)).toEqual([
-      'createBranchHere', 'pushTag', 'merge', 'rebase', 'resetMixed', 'resetHard', 'deleteTag',
+      'createBranchHere', 'pushTag', 'merge', 'rebase', 'compareWithCurrent', 'compareWithOther', 'resetMixed', 'resetHard', 'deleteTag',
     ]);
     expect(item(menu, 'pushTag').enabled).toBe(true);
     expect(item(menu, 'deleteTag').danger).toBe(true);
@@ -401,6 +423,12 @@ describe('buildRefMenu: remote branches and tags', () => {
 });
 
 describe('buildCommitMenu', () => {
+  it('includes compareWithCurrent and compareWithOther for commits', () => {
+    const menu = buildCommitMenu(snapshot, state(), find(C));
+    expect(item(menu, 'compareWithCurrent').enabled).toBe(true);
+    expect(item(menu, 'compareWithOther').enabled).toBe(true);
+  });
+
   const find = (hash: string): CommitNode => snapshot.commits.find((c) => c.hash === hash) as CommitNode;
   const worktree = (
     path: string,

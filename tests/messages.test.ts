@@ -63,6 +63,46 @@ describe('Phase 20 file and line history messages', () => {
   });
 });
 
+describe('Phase 20 compare references messages', () => {
+  it('accepts valid compare, close, swap and file-diff messages', () => {
+    expect(isWebviewToExtensionMessage(gitAction({ action: 'compareWithCurrent', target: 'feature/compare' }))).toBe(true);
+    expect(isWebviewToExtensionMessage(gitAction({ action: 'compareWithOther', target: 'refs/heads/main' }))).toBe(true);
+    expect(isWebviewToExtensionMessage(gitAction({ action: 'compareWithOther', target: HASH }))).toBe(true);
+    expect(isWebviewToExtensionMessage({ type: 'closeRefComparison' })).toBe(true);
+    expect(isWebviewToExtensionMessage({ type: 'swapRefComparison' })).toBe(true);
+    expect(isWebviewToExtensionMessage({
+      type: 'openCompareFileDiff',
+      payload: { filePath: 'src/file.ts', status: 'M' },
+    })).toBe(true);
+    expect(isWebviewToExtensionMessage({
+      type: 'openCompareFileDiff',
+      payload: { filePath: 'src/new.ts', oldPath: 'src/old.ts', status: 'R' },
+    })).toBe(true);
+  });
+
+  it('rejects unsafe compare file paths, statuses, extra keys and polluted payloads', () => {
+    for (const badPath of ['../secret', '/absolute', 'C:\\secret', 'C:secret', 'src/\u0000bad', 'src/\nbad']) {
+      expect(isWebviewToExtensionMessage({
+        type: 'openCompareFileDiff',
+        payload: { filePath: badPath, status: 'M' },
+      })).toBe(false);
+    }
+    expect(isWebviewToExtensionMessage({
+      type: 'openCompareFileDiff',
+      payload: { filePath: 'src/file.ts', status: 'X' },
+    })).toBe(false);
+    expect(isWebviewToExtensionMessage({
+      type: 'openCompareFileDiff',
+      payload: { filePath: 'src/file.ts', status: 'M', extra: true },
+    })).toBe(false);
+    expect(isWebviewToExtensionMessage({ type: 'closeRefComparison', extra: true })).toBe(false);
+    expect(isWebviewToExtensionMessage({ type: 'swapRefComparison', extra: true })).toBe(false);
+    expect(isWebviewToExtensionMessage(JSON.parse(
+      `{"type":"openCompareFileDiff","payload":{"filePath":"src/file.ts","status":"M","constructor":{"prototype":{"polluted":true}}},"__proto__":{"polluted":true}}`,
+    ))).toBe(false);
+  });
+});
+
 describe('cloneRepository message validation', () => {
   it('accepts the exact clone message and rejects extra or polluted keys', () => {
     expect(isWebviewToExtensionMessage({ type: 'cloneRepository' })).toBe(true);

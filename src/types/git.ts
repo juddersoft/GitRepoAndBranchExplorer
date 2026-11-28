@@ -114,6 +114,20 @@ export interface ChangedFileEntry {
   oldPath?: string;
 }
 
+export interface RefComparisonResult {
+  repoRoot: string;
+  baseRef: string;
+  baseLabel: string;
+  baseHash: string;
+  targetRef: string;
+  targetLabel: string;
+  targetHash: string;
+  commits: CommitNode[];
+  hasMoreCommits: boolean;
+  behindCount: number;
+  changedFiles: ChangedFileEntry[];
+}
+
 export interface CommitDetails {
   hash: string;
   /** Full commit message (subject and body). */

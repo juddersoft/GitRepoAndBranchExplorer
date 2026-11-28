@@ -6,6 +6,7 @@ import type {
   FileHistoryCommit,
   FileHistoryResult,
   RepoSnapshot,
+  RefComparisonResult,
   StashInfo,
   WorkspaceRepoInfo,
 } from './git';
@@ -41,6 +42,8 @@ export type GitAction =
   | 'checkoutRemoteBranch'
   | 'resetMixed'
   | 'resetHard'
+  | 'compareWithCurrent'
+  | 'compareWithOther'
   | 'createWorktree'
   | 'openWorktree'
   | 'removeWorktree'
@@ -73,6 +76,8 @@ export const GIT_ACTION_LABELS: Readonly<Record<GitAction, string>> = {
   checkoutRemoteBranch: 'Check Out as Local Branch',
   resetMixed: 'Reset (Keep Changes)',
   resetHard: 'Reset (Delete Changes)',
+  compareWithCurrent: 'Compare with Current Branch',
+  compareWithOther: 'Compare with Another Reference',
   createWorktree: 'Create Worktree',
   openWorktree: 'Open Worktree in New Window',
   removeWorktree: 'Remove Worktree',
@@ -109,6 +114,8 @@ export const GIT_ACTION_TARGETS: Readonly<Record<GitAction, GitActionTargetKind>
   checkoutRemoteBranch: 'ref',
   resetMixed: 'refOrCommit',
   resetHard: 'refOrCommit',
+  compareWithCurrent: 'refOrCommit',
+  compareWithOther: 'refOrCommit',
   createWorktree: 'optionalRef',
   openWorktree: 'path',
   removeWorktree: 'path',
@@ -177,6 +184,9 @@ export type WebviewToExtensionMessage =
   | { type: 'openInGitGraph' }
   | { type: 'openCommitOnGitHub'; payload: { hash: string } }
   | { type: 'closeFileHistory' }
+  | { type: 'closeRefComparison' }
+  | { type: 'swapRefComparison' }
+  | { type: 'openCompareFileDiff'; payload: { filePath: string; oldPath?: string; status: ChangedFileStatus } }
   | { type: 'loadMoreFileHistory' }
   | {
       type: 'compareFileRevisions';
@@ -253,6 +263,8 @@ export type ExtensionToWebviewMessage =
       payload: { filePath: string; commits: FileHistoryCommit[]; hasMore: boolean };
     }
   | { type: 'clearFileHistory' }
+  | { type: 'refComparisonLoaded'; payload: RefComparisonResult }
+  | { type: 'clearRefComparison' }
   | { type: 'fileSearchResults'; payload: { query: string; requestId: number; matchingHashes: string[] } }
   | { type: 'integrationsInfo'; payload: ExternalIntegrationsInfo }
   | { type: 'actionStatus'; payload: ActionStatusPayload }
@@ -451,7 +463,19 @@ export function isWebviewToExtensionMessage(value: unknown): value is WebviewToE
     case 'cloneRepository':
     case 'closeFileHistory':
     case 'loadMoreFileHistory':
+    case 'closeRefComparison':
+    case 'swapRefComparison':
       return hasOnlyFields(value, ['type']);
+    case 'openCompareFileDiff':
+      return (
+        hasOnlyFields(value, ['type', 'payload']) &&
+        Object.keys(value).length === 2 &&
+        payload !== null &&
+        hasOnlyFields(payload, ['filePath', 'oldPath', 'status']) &&
+        isSafeRepoRelativePath(ownField(payload, 'filePath')) &&
+        (ownField(payload, 'oldPath') === undefined || isSafeRepoRelativePath(ownField(payload, 'oldPath'))) &&
+        isChangedFileStatus(ownField(payload, 'status'))
+      );
     case 'compareFileRevisions':
       return (
         hasOnlyFields(value, ['type', 'payload']) &&
@@ -716,7 +740,7 @@ export function isExtensionToWebviewMessage(value: unknown): value is ExtensionT
   if (
     isSafeRecord(value) &&
     hasOnlyFields(value, ['type']) &&
-    ownField(value, 'type') === 'clearFileHistory'
+    (ownField(value, 'type') === 'clearFileHistory' || ownField(value, 'type') === 'clearRefComparison')
   ) {
     return true;
   }
@@ -760,6 +784,29 @@ export function isExtensionToWebviewMessage(value: unknown): value is ExtensionT
         Array.isArray(payload.commits) &&
         payload.commits.every(isFileHistoryCommitShape) &&
         typeof payload.hasMore === 'boolean'
+      );
+    case 'refComparisonLoaded':
+      return (
+        typeof payload.repoRoot === 'string' &&
+        isSafeRefArgument(payload.baseRef) &&
+        typeof payload.baseLabel === 'string' &&
+        isCommitHash(payload.baseHash) &&
+        isSafeRefArgument(payload.targetRef) &&
+        typeof payload.targetLabel === 'string' &&
+        isCommitHash(payload.targetHash) &&
+        Array.isArray(payload.commits) &&
+        payload.commits.every(isCommitNodeShape) &&
+        typeof payload.hasMoreCommits === 'boolean' &&
+        Number.isSafeInteger(payload.behindCount) &&
+        (payload.behindCount as number) >= 0 &&
+        Array.isArray(payload.changedFiles) &&
+        payload.changedFiles.every(
+          (file: unknown) =>
+            isSafeRecord(file) &&
+            isChangedFileStatus(ownField(file, 'status')) &&
+            isSafeRepoRelativePath(ownField(file, 'path')) &&
+            (ownField(file, 'oldPath') === undefined || isSafeRepoRelativePath(ownField(file, 'oldPath'))),
+        )
       );
     case 'fileHistoryAppended':
       return (

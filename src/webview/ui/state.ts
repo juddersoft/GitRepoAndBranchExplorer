@@ -228,6 +228,8 @@ export interface ExplorerUiState {
   isBusy: boolean;
   busyMessage: string | null;
   fileHistory: FileHistoryResult | null;
+  refComparison: import('../../types/git').RefComparisonResult | null;
+  refComparisonTab: 'files' | 'commits';
   selectedComparisonHashes: string[];
 }
 
@@ -268,6 +270,8 @@ export function createInitialState(): ExplorerUiState {
     isBusy: false,
     busyMessage: null,
     fileHistory: null,
+    refComparison: null,
+    refComparisonTab: 'files',
     selectedComparisonHashes: [],
   };
 }
@@ -673,7 +677,17 @@ export function reconcileStateWithSnapshot(
     expandedNodes,
     collapsedRepoNodes,
     ...(state.snapshot !== null && normalizeRepoKey(state.snapshot.repoRoot) !== normalizeRepoKey(snapshot.repoRoot)
-      ? { fileHistory: null, selectedComparisonHashes: [] }
+      ? { fileHistory: null, refComparison: null, refComparisonTab: 'files', selectedComparisonHashes: [] }
       : {}),
   };
+}
+
+export function fileHistoryStatePatch(result: FileHistoryResult | null): Pick<ExplorerUiState, 'fileHistory' | 'refComparison'> {
+  return { fileHistory: result, refComparison: null };
+}
+
+export function refComparisonStatePatch(
+  result: import('../../types/git').RefComparisonResult | null,
+): Pick<ExplorerUiState, 'fileHistory' | 'refComparison'> {
+  return { fileHistory: null, refComparison: result };
 }

@@ -29,7 +29,7 @@ import type { ParsedRemoteHost } from '../git/remoteUrlBuilder';
 import type { TrackedFetchResult } from '../git/trackedFetch';
 import { describeTrackedFetch, NOTHING_TO_FETCH_MESSAGE, planTrackedFetch } from '../git/trackedFetch';
 import { GitHubService } from '../github/githubService';
-import type { BranchInfo, ExternalIntegrationsInfo, FileHistoryResult, RepoSnapshot, WorkingTreeFile, WorkspaceRepoInfo } from '../types/git';
+import type { BranchInfo, ExternalIntegrationsInfo, FileHistoryResult, RefComparisonResult, RepoSnapshot, WorkingTreeFile, WorkspaceRepoInfo } from '../types/git';
 import type {
   ActionStatusPayload,
   ExtensionToWebviewMessage,
@@ -214,6 +214,8 @@ export class RepoCoordinator implements vscode.Disposable {
   private pendingCreateWorktreeDialog: CreateWorktreeDialogPayload | null = null;
   private activeFileHistory: FileHistoryResult | null = null;
   private pendingFileHistory: FileHistoryResult | null = null;
+  private activeRefComparison: RefComparisonResult | null = null;
+  private pendingRefComparison: RefComparisonResult | null = null;
   private isLoadingMoreCommits = false;
   private loadingMoreCommits: Promise<boolean> | null = null;
   private isSearchingForRevealCommit = false;
@@ -352,10 +354,14 @@ export class RepoCoordinator implements vscode.Disposable {
           if (this.activeFileHistory !== null && this.pendingFileHistory === null) {
             this.pendingFileHistory = this.activeFileHistory;
           }
+          if (this.activeRefComparison !== null && this.pendingRefComparison === null) {
+            this.pendingRefComparison = this.activeRefComparison;
+          }
           this.flushPendingRevealCommit();
           this.flushPendingCreateBranchDialog();
           this.flushPendingCreateWorktreeDialog();
           this.flushPendingFileHistory();
+          this.flushPendingRefComparison();
         }
         break;
       case 'requestRefresh':
@@ -462,6 +468,17 @@ export class RepoCoordinator implements vscode.Disposable {
         this.activeFileHistory = null;
         this.pendingFileHistory = null;
         this.broadcast({ type: 'clearFileHistory' });
+        break;
+      case 'closeRefComparison':
+        this.activeRefComparison = null;
+        this.pendingRefComparison = null;
+        this.broadcast({ type: 'clearRefComparison' });
+        break;
+      case 'swapRefComparison':
+        void this.swapRefComparison();
+        break;
+      case 'openCompareFileDiff':
+        void this.openCompareFileDiff(message.payload);
         break;
       case 'loadMoreFileHistory':
         void this.loadMoreFileHistory();
@@ -774,10 +791,35 @@ export class RepoCoordinator implements vscode.Disposable {
     }
 
     private showFileHistory(result: FileHistoryResult): void {
+      this.activeRefComparison = null;
+      this.pendingRefComparison = null;
+      this.broadcast({ type: 'clearRefComparison' });
       this.activeFileHistory = result;
       this.pendingFileHistory = result;
       this.host.openPanel();
       this.flushPendingFileHistory();
+    }
+
+    private showRefComparison(result: RefComparisonResult): void {
+      this.activeFileHistory = null;
+      this.pendingFileHistory = null;
+      this.broadcast({ type: 'clearFileHistory' });
+      this.activeRefComparison = result;
+      this.pendingRefComparison = result;
+      this.host.openPanel();
+      this.flushPendingRefComparison();
+    }
+
+    private flushPendingRefComparison(): void {
+      const result = this.pendingRefComparison;
+      const editor = this.surfaces.get('editor');
+      if (result === null || !editor || !this.readySurfaces.has('editor')) {
+        return;
+      }
+      editor.post({ type: 'refComparisonLoaded', payload: result });
+      if (this.pendingRefComparison === result) {
+        this.pendingRefComparison = null;
+      }
     }
 
     private flushPendingFileHistory(): void {
@@ -972,6 +1014,56 @@ export class RepoCoordinator implements vscode.Disposable {
         );
       } catch (err) {
         void vscode.window.showWarningMessage(`Could not open the file revision: ${describeError(err)}`);
+      }
+    }
+
+    private async swapRefComparison(): Promise<void> {
+      const comparison = this.activeRefComparison;
+      if (comparison === null || !this.ensureTrustedWorkspace()) {
+        return;
+      }
+      try {
+        this.showRefComparison(await this.gitService.compareReferences(
+          comparison.repoRoot,
+          comparison.targetRef,
+          comparison.baseRef,
+          comparison.targetLabel,
+          comparison.baseLabel,
+        ));
+      } catch (err) {
+        void vscode.window.showWarningMessage(`Could not swap the reference comparison: ${describeError(err)}`);
+      }
+    }
+
+    private async openCompareFileDiff(payload: {
+      filePath: string;
+      oldPath?: string;
+      status: import('../types/git').ChangedFileStatus;
+    }): Promise<void> {
+      const comparison = this.activeRefComparison;
+      if (comparison === null || !this.ensureTrustedWorkspace() || !this.gitDiffProvider) {
+        return;
+      }
+      const entry = comparison.changedFiles.find(
+        (candidate) =>
+          candidate.path === payload.filePath &&
+          candidate.status === payload.status &&
+          candidate.oldPath === payload.oldPath,
+      );
+      if (entry === undefined) {
+        void vscode.window.showWarningMessage('The selected comparison file is no longer available.');
+        return;
+      }
+      this.allowDiffForRepo(comparison.repoRoot);
+      try {
+        await this.gitDiffProvider.openReferenceFileDiff(
+          comparison.repoRoot,
+          { hash: comparison.baseHash, label: comparison.baseLabel },
+          { hash: comparison.targetHash, label: comparison.targetLabel },
+          { filePath: entry.path, oldPath: entry.oldPath, status: entry.status },
+        );
+      } catch (err) {
+        void vscode.window.showWarningMessage(`Could not open the reference comparison: ${describeError(err)}`);
       }
     }
 
@@ -1519,6 +1611,8 @@ export class RepoCoordinator implements vscode.Disposable {
     this.pendingCreateWorktreeDialog = null;
     this.activeFileHistory = null;
     this.pendingFileHistory = null;
+    this.activeRefComparison = null;
+    this.pendingRefComparison = null;
     this.gitDiffProvider?.clearAllowedRepoRoots();
     this.disposeGitWatcher();
     this.broadcast({ type: 'workspaceRepos', payload: { repos: [], activeRepoRoot: null } });
@@ -1548,6 +1642,9 @@ export class RepoCoordinator implements vscode.Disposable {
     this.activeFileHistory = null;
     this.pendingFileHistory = null;
     this.broadcast({ type: 'clearFileHistory' });
+    this.activeRefComparison = null;
+    this.pendingRefComparison = null;
+    this.broadcast({ type: 'clearRefComparison' });
     this.selectedRepoRoot = repository.repoRoot;
     void this.loadRepository();
   }
@@ -1717,6 +1814,87 @@ export class RepoCoordinator implements vscode.Disposable {
       case 'removeWorktree':
         await this.handleRemoveWorktree(target);
         break;
+      case 'compareWithCurrent':
+      case 'compareWithOther':
+        await this.handleRefComparison(action, target);
+        break;
+    }
+  }
+
+  private async handleRefComparison(
+    action: 'compareWithCurrent' | 'compareWithOther',
+    target: string | undefined,
+  ): Promise<void> {
+    const snapshot = this.lastSnapshot;
+    if (!this.ensureTrustedWorkspace() || snapshot === null || target === undefined) {
+      return;
+    }
+    const local = snapshot.localBranches.find(
+      (branch) => branch.name === target || branch.fullName === target,
+    );
+    const remote = snapshot.remoteGroups
+      .flatMap((group) => group.branches)
+      .find((branch) => branch.name === target || branch.fullName === target);
+    const tag = snapshot.tags.find((candidate) => candidate.name === target || candidate.fullName === target);
+    const commit = snapshot.commits.find(
+      (candidate) => candidate.hash === target.toLowerCase(),
+    );
+    const targetRef = local?.fullName ?? remote?.fullName ?? tag?.fullName ?? commit?.hash;
+    if (targetRef === undefined) {
+      void vscode.window.showWarningMessage('That reference is no longer available. Refresh the repository and try again.');
+      return;
+    }
+    const targetLabel =
+      local?.name ?? remote?.name ?? tag?.name ?? commit?.shortHash ?? target;
+
+    let baseRef: string;
+    let baseLabel: string;
+    if (action === 'compareWithCurrent') {
+      baseRef = snapshot.isDetachedHead ? 'HEAD' : snapshot.currentBranch;
+      baseLabel = baseRef;
+    } else {
+      const refs = [
+        ...snapshot.localBranches.map((branch) => ({
+          label: branch.name,
+          description: branch.isCurrent ? 'Current' : undefined,
+          ref: branch.fullName,
+          detail: 'Local branch',
+        })),
+        ...snapshot.remoteGroups.flatMap((group) =>
+          group.branches.map((branch) => ({
+            label: branch.name,
+            ref: branch.fullName,
+            detail: `Remote branch (${branch.remoteName})`,
+          })),
+        ),
+        ...snapshot.tags.map((candidate) => ({
+          label: candidate.name,
+          ref: candidate.fullName,
+          detail: 'Tag',
+        })),
+      ].filter((candidate) => candidate.ref !== targetRef);
+      const picked = await vscode.window.showQuickPick(refs, {
+        title: `Compare "${targetLabel}" with Reference`,
+        placeHolder: 'Select base reference to compare against',
+        ignoreFocusOut: true,
+      });
+      if (picked === undefined) {
+        return;
+      }
+      baseRef = picked.ref;
+      baseLabel = picked.label;
+    }
+    try {
+      const result = await this.gitService.compareReferences(
+        snapshot.repoRoot,
+        baseRef,
+        targetRef,
+        baseLabel,
+        targetLabel,
+      );
+      this.showRefComparison(result);
+    } catch (err) {
+      void vscode.window.showWarningMessage(`Could not compare references: ${describeError(err)}`);
     }
   }
 

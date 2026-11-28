@@ -13,6 +13,8 @@ import {
   filterTags,
   filterVisibleBadges,
   findRefTarget,
+  fileHistoryStatePatch,
+  refComparisonStatePatch,
   getFocusedRefs,
   getHeadHash,
   isAncestorOfHead,
@@ -99,6 +101,67 @@ describe('file history comparison selection', () => {
     };
     expect(reconcileStateWithSnapshot(withHistory, second, new Set())).toMatchObject({
       fileHistory: null,
+      selectedComparisonHashes: [],
+    });
+  });
+});
+
+describe('reference comparison state', () => {
+  it('keeps refComparison and fileHistory mutually exclusive', () => {
+    const history = {
+      kind: 'file' as const,
+      repoRoot: '/repo',
+      filePath: 'src/file.ts',
+      commits: [],
+      hasMore: false,
+    };
+    expect(fileHistoryStatePatch(history)).toEqual({ fileHistory: history, refComparison: null });
+    expect(refComparisonStatePatch(null)).toEqual({ fileHistory: null, refComparison: null });
+
+    const comparison = {
+      repoRoot: '/repo',
+      baseRef: 'refs/heads/main',
+      baseLabel: 'main',
+      baseHash: sha('a'),
+      targetRef: 'refs/heads/feature',
+      targetLabel: 'feature',
+      targetHash: sha('b'),
+      commits: [],
+      hasMoreCommits: false,
+      behindCount: 0,
+      changedFiles: [],
+    };
+    expect(refComparisonStatePatch(comparison)).toEqual({ fileHistory: null, refComparison: comparison });
+  });
+
+  it('resets both histories and comparison tab state when repositories change', () => {
+    const initial = createInitialState();
+    const first: RepoSnapshot = { ...snapshot, repoRoot: '/repo/a' };
+    const second: RepoSnapshot = { ...snapshot, repoRoot: '/repo/b' };
+    const state: ExplorerUiState = {
+      ...initial,
+      snapshot: first,
+      fileHistory: { kind: 'file', repoRoot: '/repo/a', filePath: 'src/file.ts', commits: [], hasMore: false },
+      refComparison: {
+        repoRoot: '/repo/a',
+        baseRef: 'main',
+        baseLabel: 'main',
+        baseHash: sha('a'),
+        targetRef: 'feature',
+        targetLabel: 'feature',
+        targetHash: sha('b'),
+        commits: [],
+        hasMoreCommits: false,
+        behindCount: 0,
+        changedFiles: [],
+      },
+      refComparisonTab: 'commits',
+      selectedComparisonHashes: [sha('a')],
+    };
+    expect(reconcileStateWithSnapshot(state, second, new Set())).toMatchObject({
+      fileHistory: null,
+      refComparison: null,
+      refComparisonTab: 'files',
       selectedComparisonHashes: [],
     });
   });

@@ -46,6 +46,10 @@ export interface HistoryPaneCallbacks {
   onCompareSelectedRevisions(): void;
   onCloseFileHistory(): void;
   onLoadMoreFileHistory(): void;
+  onRefComparisonTabChange(tab: 'files' | 'commits'): void;
+  onSwapRefComparison(): void;
+  onCloseRefComparison(): void;
+  onOpenCompareFileDiff(file: ChangedFileEntry): void;
   /** The user resized (or reset) a column; `widths` holds only the columns that differ from their defaults. */
   onColumnWidthsChange(widths: StoredColumnWidths): void;
 }
@@ -245,6 +249,12 @@ export class HistoryPane {
   private readonly fileHistoryBanner: HTMLElement;
   private readonly fileHistoryScope: HTMLElement;
   private readonly compareSelectedButton: HTMLButtonElement;
+  private readonly compareRefsBanner: HTMLElement;
+  private readonly compareRefsTitle: HTMLElement;
+  private readonly compareRefsSummary: HTMLElement;
+  private readonly compareFilesTab: HTMLButtonElement;
+  private readonly compareCommitsTab: HTMLButtonElement;
+  private readonly compareFilesPanel: HTMLElement;
 
   private visibleCommits: CommitNode[] = [];
   private graphLayout: GraphRowLayout[] = [];
@@ -462,11 +472,41 @@ export class HistoryPane {
     ]);
     this.fileHistoryBanner.hidden = true;
 
+    this.compareRefsTitle = el('span', { className: 'compare-refs-title' });
+    this.compareRefsSummary = el('span', { className: 'compare-refs-summary' });
+    this.compareFilesTab = button({ className: 'compare-tab-btn', label: 'Changed Files', showLabel: true });
+    this.compareCommitsTab = button({ className: 'compare-tab-btn', label: 'Commits', showLabel: true });
+    this.compareFilesTab.addEventListener('click', () => callbacks.onRefComparisonTabChange('files'));
+    this.compareCommitsTab.addEventListener('click', () => callbacks.onRefComparisonTabChange('commits'));
+    const swapComparison = button({ className: 'toolbar-button', label: 'Swap', showLabel: true });
+    swapComparison.addEventListener('click', () => callbacks.onSwapRefComparison());
+    const closeComparison = button({
+      className: 'toolbar-button',
+      label: 'Back to Repo History',
+      showLabel: true,
+    });
+    closeComparison.addEventListener('click', () => callbacks.onCloseRefComparison());
+    this.compareRefsBanner = el('div', { className: 'compare-refs-banner' }, [
+      el('div', { className: 'compare-refs-heading' }, [
+        this.compareRefsTitle,
+        this.compareRefsSummary,
+      ]),
+      el('div', { className: 'compare-refs-tabs' }, [this.compareFilesTab, this.compareCommitsTab]),
+      el('span', { className: 'toolbar-spacer' }),
+      swapComparison,
+      closeComparison,
+    ]);
+    this.compareRefsBanner.hidden = true;
+    this.compareFilesPanel = el('div', { className: 'compare-files-panel' });
+    this.compareFilesPanel.hidden = true;
+
     this.element = el('section', { className: 'pane pane-right' }, [
       toolbar,
       this.banner,
       this.fileHistoryBanner,
+      this.compareRefsBanner,
       breadcrumb,
+      this.compareFilesPanel,
       this.tableScroll,
       this.details,
     ]);
@@ -527,6 +567,7 @@ export class HistoryPane {
 
     this.renderBreadcrumb(state);
     this.renderFileHistoryBanner(state);
+    this.renderRefComparisonBanner(state);
     this.renderRows(state);
     this.renderLoadMoreFooter(state);
     this.renderDetails(state);
@@ -590,6 +631,88 @@ export class HistoryPane {
     this.compareSelectedButton.disabled = state.selectedComparisonHashes.length !== 2;
   }
 
+  private renderRefComparisonBanner(state: ExplorerUiState): void {
+    const comparison = state.refComparison;
+    this.compareRefsBanner.hidden = comparison === null;
+    if (comparison === null) {
+      this.compareFilesPanel.hidden = true;
+      this.tableScroll.hidden = false;
+      return;
+    }
+    const commitSuffix = comparison.hasMoreCommits ? '+' : '';
+    this.compareRefsTitle.textContent = `Compare: ${comparison.baseLabel} \u2192 ${comparison.targetLabel}`;
+    this.compareRefsSummary.textContent =
+      `${comparison.commits.length}${commitSuffix} commits ahead \u2022 ` +
+      `${comparison.behindCount} behind \u2022 ${comparison.changedFiles.length} files changed`;
+    this.compareFilesTab.textContent = `Changed Files (${comparison.changedFiles.length})`;
+    this.compareCommitsTab.textContent = `Commits (${comparison.commits.length}${commitSuffix})`;
+    this.compareFilesTab.classList.toggle('active', state.refComparisonTab === 'files');
+    this.compareCommitsTab.classList.toggle('active', state.refComparisonTab === 'commits');
+    this.compareFilesTab.setAttribute('aria-pressed', String(state.refComparisonTab === 'files'));
+    this.compareCommitsTab.setAttribute('aria-pressed', String(state.refComparisonTab === 'commits'));
+    this.compareFilesPanel.hidden = state.refComparisonTab !== 'files';
+    this.tableScroll.hidden = state.refComparisonTab !== 'commits';
+    if (state.refComparisonTab === 'files') {
+      this.renderCompareFiles(comparison);
+    }
+  }
+
+  private renderCompareFiles(
+    comparison: NonNullable<ExplorerUiState['refComparison']>,
+  ): void {
+    if (comparison.changedFiles.length === 0) {
+      this.compareFilesPanel.replaceChildren(
+        el('div', { className: 'muted', text: 'No file differences between these two references.' }),
+      );
+      return;
+    }
+    const rows = comparison.changedFiles.map((file) => {
+      const statusLabel = FILE_STATUS_LABELS[file.status];
+      const pathText = file.oldPath ? `${file.oldPath} \u2192 ${file.path}` : file.path;
+      const row = el(
+        'div',
+        {
+          className: 'changed-file',
+          title: `${statusLabel}: ${pathText}\nClick to compare the references`,
+          attrs: { role: 'button', tabindex: '0' },
+        },
+        [
+          el('span', {
+            className: `file-status file-status-${file.status}`,
+            text: file.status,
+            attrs: { 'aria-label': statusLabel },
+          }),
+          el('span', { className: 'file-path', text: pathText }),
+        ],
+      );
+      const openFile = button({
+        className: 'icon-button changed-file-open',
+        label: 'Open File',
+        icon: 'openFile',
+      });
+      openFile.title = 'Open File';
+      openFile.addEventListener('click', (event) => {
+        event.stopPropagation();
+        this.callbacks.onOpenFile?.({
+          hash: comparison.targetHash,
+          filePath: file.path,
+          status: file.status,
+        });
+      });
+      openFile.addEventListener('keydown', (event) => event.stopPropagation());
+      row.append(openFile);
+      row.addEventListener('click', () => this.callbacks.onOpenCompareFileDiff(file));
+      row.addEventListener('keydown', (event) => {
+        if (event.target === row && (event.key === 'Enter' || event.key === ' ')) {
+          event.preventDefault();
+          this.callbacks.onOpenCompareFileDiff(file);
+        }
+      });
+      return el('li', {}, [row]);
+    });
+    this.compareFilesPanel.replaceChildren(el('ul', { className: 'changed-file-list' }, rows));
+  }
+
   private renderRows(state: ExplorerUiState): void {
     const { snapshot } = state;
     if (!snapshot) {
@@ -600,9 +723,11 @@ export class HistoryPane {
       this.tbody.replaceChildren(this.placeholderRow(state.errorMessage ? 'No history available.' : 'Loading\u2026'));
       return;
     }
-    const nextVisibleCommits = state.fileHistory
-      ? [...state.fileHistory.commits]
-      : computeVisibleCommits(snapshot, state);
+    const nextVisibleCommits = state.refComparison
+      ? [...state.refComparison.commits]
+      : state.fileHistory
+        ? [...state.fileHistory.commits]
+        : computeVisibleCommits(snapshot, state);
     const nextKey = nextVisibleCommits.map((commit) => commit.hash).join(',');
     if (nextKey !== this.visibleCommitKey) {
       this.visibleCommits = nextVisibleCommits;
@@ -613,14 +738,18 @@ export class HistoryPane {
     } else {
       this.visibleCommits = nextVisibleCommits;
     }
-    const countText = state.fileHistory
-      ? `${this.visibleCommits.length} revision${this.visibleCommits.length === 1 ? '' : 's'}`
-      : describeCommitCount(snapshot, this.visibleCommits.length);
+    const countText = state.refComparison
+      ? `${this.visibleCommits.length}${state.refComparison.hasMoreCommits ? '+' : ''} commits ahead`
+      : state.fileHistory
+        ? `${this.visibleCommits.length} revision${this.visibleCommits.length === 1 ? '' : 's'}`
+        : describeCommitCount(snapshot, this.visibleCommits.length);
     this.commitCountStatus.hidden = countText === null;
     this.commitCountStatus.textContent = countText ?? '';
     if (this.visibleCommits.length === 0) {
       this.tbody.replaceChildren(this.placeholderRow(
-        state.fileHistory ? 'No revisions found for this file.' : describeEmptyHistory(snapshot, state),
+        state.refComparison
+          ? `No commits in ${state.refComparison.targetLabel} ahead of ${state.refComparison.baseLabel}.`
+          : state.fileHistory ? 'No revisions found for this file.' : describeEmptyHistory(snapshot, state),
       ));
       return;
     }
@@ -659,9 +788,11 @@ export class HistoryPane {
   }
 
   private renderLoadMoreFooter(state: ExplorerUiState): void {
-    const hasMore = state.fileHistory
-      ? state.fileHistory.kind === 'file' && state.fileHistory.hasMore
-      : state.snapshot?.hasMoreCommits === true;
+    const hasMore = state.refComparison !== null
+      ? false
+      : state.fileHistory
+        ? state.fileHistory.kind === 'file' && state.fileHistory.hasMore
+        : state.snapshot?.hasMoreCommits === true;
     const visible = hasMore || state.isLoadingMore;
     this.loadMoreFooter.hidden = !visible;
     this.loadMoreButton.hidden = state.isLoadingMore;

@@ -62,6 +62,8 @@ const mocks = vi.hoisted(() => ({
   openTwoRevisionFileDiff: vi.fn(),
   openRevisionVsWorkingTreeDiff: vi.fn(),
   openSingleRevisionFile: vi.fn(),
+  compareReferences: vi.fn(),
+  openReferenceFileDiff: vi.fn(),
   setAllowedRepoRoots: vi.fn(),
   buildShowUri: vi.fn(),
   stat: vi.fn(),
@@ -200,6 +202,7 @@ vi.mock('../src/git/gitService', () => ({
     deleteLocalTag = mocks.deleteLocalTag;
     pushTag = mocks.pushTag;
     searchCommitsByFile = mocks.searchCommitsByFile;
+    compareReferences = mocks.compareReferences;
   },
   isValidCommitHash: (value: string): boolean => /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value),
 }));
@@ -233,6 +236,7 @@ vi.mock('../src/git/gitDiffProvider', () => ({
     openTwoRevisionFileDiff = mocks.openTwoRevisionFileDiff;
     openRevisionVsWorkingTreeDiff = mocks.openRevisionVsWorkingTreeDiff;
     openSingleRevisionFile = mocks.openSingleRevisionFile;
+    openReferenceFileDiff = mocks.openReferenceFileDiff;
     setAllowedRepoRoots = mocks.setAllowedRepoRoots;
   },
 }));
@@ -385,6 +389,20 @@ describe('RepoCoordinator', () => {
     mocks.openRevisionVsWorkingTreeDiff.mockResolvedValue(undefined);
     mocks.openSingleRevisionFile.mockResolvedValue(undefined);
     mocks.resolveCommitHash.mockResolvedValue(sha('a'));
+    mocks.compareReferences.mockResolvedValue({
+      repoRoot: '/repo',
+      baseRef: 'refs/heads/main',
+      baseLabel: 'main',
+      baseHash: sha('a'),
+      targetRef: 'refs/heads/feature',
+      targetLabel: 'feature',
+      targetHash: sha('b'),
+      commits: [],
+      hasMoreCommits: false,
+      behindCount: 0,
+      changedFiles: [],
+    });
+    mocks.openReferenceFileDiff.mockResolvedValue(undefined);
     mocks.createBranch.mockResolvedValue(undefined);
     mocks.createTag.mockResolvedValue(undefined);
     mocks.deleteLocalTag.mockResolvedValue(undefined);
@@ -3458,6 +3476,158 @@ describe('RepoCoordinator', () => {
       });
       coordinator.handleMessage('editor', { type: 'closeFileHistory' });
       expect(editor.ofType('clearFileHistory')).toHaveLength(1);
+    });
+  });
+
+  describe('compare references', () => {
+    it('rejects compare actions in untrusted workspaces', async () => {
+      mocks.isTrusted = false;
+      await coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'compareWithCurrent', target: 'refs/heads/feature' },
+      });
+      await coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'compareWithOther', target: 'refs/heads/feature' },
+      });
+      coordinator.handleMessage('editor', { type: 'swapRefComparison' });
+      coordinator.handleMessage('editor', {
+        type: 'openCompareFileDiff',
+        payload: { filePath: 'src/file.ts', status: 'M' },
+      });
+      expect(mocks.compareReferences).not.toHaveBeenCalled();
+      expect(mocks.openReferenceFileDiff).not.toHaveBeenCalled();
+    });
+
+    it('loads a current-branch comparison, clears file history and flushes refComparisonLoaded', async () => {
+      await openBoth();
+      mocks.compareReferences.mockResolvedValue({
+        repoRoot: '/repo',
+        baseRef: 'main',
+        baseLabel: 'main',
+        baseHash: sha('a'),
+        targetRef: 'refs/heads/feature',
+        targetLabel: 'feature',
+        targetHash: sha('b'),
+        commits: [],
+        hasMoreCommits: false,
+        behindCount: 1,
+        changedFiles: [{ status: 'M', path: 'src/file.ts' }],
+      });
+      await coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'compareWithCurrent', target: 'refs/heads/feature' },
+      });
+      expect(mocks.compareReferences).toHaveBeenCalledWith('/repo', 'main', 'refs/heads/feature', 'main', 'feature');
+      expect(editor.ofType('clearFileHistory')).toHaveLength(1);
+      expect(editor.ofType('refComparisonLoaded')).toHaveLength(1);
+      expect(host.openPanel).toHaveBeenCalled();
+    });
+
+    it('opens a silent QuickPick for compareWithOther, cancels cleanly and loads on selection', async () => {
+      await openBoth();
+      mocks.showQuickPick.mockResolvedValueOnce(undefined);
+      await coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'compareWithOther', target: 'refs/heads/feature' },
+      });
+      expect(mocks.compareReferences).not.toHaveBeenCalled();
+      expect(mocks.showQuickPick.mock.calls[0][1]).toMatchObject({ ignoreFocusOut: true });
+      expect(mocks.showQuickPick.mock.calls[0][0]).not.toContainEqual(expect.objectContaining({ ref: 'refs/heads/feature' }));
+
+      mocks.showQuickPick.mockResolvedValueOnce({ label: 'main', ref: 'refs/heads/main', detail: 'Local branch' });
+      await coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'compareWithOther', target: 'refs/heads/feature' },
+      });
+      await vi.waitFor(() => expect(mocks.compareReferences).toHaveBeenCalled());
+      expect(mocks.compareReferences).toHaveBeenCalledWith('/repo', 'refs/heads/main', 'refs/heads/feature', 'main', 'feature');
+      expect(editor.ofType('refComparisonLoaded').length).toBeGreaterThan(0);
+    });
+
+    it('swaps the active comparison and broadcasts reversed refs', async () => {
+      await openBoth();
+      const initial = {
+        repoRoot: '/repo',
+        baseRef: 'main',
+        baseLabel: 'main',
+        baseHash: sha('a'),
+        targetRef: 'refs/heads/feature',
+        targetLabel: 'feature',
+        targetHash: sha('b'),
+        commits: [],
+        hasMoreCommits: false,
+        behindCount: 0,
+        changedFiles: [],
+      };
+      mocks.compareReferences
+        .mockResolvedValueOnce(initial)
+        .mockResolvedValueOnce({ ...initial, baseRef: 'refs/heads/feature', baseLabel: 'feature', targetRef: 'main', targetLabel: 'main' });
+      await coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'compareWithCurrent', target: 'refs/heads/feature' },
+      });
+      coordinator.handleMessage('editor', { type: 'swapRefComparison' });
+      await vi.waitFor(() => expect(mocks.compareReferences).toHaveBeenCalledTimes(2));
+      expect(mocks.compareReferences.mock.calls[1]).toEqual([
+        '/repo', 'refs/heads/feature', 'main', 'feature', 'main',
+      ]);
+      expect(editor.ofType('refComparisonLoaded').length).toBeGreaterThanOrEqual(2);
+    });
+
+    it('opens only changed-file entries and rejects forged paths', async () => {
+      const diffProvider = {
+        openReferenceFileDiff: vi.fn(),
+        openTwoRevisionFileDiff: vi.fn(),
+        openRevisionVsWorkingTreeDiff: vi.fn(),
+        openSingleRevisionFile: vi.fn(),
+        setAllowedRepoRoots: vi.fn(),
+      };
+      coordinator = new RepoCoordinator(host, diffProvider as never);
+      await openBoth();
+      mocks.compareReferences.mockResolvedValue({
+        repoRoot: '/repo',
+        baseRef: 'main',
+        baseLabel: 'main',
+        baseHash: sha('a'),
+        targetRef: 'feature',
+        targetLabel: 'feature',
+        targetHash: sha('b'),
+        commits: [],
+        hasMoreCommits: false,
+        behindCount: 0,
+        changedFiles: [
+          { status: 'M', path: 'src/file.ts' },
+          { status: 'R', path: 'src/new.ts', oldPath: 'src/old.ts' },
+        ],
+      });
+      await coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'compareWithCurrent', target: 'refs/heads/feature' },
+      });
+      coordinator.handleMessage('editor', {
+        type: 'openCompareFileDiff',
+        payload: { filePath: 'src/new.ts', oldPath: 'src/old.ts', status: 'R' },
+      });
+      await vi.waitFor(() => expect(diffProvider.openReferenceFileDiff).toHaveBeenCalled());
+
+      const callsBefore = diffProvider.openReferenceFileDiff.mock.calls.length;
+      coordinator.handleMessage('editor', {
+        type: 'openCompareFileDiff',
+        payload: { filePath: '../secret', status: 'M' },
+      });
+      await Promise.resolve();
+      expect(diffProvider.openReferenceFileDiff).toHaveBeenCalledTimes(callsBefore);
+    });
+
+    it('closes comparison state and broadcasts clearRefComparison', async () => {
+      await openBoth();
+      await coordinator.handleMessage('sidebar', {
+        type: 'gitAction',
+        payload: { action: 'compareWithCurrent', target: 'refs/heads/feature' },
+      });
+      coordinator.handleMessage('editor', { type: 'closeRefComparison' });
+      expect(editor.ofType('clearRefComparison')).toHaveLength(1);
     });
   });
 });

@@ -1544,6 +1544,33 @@ describe('GitService operations (fake runner)', () => {
   });
 });
 
+describe('GitService compareReferences validation', () => {
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])('rejects invalid limit %j', async (limit) => {
+    const runGit = vi.fn(async () => '');
+    await expect(new GitService(runGit).compareReferences('/repo', 'main', 'feature', undefined, undefined, limit))
+      .rejects.toThrow(/positive safe integer/i);
+    expect(runGit).not.toHaveBeenCalled();
+  });
+
+  it('rejects unresolved base and target refs with clear errors', async () => {
+    const runGit = vi.fn(async (args: readonly string[]) => {
+      const ref = args.at(-1)?.replace(/\^\{commit\}$/, '');
+      return ref === 'main' ? sha('a') : ref === 'feature' ? sha('b') : '';
+    });
+    const service = new GitService(runGit);
+    await expect(service.compareReferences('/repo', 'missing-base', 'feature')).rejects.toThrow(/Could not resolve base reference/);
+    await expect(service.compareReferences('/repo', 'main', 'missing-target')).rejects.toThrow(/Could not resolve target reference/);
+  });
+
+  it('rejects option-injection refs before spawning Git', async () => {
+    const runGit = vi.fn(async () => '');
+    const service = new GitService(runGit);
+    await expect(service.compareReferences('/repo', '--all', 'feature')).rejects.toThrow();
+    await expect(service.compareReferences('/repo', 'main', '-bad')).rejects.toThrow();
+    expect(runGit).not.toHaveBeenCalled();
+  });
+});
+
 describe.skipIf(!isGitAvailable())('GitService against real repositories', () => {
   const tempDirs: string[] = [];
   const service = new GitService();
@@ -1962,5 +1989,44 @@ describe.skipIf(!isGitAvailable())('GitService against real repositories', () =>
 
     await expect(service.initBareRepository(target, 'other')).rejects.toThrow(/Refusing to overwrite/);
     expect(fs.readFileSync(path.join(target, 'HEAD'), 'utf8').trim()).toBe('ref: refs/heads/main');
+  });
+
+  it('compares two diverged branches with commit and changed-file details', async () => {
+    const dir = makeTempDir();
+    await git(dir, 'init', '-b', 'main');
+    fs.writeFileSync(path.join(dir, 'modified.txt'), 'base\n');
+    fs.writeFileSync(path.join(dir, 'deleted.txt'), 'delete me\n');
+    fs.writeFileSync(path.join(dir, 'old-name.txt'), 'rename me\n');
+    await git(dir, 'add', '.');
+    await git(dir, 'commit', '-m', 'initial');
+
+    await git(dir, 'checkout', '-b', 'feature/compare');
+    fs.writeFileSync(path.join(dir, 'modified.txt'), 'feature\n');
+    fs.writeFileSync(path.join(dir, 'added.txt'), 'added\n');
+    fs.rmSync(path.join(dir, 'deleted.txt'));
+    await git(dir, 'add', '-A');
+    await git(dir, 'commit', '-m', 'feature first changes');
+    await git(dir, 'mv', 'old-name.txt', 'renamed.txt');
+    await git(dir, 'commit', '-m', 'feature rename');
+
+    await git(dir, 'checkout', 'main');
+    fs.writeFileSync(path.join(dir, 'main-only.txt'), 'main\n');
+    await git(dir, 'add', 'main-only.txt');
+    await git(dir, 'commit', '-m', 'main unique');
+
+    const result = await service.compareReferences(dir, 'main', 'feature/compare');
+    expect(result.commits).toHaveLength(2);
+    expect(result.hasMoreCommits).toBe(false);
+    expect(result.behindCount).toBe(1);
+    expect(result.changedFiles).toEqual(expect.arrayContaining([
+      { status: 'A', path: 'added.txt' },
+      { status: 'M', path: 'modified.txt' },
+      { status: 'D', path: 'deleted.txt' },
+      { status: 'R', path: 'renamed.txt', oldPath: 'old-name.txt' },
+    ]));
+
+    const limited = await service.compareReferences(dir, 'main', 'feature/compare', undefined, undefined, 1);
+    expect(limited.commits).toHaveLength(1);
+    expect(limited.hasMoreCommits).toBe(true);
   });
 }, 60_000);

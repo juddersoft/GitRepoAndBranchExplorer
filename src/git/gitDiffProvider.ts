@@ -208,6 +208,46 @@ export class GitShowContentProvider implements vscode.TextDocumentContentProvide
     );
   }
 
+  public async openReferenceFileDiff(
+    repoRoot: string,
+    base: { hash: string; label: string },
+    target: { hash: string; label: string },
+    entry: { filePath: string; oldPath?: string; status: ChangedFileStatus },
+  ): Promise<void> {
+    this.ensureTrustedWorkspace();
+    const sanitizeLabel = (label: string): string =>
+      label.replace(/[/\\[\]\x00-\x1f\x7f]/g, '').slice(0, 40);
+    const safeBaseLabel = sanitizeLabel(base.label);
+    const safeTargetLabel = sanitizeLabel(target.label);
+    const leftPath =
+      (entry.status === 'R' || entry.status === 'C') && entry.oldPath !== undefined
+        ? entry.oldPath
+        : entry.filePath;
+    const leftUri = buildShowUri(
+      repoRoot,
+      `${base.hash}:${leftPath}`,
+      leftPath,
+      `BASE ${safeBaseLabel} • ${base.hash.slice(0, 8)}`,
+    );
+    const rightUri = buildShowUri(
+      repoRoot,
+      `${target.hash}:${entry.filePath}`,
+      entry.filePath,
+      `TARGET ${safeTargetLabel} • ${target.hash.slice(0, 8)}`,
+    );
+    const oldName = path.posix.basename(leftPath);
+    const newName = path.posix.basename(entry.filePath);
+    const fileLabel =
+      entry.status === 'R' || entry.status === 'C' ? `${oldName} → ${newName}` : newName;
+    await vscode.commands.executeCommand(
+      'vscode.diff',
+      leftUri,
+      rightUri,
+      `${fileLabel} — BASE (${base.label}) ↔ TARGET (${target.label})`,
+      { preview: true },
+    );
+  }
+
   private ensureTrustedWorkspace(): void {
     if (!vscode.workspace.isTrusted) {
       throw new Error(WORKSPACE_TRUST_REQUIRED_MESSAGE);

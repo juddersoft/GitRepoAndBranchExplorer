@@ -46,6 +46,8 @@ export type MenuActionId =
   | 'revertMerge'
   | 'resetMixed'
   | 'resetHard'
+  | 'compareWithCurrent'
+  | 'compareWithOther'
   | 'copyHash'
   | 'openGitGraph'
   | 'openRepoInBrowser'
@@ -144,6 +146,25 @@ export function buildRefMenu(snapshot: RepoSnapshot, state: ExplorerUiState, tar
     target.kind === 'local' && Boolean(target.branch?.worktreePath) && !target.branch?.isCurrent;
   const hasCurrentBranch = !detached && snapshot.localBranches.some((branch) => branch.isCurrent);
   const currentName = detached ? 'Current Branch' : snapshot.currentBranch;
+  const currentBranchLabel = snapshot.isDetachedHead ? 'HEAD' : snapshot.currentBranch;
+  const compareEntries = [
+    gitActionItem(
+      'compareWithCurrent',
+      `Compare with ${currentBranchLabel}`,
+      'compareWithCurrent',
+      firstReason(
+        busy,
+        target.kind === 'local' && target.branch?.isCurrent === true && 'This is the checked-out branch.',
+        snapshot.commits.length === 0 && 'No commits are loaded.',
+      ),
+    ),
+    gitActionItem(
+      'compareWithOther',
+      'Compare with Another Reference\u2026',
+      'compareWithOther',
+      firstReason(busy, snapshot.commits.length === 0 && 'No commits are loaded.'),
+    ),
+  ];
 
   const integrateReason = (alreadyMergedCheck: boolean): string | undefined =>
     firstReason(
@@ -181,6 +202,8 @@ export function buildRefMenu(snapshot: RepoSnapshot, state: ExplorerUiState, tar
       merge,
       rebase,
       SEPARATOR,
+      ...compareEntries,
+      SEPARATOR,
       ...resetEntries,
       SEPARATOR,
       gitActionItem('deleteTag', 'Delete Tag\u2026', 'deleteTag', firstReason(busy), true),
@@ -208,6 +231,8 @@ export function buildRefMenu(snapshot: RepoSnapshot, state: ExplorerUiState, tar
       SEPARATOR,
       merge,
       rebase,
+      SEPARATOR,
+      ...compareEntries,
       SEPARATOR,
       ...resetEntries,
       SEPARATOR,
@@ -252,6 +277,8 @@ export function buildRefMenu(snapshot: RepoSnapshot, state: ExplorerUiState, tar
     SEPARATOR,
     merge,
     rebase,
+    SEPARATOR,
+    ...compareEntries,
     SEPARATOR,
     ...resetEntries,
     SEPARATOR,
@@ -416,6 +443,21 @@ export function buildCommitMenu(snapshot: RepoSnapshot, state: ExplorerUiState, 
   );
   const hasCurrentBranch = !snapshot.isDetachedHead && snapshot.localBranches.some((branch) => branch.isCurrent);
   const currentLabel = snapshot.isDetachedHead ? 'Current Branch' : snapshot.currentBranch;
+  const currentBranchLabel = snapshot.isDetachedHead ? 'HEAD' : snapshot.currentBranch;
+  const compareEntries = [
+    gitActionItem(
+      'compareWithCurrent',
+      `Compare with ${currentBranchLabel}`,
+      'compareWithCurrent',
+      firstReason(busy, snapshot.commits.length === 0 && 'No commits are loaded.'),
+    ),
+    gitActionItem(
+      'compareWithOther',
+      'Compare with Another Reference\u2026',
+      'compareWithOther',
+      firstReason(busy, snapshot.commits.length === 0 && 'No commits are loaded.'),
+    ),
+  ];
   const resetReason = firstReason(
     busy,
     snapshot.isDetachedHead && DETACHED_REASON,
@@ -453,6 +495,8 @@ export function buildCommitMenu(snapshot: RepoSnapshot, state: ExplorerUiState, 
     isMerge
       ? item('revertMerge', 'Revert Merge Commit (Mainline 1)…', firstReason(busy, noHead))
       : item('revert', 'Revert', firstReason(busy, noHead)),
+    SEPARATOR,
+    ...compareEntries,
     SEPARATOR,
     item('resetMixed', `Reset ${currentLabel} Here — Keep Changes (--mixed)…`, resetReason),
     item('resetHard', `Reset ${currentLabel} Here — Delete Changes (--hard)…`, resetReason),

@@ -96,6 +96,8 @@ function runRefMenuAction(id: MenuActionId, target: RefTarget): void {
     case 'merge':
     case 'rebase':
     case 'deleteBranch':
+    case 'compareWithCurrent':
+    case 'compareWithOther':
       postGitAction(id === 'checkoutRemote' ? 'checkoutRemoteBranch' : id, target.name);
       break;
     case 'pushTag':

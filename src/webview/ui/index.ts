@@ -17,6 +17,8 @@ import {
   createInitialState,
   normalizeSelection,
   reconcileStateWithSnapshot,
+  fileHistoryStatePatch,
+  refComparisonStatePatch,
   selectionFromState,
   selectionPatch,
   selectRefPatch,
@@ -119,6 +121,8 @@ function runCommitMenuAction(id: MenuActionId, commit: CommitNode): void {
     case 'revertMerge':
     case 'resetMixed':
     case 'resetHard':
+    case 'compareWithCurrent':
+    case 'compareWithOther':
       postGitAction(id, commit.hash);
       break;
     case 'openGitGraph':
@@ -286,6 +290,19 @@ const historyPane = new HistoryPane({
     setState({ isLoadingMore: true });
     vscode.postMessage({ type: 'loadMoreFileHistory' });
   },
+  onRefComparisonTabChange: (tab) => setState({ refComparisonTab: tab }),
+  onSwapRefComparison: () => vscode.postMessage({ type: 'swapRefComparison' }),
+  onCloseRefComparison: () => {
+    setState({ refComparison: null, refComparisonTab: 'files', selectedCommitHash: null });
+    vscode.postMessage({ type: 'closeRefComparison' });
+  },
+  onOpenCompareFileDiff: (file) =>
+    vscode.postMessage({
+      type: 'openCompareFileDiff',
+      payload: file.oldPath === undefined
+        ? { filePath: file.path, status: file.status }
+        : { filePath: file.path, oldPath: file.oldPath, status: file.status },
+    }),
   onColumnWidthsChange: (widths) => {
     columnWidths = widths;
     persist();
@@ -413,7 +430,7 @@ function handleMessage(message: ExtensionToWebviewMessage): void {
     }
     case 'fileHistoryLoaded':
       setState({
-        fileHistory: message.payload,
+        ...fileHistoryStatePatch(message.payload),
         selectedComparisonHashes: [],
         selectedCommitHash: null,
         isLoading: false,
@@ -444,6 +461,19 @@ function handleMessage(message: ExtensionToWebviewMessage): void {
     }
     case 'clearFileHistory':
       setState({ fileHistory: null, selectedComparisonHashes: [], isLoadingMore: false });
+      break;
+    case 'refComparisonLoaded':
+      setState({
+        ...refComparisonStatePatch(message.payload),
+        refComparisonTab: 'files',
+        selectedComparisonHashes: [],
+        selectedCommitHash: null,
+        isLoading: false,
+        isLoadingMore: false,
+      });
+      break;
+    case 'clearRefComparison':
+      setState({ refComparison: null, refComparisonTab: 'files', isLoadingMore: false });
       break;
     case 'repoError':
       setState({ snapshot: null, errorMessage: message.payload.message, isLoading: false, selectedCommitHash: null });

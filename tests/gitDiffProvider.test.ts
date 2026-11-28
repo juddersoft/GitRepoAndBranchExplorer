@@ -126,6 +126,90 @@ describe('Phase 20 file history diff helpers', () => {
   });
 });
 
+describe('Phase 20 reference comparison diffs', () => {
+  it('rejects untrusted workspaces', async () => {
+    mocks.isTrusted = false;
+    const provider = new GitShowContentProvider(new GitService(vi.fn(async () => '')));
+    await expect(provider.openReferenceFileDiff(
+      '/repo',
+      { hash: 'a'.repeat(40), label: 'main' },
+      { hash: 'b'.repeat(40), label: 'feature' },
+      { filePath: 'src/file.ts', status: 'M' },
+    )).rejects.toThrow(WORKSPACE_TRUST_REQUIRED_MESSAGE);
+    mocks.isTrusted = true;
+  });
+
+  it('sanitizes labels in display paths and preserves intact parseable URI queries', async () => {
+    const provider = new GitShowContentProvider(new GitService(vi.fn(async () => '')));
+    mocks.executeCommand.mockClear();
+    const dirtyBase = `main/branch\\name[]\u0001` + 'x'.repeat(50);
+    const dirtyTarget = `feature[1]\\name/\u0007` + 'y'.repeat(50);
+    await provider.openReferenceFileDiff(
+      '/repo/project',
+      { hash: 'a'.repeat(40), label: dirtyBase },
+      { hash: 'b'.repeat(40), label: dirtyTarget },
+      { filePath: 'src/file.ts', status: 'M' },
+    );
+    const [, left, right, title] = mocks.executeCommand.mock.calls[0];
+    const leftUri = left as unknown as { path: string; query: string };
+    const rightUri = right as unknown as { path: string; query: string };
+    expect(leftUri.path).not.toMatch(/[\\\x00-\x1f\x7f]/);
+    expect(rightUri.path).not.toMatch(/[\\\x00-\x1f\x7f]/);
+    expect(leftUri.path).not.toContain('name]');
+    expect(rightUri.path).not.toContain('name[');
+    expect(leftUri.path).toContain('[BASE ');
+    expect(rightUri.path).toContain('[TARGET ');
+    expect(JSON.parse(leftUri.query)).toEqual({
+      repoRoot: '/repo/project',
+      revSpec: `${'a'.repeat(40)}:src/file.ts`,
+    });
+    expect(JSON.parse(rightUri.query)).toEqual({
+      repoRoot: '/repo/project',
+      revSpec: `${'b'.repeat(40)}:src/file.ts`,
+    });
+    expect(title).toContain('BASE (');
+    expect(title).toContain('↔ TARGET (');
+  });
+
+  it('uses unmistakable BASE and TARGET URI tags and title labels', async () => {
+    const provider = new GitShowContentProvider(new GitService(vi.fn(async () => '')));
+    mocks.executeCommand.mockClear();
+    await provider.openReferenceFileDiff(
+      '/repo',
+      { hash: 'a'.repeat(40), label: 'main' },
+      { hash: 'b'.repeat(40), label: 'release/v1' },
+      { filePath: 'src/file.ts', status: 'M' },
+    );
+    expect(mocks.executeCommand).toHaveBeenCalledWith(
+      'vscode.diff',
+      expect.objectContaining({ path: expect.stringContaining('[BASE main •') }),
+      expect.objectContaining({ path: expect.stringContaining('[TARGET releasev1 •') }),
+      'file.ts — BASE (main) ↔ TARGET (release/v1)',
+      { preview: true },
+    );
+  });
+
+  it('uses oldPath on the base URI and renders old basename to new basename for renames and copies', async () => {
+    const provider = new GitShowContentProvider(new GitService(vi.fn(async () => '')));
+    for (const status of ['R', 'C'] as const) {
+      mocks.executeCommand.mockClear();
+      await provider.openReferenceFileDiff(
+        '/repo',
+        { hash: 'a'.repeat(40), label: 'main' },
+        { hash: 'b'.repeat(40), label: 'feature' },
+        { filePath: 'src/new-name.ts', oldPath: 'src/old-name.ts', status },
+      );
+      expect(mocks.executeCommand).toHaveBeenCalledWith(
+        'vscode.diff',
+        expect.objectContaining({ query: JSON.stringify({ repoRoot: '/repo', revSpec: `${'a'.repeat(40)}:src/old-name.ts` }) }),
+        expect.objectContaining({ query: JSON.stringify({ repoRoot: '/repo', revSpec: `${'b'.repeat(40)}:src/new-name.ts` }) }),
+        'old-name.ts → new-name.ts — BASE (main) ↔ TARGET (feature)',
+        { preview: true },
+      );
+    }
+  });
+});
+
 describe('Git diff repository authorization', () => {
   it('normalizes trailing separators and Windows casing', () => {
     expect(normalizeRepoRootPath('/repo/project///', 'linux')).toBe('/repo/project');

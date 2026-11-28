@@ -96,6 +96,27 @@ describe('Phase 20 file history and revision security', () => {
   });
 });
 
+describe('Phase 20 reference comparison security', () => {
+  it.each(['--all', '-bad'])('rejects compare option-injection ref %j before spawning Git', async (ref) => {
+    const runGit = vi.fn(async () => '');
+    await expect(new GitService(runGit).compareReferences('/repo', ref, 'main')).rejects.toThrow();
+    expect(runGit).not.toHaveBeenCalled();
+  });
+
+  it('keeps the compare banner and changed-file list out of static DOM sinks', () => {
+    const uiDir = path.resolve('src/webview/ui');
+    const sources = fs.readdirSync(uiDir)
+      .filter((name) => name.endsWith('.ts'))
+      .map((name) => fs.readFileSync(path.join(uiDir, name), 'utf8'));
+    for (const source of sources) {
+      expect(source).not.toMatch(/\.(innerHTML|outerHTML)\b|insertAdjacentHTML|document\.write|eval\s*\(/);
+    }
+    const historyPane = fs.readFileSync(path.join(uiDir, 'HistoryPane.ts'), 'utf8');
+    expect(historyPane).toContain('compare-refs-banner');
+    expect(historyPane).toContain('changed-file-list');
+  });
+});
+
 describe('tag and file-search injection guards', () => {
   it.each(['--delete', '-a', 'v1..v2'])('rejects adversarial tag name %j at both boundaries', async (tag) => {
     expect(isWebviewToExtensionMessage({

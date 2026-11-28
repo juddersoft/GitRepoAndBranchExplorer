@@ -1122,6 +1122,68 @@ button {
   white-space: nowrap;
 }
 
+.compare-refs-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 48px;
+  padding: 7px 10px;
+  color: var(--vscode-editor-foreground);
+  background: var(--vscode-editorWidget-background);
+  border-top: 1px solid var(--vscode-focusBorder);
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+.compare-refs-heading {
+  display: flex;
+  min-width: 180px;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.compare-refs-title {
+  font-weight: 600;
+}
+
+.compare-refs-summary {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.9em;
+}
+
+.compare-refs-tabs {
+  display: flex;
+  gap: 2px;
+}
+
+.compare-tab-btn {
+  padding: 4px 8px;
+  color: var(--vscode-button-secondaryForeground);
+  background: var(--vscode-button-secondaryBackground);
+  border: 1px solid transparent;
+  border-radius: 2px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.compare-tab-btn:hover {
+  background: var(--vscode-button-secondaryHoverBackground);
+}
+
+.compare-tab-btn.active {
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+  border-color: var(--vscode-focusBorder);
+}
+
+.compare-files-panel {
+  flex: 1;
+  min-height: 0;
+  padding: 8px 10px;
+  overflow: auto;
+  color: var(--vscode-editor-foreground);
+  background: var(--vscode-editor-background);
+}
+
 .table-scroll {
   flex: 1;
   min-height: 0;
